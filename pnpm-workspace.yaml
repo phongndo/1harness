@@ -1,0 +1,11 @@
+# The requested TSRS release was published on the research date. Keep release-age
+# exceptions restricted to that exact compiler release and its platform packages.
+minimumReleaseAgeExclude:
+  - "@tsrs/darwin-arm64@0.20.1-ts7.1.0-beta"
+  - "@tsrs/darwin-x64@0.20.1-ts7.1.0-beta"
+  - "@tsrs/linux-arm64-gnu@0.20.1-ts7.1.0-beta"
+  - "@tsrs/linux-arm64-musl@0.20.1-ts7.1.0-beta"
+  - "@tsrs/linux-x64-gnu@0.20.1-ts7.1.0-beta"
+  - "@tsrs/linux-x64-musl@0.20.1-ts7.1.0-beta"
+  - "@tsrs/win32-x64@0.20.1-ts7.1.0-beta"
+  - tsrs@0.20.1-ts7.1.0-beta

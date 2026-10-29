@@ -1,0 +1,29 @@
+{
+  "name": "1harness",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A programmable control surface for agent harnesses, locally and remotely.",
+  "bin": {
+    "1harness": "./dist/cli.js"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "node src/cli.ts",
+    "build": "tsrs --project tsconfig.build.json",
+    "typecheck": "tsrs --noEmit",
+    "lint": "oxlint --deny-warnings",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "check": "pnpm typecheck && pnpm lint && pnpm format:check"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "oxfmt": "0.75.0",
+    "oxlint": "1.90.0",
+    "tsrs": "0.20.1-ts7.1.0-beta"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@11.27.0"
+}
