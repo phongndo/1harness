@@ -11,10 +11,15 @@
     "dev": "node src/cli.ts",
     "build": "tsrs --project tsconfig.build.json",
     "typecheck": "tsrs --noEmit",
+    "test": "node --test \"src/**/*.test.ts\"",
     "lint": "oxlint --deny-warnings",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
-    "check": "pnpm typecheck && pnpm lint && pnpm format:check"
+    "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.312",
+    "@ff-labs/fff-node": "0.11.0"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

@@ -10,7 +10,8 @@
     "erasableSyntaxOnly": true,
     "forceConsistentCasingInFileNames": true,
     "types": ["node"],
-    "noEmit": true
+    "noEmit": true,
+    "rewriteRelativeImportExtensions": true
   },
   "include": ["src/**/*.ts"]
 }

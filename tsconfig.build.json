@@ -5,7 +5,8 @@
     "outDir": "dist",
     "noEmit": false,
     "noEmitOnError": true,
-    "sourceMap": true,
-    "rewriteRelativeImportExtensions": true
-  }
+    "sourceMap": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
 }
