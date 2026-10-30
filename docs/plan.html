@@ -1299,8 +1299,8 @@
         </nav>
         <div class="sidebar-footer">
           <button class="print-btn" id="print-plan" type="button">Print / save as PDF ↗</button
-          ><strong>Design proposal</strong><br />Reviewed 28 October 2026.<br />Architecture is not
-          implemented.
+          ><strong>Design proposal</strong><br />Reviewed 28 October 2026.<br />Phase 01 is
+          implemented; the host is not.
         </div>
       </aside>
       <main id="main">
@@ -1325,15 +1325,16 @@
             <div>
               <b>Implemented in this repository</b>
               <p>
-                Private local Git scaffold; Nix flakes; pnpm; TSRS; Oxlint; Oxfmt; a
-                <code>1harness</code> CLI with help and version output.
+                Private local Git scaffold; Nix flakes; pnpm; TSRS; Oxlint; Oxfmt; Claude Code and
+                Codex drivers behind one event model; an inline terminal UI, all in one local
+                process.
               </p>
             </div>
             <div class="proposed">
               <b>Proposed, not implemented</b>
               <p>
-                The host, harness drivers, persistent execution, remote connections, SDK, terminal
-                agent view, extension worker, and orchestration MCP described below.
+                The host, persistent execution, remote connections, SDK, extension worker, and
+                orchestration MCP described below.
               </p>
             </div>
           </div>
@@ -2091,15 +2092,16 @@ await session.cancel({ runId: run.id }); // explicit execution control</code></p
             <article class="milestone">
               <div class="phase">01</div>
               <div>
-                <h3>Two real harness drivers <span class="phase-state">Proposed</span></h3>
+                <h3>Two real harness drivers <span class="phase-state done">Implemented</span></h3>
                 <p>
-                  Drive one real local session end to end, then a second harness—initial candidates
-                  Codex and Pi. Keep the common interface small and make capability differences
-                  visible.
+                  Claude Code through the Claude Agent SDK and Codex through app-server, with a
+                  basic inline terminal UI pulled forward from phase 05. The common interface is
+                  small; capability differences are explicit.
                 </p>
                 <div class="acceptance">
-                  Prove: submit, stream, handle interaction, detect real completion, and cancel. Two
-                  adapters establish which operations genuinely belong in the common contract.
+                  Checked against real sessions of both: submit, stream, approvals, questions, plan
+                  mode, steering, queued follow-ups, interrupt, and resume. Translation and queue
+                  behavior have unit tests; there are no recorded replay fixtures yet.
                 </div>
               </div>
             </article>
@@ -2455,9 +2457,9 @@ await session.cancel({ runId: run.id }); // explicit execution control</code></p
           </ol>
           <div class="end-note">
             1harness / working architecture plan. This page explains a proposed implementation. The
-            only implemented product behavior currently represented here is the repository
-            scaffold’s help/version CLI. All interactive examples run locally in this page and do
-            not start agents or contact execution hosts.
+            implemented product behavior is phase 01: local Claude Code and Codex sessions in one
+            terminal UI. All interactive examples run locally in this page and do not start agents
+            or contact execution hosts.
           </div>
         </section>
       </main>
