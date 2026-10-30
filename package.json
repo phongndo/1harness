@@ -7,6 +7,12 @@
     "1harness": "./dist/cli.js"
   },
   "type": "module",
+  "exports": {
+    "./extension": {
+      "types": "./src/extensions/api.ts",
+      "default": "./dist/extensions/api.js"
+    }
+  },
   "scripts": {
     "dev": "node src/cli.ts",
     "build": "tsrs --project tsconfig.build.json",
