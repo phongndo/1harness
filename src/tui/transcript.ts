@@ -266,16 +266,26 @@ function todoRows(steps: readonly TodoStep[], width: number): string[] {
 
 // Tool groups
 
-type Category = "read" | "edit" | "command" | "search" | "fetch" | "agent" | "other";
+type Category = "edit" | "command" | "read" | "search" | "web" | "fetch" | "agent" | "other";
 
-const CATEGORY_NAMES: Record<Category, [string, string]> = {
-  read: ["read", "reads"],
-  edit: ["edit", "edits"],
-  command: ["command", "commands"],
-  search: ["search", "searches"],
-  fetch: ["fetch", "fetches"],
-  agent: ["agent", "agents"],
-  other: ["other", "other"],
+function plural(count: number, noun: string): string {
+  return `${count} ${count === 1 ? noun : `${noun}s`}`;
+}
+
+function times(count: number): string {
+  return count === 1 ? "once" : count === 2 ? "twice" : `${count} times`;
+}
+
+/** What a group did, a phrase per category, most telling first. */
+const PHRASES: Record<Category, (count: number) => string> = {
+  edit: (count) => `changed ${plural(count, "file")}`,
+  command: (count) => `ran ${plural(count, "command")}`,
+  read: (count) => `read ${plural(count, "file")}`,
+  search: (count) => `searched code ${times(count)}`,
+  web: (count) => `searched the web ${times(count)}`,
+  fetch: (count) => `fetched ${plural(count, "page")}`,
+  agent: (count) => `started ${plural(count, "agent")}`,
+  other: (count) => `used ${plural(count, "tool")}`,
 };
 
 /** The parsed actions of a command that only reads, lists, or searches; null otherwise. */
@@ -294,7 +304,7 @@ function category(item: ToolItem): Category {
     case "file_change":
       return "edit";
     case "web_search":
-      return "search";
+      return "web";
     case "agent":
       return "agent";
     case "tool_call":
@@ -302,25 +312,38 @@ function category(item: ToolItem): Category {
   }
 }
 
+/** One sentence for a group: its top two phrases, and a count of the rest. */
 function groupSummary(items: readonly ToolItem[]): string {
   const counts = new Map<Category, number>();
-  for (const item of items) counts.set(category(item), (counts.get(category(item)) ?? 0) + 1);
-  const parts = [`${items.length} tool ${items.length === 1 ? "call" : "calls"}`];
-  for (const [name, [one, many]] of Object.entries(CATEGORY_NAMES)) {
-    const count = counts.get(name as Category);
-    if (count) parts.push(`${count} ${count === 1 ? one : many}`);
+  for (const item of items) {
+    // One edit can change several files, and the sentence counts files.
+    const count = item.kind === "file_change" ? item.changes.length : 1;
+    counts.set(category(item), (counts.get(category(item)) ?? 0) + count);
   }
+  const present = (Object.keys(PHRASES) as Category[]).filter((name) => counts.has(name));
+  const phrases = present.slice(0, 2).map((name) => PHRASES[name](counts.get(name) ?? 0));
+  const rest = present.slice(2).reduce((sum, name) => sum + (counts.get(name) ?? 0), 0);
+  if (rest > 0) phrases.push(`performed ${plural(rest, "other action")}`);
+  const sentence =
+    phrases.length <= 2
+      ? phrases.join(" and ")
+      : `${phrases.slice(0, -1).join(", ")}, and ${phrases.at(-1)}`;
   const failed = items.filter((item) => item.status === "failed").length;
-  if (failed > 0) parts.push(`${failed} failed`);
-  return parts.join(" · ");
+  const capital = sentence.charAt(0).toUpperCase() + sentence.slice(1);
+  return failed > 0 ? `${capital} · ${failed} failed` : capital;
 }
 
+/** A group of one is a single row; more get a sentence over a tree. */
 function toolRows(block: Extract<Block, { kind: "tools" }>, context: RenderContext): string[] {
-  const running = !block.settled && block.items.some((item) => item.status === "running");
+  const { items } = block;
+  const running = !block.settled && items.some((item) => item.status === "running");
   const marker = running && !context.blink ? " " : style.strong("●");
-  const rows = [truncate(`${marker} ${style.muted(groupSummary(block.items))}`, context.width)];
-  block.items.forEach((item, index) => {
-    const branch = style.muted(index === block.items.length - 1 ? "└ " : "├ ");
+  const [only] = items;
+  if (only && items.length === 1)
+    return [truncate(`${marker} ${toolLine(only, block.settled, context.cwd)}`, context.width)];
+  const rows = [truncate(`${marker} ${style.muted(groupSummary(items))}`, context.width)];
+  items.forEach((item, index) => {
+    const branch = style.muted(index === items.length - 1 ? "└ " : "├ ");
     rows.push(truncate(branch + toolLine(item, block.settled, context.cwd), context.width));
   });
   return rows;
@@ -439,6 +462,7 @@ export function toolLine(item: ToolItem, settled: boolean, cwd: string): string 
         fetch: ["Fetched", "Fetching", "fetch"],
         edit: [name, name, name],
         command: [name, name, name],
+        web: [name, name, name],
         agent: [name, name, name],
         other: item.server ? [`Called ${name}`, `Calling ${name}`, name] : [name, name, name],
       };

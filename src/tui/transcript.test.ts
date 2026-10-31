@@ -3,6 +3,7 @@ import { stripVTControlCharacters } from "node:util";
 import { describe, it } from "node:test";
 import { renderMarkdown } from "./markdown.ts";
 import { Transcript, renderBlock, type ToolItem } from "./transcript.ts";
+import { ThreadView } from "./view.ts";
 
 const plain = (rows: string[]) => rows.map((row) => stripVTControlCharacters(row));
 const context = { width: 60, cwd: "/work", blink: true };
@@ -67,27 +68,25 @@ describe("tool groups", () => {
     },
   ];
 
-  it("summarizes the group and draws a tree of past-tense rows", () => {
-    const rows = renderBlock({ kind: "tools", items, settled: true }, context);
+  it("sums the group up in a sentence over a tree of past-tense rows", () => {
+    const rows = renderBlock({ kind: "tools", items, settled: true }, { ...context, width: 80 });
     assert.deepEqual(plain(rows), [
-      "● 3 tool calls · 1 read · 1 edit · 1 command",
+      "● Changed 1 file, ran 1 command, and performed 1 other action",
       "├ Ran ls -la && echo done",
       "├ Read notes.txt",
       "└ Edited notes.txt +2 / -1",
     ]);
   });
 
-  it("uses the present tense while running and blinks the marker", () => {
+  it("shows a lone call as one row, in the present tense while it runs", () => {
     const running: ToolItem = { ...items[0]!, status: "running", exitCode: null } as ToolItem;
     const block = { kind: "tools" as const, items: [running], settled: false };
     assert.deepEqual(plain(renderBlock(block, { ...context, blink: false })), [
-      "  1 tool call · 1 command",
-      "└ Running ls -la && echo done",
+      "  Running ls -la && echo done",
     ]);
-    assert.equal(
-      plain(renderBlock({ ...block, settled: true }, context))[1],
-      "└ Stopped ls -la && echo done",
-    );
+    assert.deepEqual(plain(renderBlock({ ...block, settled: true }, context)), [
+      "● Stopped ls -la && echo done",
+    ]);
   });
 
   it("reports failures and exit codes", () => {
@@ -96,10 +95,38 @@ describe("tool groups", () => {
       { ...items[1], status: "failed", output: "\nno such file\n" } as ToolItem,
     ];
     assert.deepEqual(plain(renderBlock({ kind: "tools", items: failed, settled: true }, context)), [
-      "● 2 tool calls · 1 read · 1 command · 2 failed",
+      "● Ran 1 command and read 1 file · 2 failed",
       "├ Ran ls -la && echo done · exit 2",
       "└ Failed read notes.txt: no such file",
     ]);
+  });
+});
+
+describe("ThreadView", () => {
+  it("counts the files an edit changed", () => {
+    const view = new ThreadView("t1");
+    view.item(
+      {
+        kind: "file_change",
+        id: "e",
+        changes: [
+          { path: "/work/a.ts", kind: "update", diff: "+a" },
+          { path: "/work/b.ts", kind: "update", diff: "+b" },
+        ],
+        status: "completed",
+      },
+      true,
+      true,
+    );
+    view.item(
+      { kind: "command", id: "c", command: "ls", output: "", exitCode: 0, status: "completed" },
+      true,
+      true,
+    );
+    assert.equal(
+      plain(view.transcript.view(context, 10, 0).rows)[0],
+      "● Changed 2 files and ran 1 command",
+    );
   });
 });
 
