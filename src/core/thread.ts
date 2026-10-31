@@ -53,6 +53,8 @@ export class Thread {
   /** Messages waiting on input handlers, kept in order. */
   #inputChain: Promise<void> = Promise.resolve();
   #pendingInputs = 0;
+  /** Counts `clearQueue` calls, so messages it caught in the handlers are dropped. */
+  #cleared = 0;
   #allowances = new Set<string>();
 
   constructor(session: HarnessSession) {
@@ -141,6 +143,7 @@ export class Thread {
     }
     // Handlers may be slow; a message sent after this one still goes after it.
     this.#pendingInputs++;
+    const cleared = this.#cleared;
     // Listeners learn the thread has work before the handlers finish.
     this.#emit({ type: "queue.changed", queue: this.#queue });
     this.#inputChain = this.#inputChain.then(async () => {
@@ -153,7 +156,7 @@ export class Thread {
         return;
       }
       this.#pendingInputs--;
-      if (input) this.#enqueue(input);
+      if (input && cleared === this.#cleared) this.#enqueue(input);
       // A dropped message may leave the thread with nothing to do.
       else this.#emit({ type: "queue.changed", queue: this.#queue });
     });
@@ -191,6 +194,14 @@ export class Thread {
     const input = this.#queue.pop();
     if (input) this.#emit({ type: "queue.changed", queue: this.#queue });
     return input;
+  }
+
+  /** Drops every queued message, and the ones still passing input handlers. */
+  clearQueue(): void {
+    this.#cleared++;
+    if (this.#queue.length === 0 && this.#pendingInputs === 0) return;
+    this.#queue = [];
+    this.#emit({ type: "queue.changed", queue: this.#queue });
   }
 
   async interrupt(): Promise<void> {
