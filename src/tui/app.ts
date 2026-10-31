@@ -40,6 +40,8 @@ export interface AppOptions {
   prompt: string | null;
   /** Extension modules to load besides the discovered ones. */
   extensions: string[];
+  /** Problems with the config files, shown once the screen is up. */
+  warnings: string[];
 }
 
 const KEYS: [string, string][] = [
@@ -120,6 +122,7 @@ export class App {
   #context: CommandContext;
   #extensions: ExtensionHost;
   #extraExtensions: string[];
+  #warnings: string[];
   /** Serves extensions' and the orchestrator's tools to every session over MCP. */
   #tools: ToolServer;
   /** Commands the harness runs itself, shown beside 1harness's own. */
@@ -168,6 +171,7 @@ export class App {
     for (const command of [...BUILTIN_COMMANDS, ...this.#clientCommands()])
       this.#commands.register(command);
     this.#extraExtensions = options.extensions;
+    this.#warnings = options.warnings;
     this.#extensions = new ExtensionHost({
       cwd: options.session.cwd,
       configDir: configDir(),
@@ -332,6 +336,7 @@ export class App {
       title: "1harness",
       subtitle: `v${this.#version} · Run /help for commands`,
     });
+    for (const warning of this.#warnings) this.#notice("warning", warning);
     const initial = this.#editor.text;
     this.#editor.clear();
     this.#renderNow();

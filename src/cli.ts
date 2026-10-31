@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
+  DEFAULT_RUNTIME_MODE,
   RUNTIME_MODES,
   type HarnessId,
   type RuntimeMode,
@@ -11,6 +12,7 @@ import {
 } from "./core/events.ts";
 import { mentionedImages } from "./core/files.ts";
 import { configDir, stateDir } from "./core/paths.ts";
+import { loadSettings } from "./core/settings.ts";
 import { drivers, registerConfiguredAgents } from "./drivers/index.ts";
 import type { ToolDefinition } from "./extensions/api.ts";
 import { ExtensionHost } from "./extensions/host.ts";
@@ -31,14 +33,15 @@ Options:
     .join(", ")} (default: claude)
   -m, --model <id>       model to use (default: the harness's default)
   -e, --effort <level>   reasoning effort
-      --mode <mode>      supervised, auto-edit, auto, or full-access (default: supervised)
+      --mode <mode>      supervised, auto-edit, auto, or full-access (default: "mode"
+                         in ~/.config/1harness/settings.json, else ${DEFAULT_RUNTIME_MODE})
       --plan             start in plan mode
   -C, --cwd <dir>        working folder (default: current folder)
   -r, --resume <id>      resume a native thread or session
   -x, --extension <path> load an extension module (repeatable); others load from
                          ~/.config/1harness/extensions and a trusted .1harness/extensions
   -p, --print            run the prompt once without the UI and print the reply;
-                         approvals are declined unless --mode allows the action
+                         approvals are declined unless the mode allows the action
   -h, --help             show this help
   -v, --version          show the version
 
@@ -176,19 +179,25 @@ try {
     // Harnesses from agents.json and extensions register later, so an unknown
     // name fails when the session starts, listing the ones there are.
     const harness = values.harness ?? "claude";
-    for (const warning of registerConfiguredAgents(configDir()))
-      process.stderr.write(`1harness: ${warning}\n`);
+    const { settings, warnings: settingsWarnings } = loadSettings(configDir());
+    const warnings = [...settingsWarnings, ...registerConfiguredAgents(configDir())];
     const session: SessionOptions = {
       cwd: resolve(values.cwd ?? process.cwd()),
       model: values.model ?? null,
       effort: values.effort ?? null,
-      runtimeMode: choice<RuntimeMode>(values.mode, RUNTIME_MODES, "mode") ?? "supervised",
+      runtimeMode:
+        choice<RuntimeMode>(values.mode, RUNTIME_MODES, "mode") ??
+        settings.mode ??
+        DEFAULT_RUNTIME_MODE,
       interactionMode: values.plan ? "plan" : "default",
       resume: values.resume ?? null,
     };
     const prompt = positionals.join(" ").trim() || null;
     const extensions = values.extension ?? [];
 
+    // The terminal UI shows these itself; its screen would hide them on stderr.
+    if (values.print || !process.stdin.isTTY || !process.stdout.isTTY)
+      for (const warning of warnings) process.stderr.write(`1harness: ${warning}\n`);
     if (values.print) {
       if (!prompt) throw new Error("--print needs a prompt");
       process.exitCode = await print(harness, session, prompt, manifest.version, extensions);
@@ -197,7 +206,14 @@ try {
         "the interactive UI needs a terminal; use --print to run a prompt without one",
       );
     } else {
-      await new App({ harness, session, version: manifest.version, prompt, extensions }).run();
+      await new App({
+        harness,
+        session,
+        version: manifest.version,
+        prompt,
+        extensions,
+        warnings,
+      }).run();
     }
   }
 } catch (error) {
