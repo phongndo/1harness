@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
   ApprovalAction,
   HarnessEvent,
@@ -6,15 +7,49 @@ import type {
   Item,
   NativeCommand,
   RequestResponse,
+  TurnStatus,
   Usage,
   UserInput,
 } from "./events.ts";
 
+/** Where a message came from, so clients and records need not read it from its text. */
+export type MessageOrigin =
+  | { type: "user" }
+  /** Work thread `from` delegated: the task as it was given, without the brief around it. */
+  | { type: "task"; from: string; task: string }
+  /** How a task this thread delegated to thread `from` ended, and what it found. */
+  | { type: "report"; from: string; status: TurnStatus | "cancelled"; result: string }
+  /** A message thread `from` sent with `thread_send`. */
+  | { type: "message"; from: string };
+
+/** A message for the harness, with where it came from. */
+export interface Message {
+  /** Sent to the harness as `UserInput.id`, so the `user_message` it echoes can be matched. */
+  readonly id: string;
+  /** The message as it was sent, before input handlers. */
+  readonly input: UserInput;
+  readonly origin: MessageOrigin;
+}
+
+const FROM_USER: MessageOrigin = { type: "user" };
+
+/** What a message says, as its sender wrote it: the user's text, the task, or the result. */
+export function messageText(message: Message): string {
+  switch (message.origin.type) {
+    case "task":
+      return message.origin.task;
+    case "report":
+      return message.origin.result;
+    default:
+      return message.input.text;
+  }
+}
+
 export type ThreadEvent =
   | HarnessEvent
-  | { type: "queue.changed"; queue: readonly UserInput[] }
-  /** `input` is set when the error is that a message could not start its turn. */
-  | { type: "error"; message: string; input?: UserInput };
+  | { type: "queue.changed"; queue: readonly Message[] }
+  /** `unsent` is set when the error is that a message could not start its turn. */
+  | { type: "error"; message: string; unsent?: Message };
 
 export type ThreadListener = (event: ThreadEvent) => void;
 
@@ -40,7 +75,10 @@ const REQUEST_HANDLER_TIMEOUT_MS = 10_000;
 export class Thread {
   readonly session: HarnessSession;
   #listeners = new Set<ThreadListener>();
-  #queue: UserInput[] = [];
+  /** Messages waiting for the next turn, with what the input handlers made of them. */
+  #queue: Prepared[] = [];
+  /** Every message the thread was sent, by ID. */
+  #messages = new Map<string, Message>();
   #items = new Map<string, Item>();
   #requests = new Map<string, HarnessRequest>();
   #busy = false;
@@ -52,9 +90,8 @@ export class Thread {
   #requestHandlers: RequestHandler[] = [];
   /** Messages waiting on input handlers, kept in order. */
   #inputChain: Promise<void> = Promise.resolve();
-  #pendingInputs = 0;
-  /** Counts `clearQueue` calls, so messages it caught in the handlers are dropped. */
-  #cleared = 0;
+  /** The messages in the handlers; one `clearQueue` drops is no longer here when they finish. */
+  #pending = new Set<Message>();
   #allowances = new Set<string>();
 
   constructor(session: HarnessSession) {
@@ -77,13 +114,13 @@ export class Thread {
     return (
       !this.#busy &&
       this.#queue.length === 0 &&
-      this.#pendingInputs === 0 &&
+      this.#pending.size === 0 &&
       this.#requests.size === 0
     );
   }
 
-  get queue(): readonly UserInput[] {
-    return this.#queue;
+  get queue(): readonly Message[] {
+    return this.#queue.map((entry) => entry.message);
   }
 
   get usage(): Usage | null {
@@ -96,6 +133,11 @@ export class Thread {
 
   item(id: string): Item | undefined {
     return this.#items.get(id);
+  }
+
+  /** A message this thread was sent, by the ID its harness echoes as `inputId`. */
+  message(id: string): Message | undefined {
+    return this.#messages.get(id);
   }
 
   subscribe(listener: ThreadListener): () => void {
@@ -135,46 +177,51 @@ export class Thread {
     return this.#allowances;
   }
 
-  /** Starts a turn, or queues the input as the next turn while one is running. */
-  send(original: UserInput): void {
-    if (this.#inputHandlers.length === 0 && this.#pendingInputs === 0) {
-      this.#enqueue(original);
+  /**
+   * Starts a turn, or queues the input as the next turn while one is running.
+   * `origin` says who sent it, when that is not the user.
+   */
+  send(input: UserInput, origin: MessageOrigin = FROM_USER): void {
+    const message = this.#record(input, origin);
+    if (this.#inputHandlers.length === 0 && this.#pending.size === 0) {
+      this.#enqueue(prepare(message, input));
       return;
     }
     // Handlers may be slow; a message sent after this one still goes after it.
-    this.#pendingInputs++;
-    const cleared = this.#cleared;
+    this.#pending.add(message);
     // Listeners learn the thread has work before the handlers finish.
-    this.#emit({ type: "queue.changed", queue: this.#queue });
+    this.#emitQueue();
     this.#inputChain = this.#inputChain.then(async () => {
-      let input: UserInput | null;
+      let filtered: UserInput | null;
       try {
-        input = await this.#filterInput(original);
+        filtered = await this.#filterInput(input);
       } catch (error) {
-        this.#pendingInputs--;
+        this.#pending.delete(message);
         this.#emit({ type: "error", message: `An input handler failed: ${errorMessage(error)}` });
         return;
       }
-      this.#pendingInputs--;
-      if (input && cleared === this.#cleared) this.#enqueue(input);
+      const kept = this.#pending.delete(message);
+      if (filtered && kept) this.#enqueue(prepare(message, filtered));
       // A dropped message may leave the thread with nothing to do.
-      else this.#emit({ type: "queue.changed", queue: this.#queue });
+      else this.#emitQueue();
     });
   }
 
   /** Adds input to the running turn where the harness supports it; otherwise queues it. */
-  async steer(original: UserInput): Promise<void> {
+  async steer(input: UserInput, origin: MessageOrigin = FROM_USER): Promise<void> {
     if (!this.#busy || !this.session.capabilities.steer) {
-      this.send(original);
+      this.send(input, origin);
       return;
     }
-    const input = await this.#filterInput(original);
-    if (!input) return;
+    const message = this.#record(input, origin);
+    const filtered = await this.#filterInput(input);
+    if (!filtered) return;
+    const prepared = prepare(message, filtered);
     try {
-      await this.session.steer(input);
+      await this.session.steer(prepared.input);
     } catch {
       // The turn ended between the check and the request, so it becomes a follow-up.
-      this.#enqueue(input);
+      this.#enqueue(prepared);
     }
   }
 
@@ -189,19 +236,23 @@ export class Thread {
     else throw new Error(`${this.session.info.harness} cannot run /${command.name}`);
   }
 
-  /** Removes and returns the most recently queued input. */
-  unqueue(): UserInput | undefined {
-    const input = this.#queue.pop();
-    if (input) this.#emit({ type: "queue.changed", queue: this.#queue });
-    return input;
+  /** Removes and returns the message the user queued last; others' messages stay. */
+  unqueue(): Message | undefined {
+    const index = this.#queue.findLastIndex((entry) => entry.message.origin.type === "user");
+    const [entry] = index === -1 ? [] : this.#queue.splice(index, 1);
+    if (entry) this.#emitQueue();
+    return entry?.message;
   }
 
-  /** Drops every queued message, and the ones still passing input handlers. */
-  clearQueue(): void {
-    this.#cleared++;
-    if (this.#queue.length === 0 && this.#pendingInputs === 0) return;
-    this.#queue = [];
-    this.#emit({ type: "queue.changed", queue: this.#queue });
+  /**
+   * Drops queued messages, and the ones still passing input handlers: every
+   * one, or only those `drop` picks.
+   */
+  clearQueue(drop: (message: Message) => boolean = () => true): void {
+    const before = this.#queue.length + this.#pending.size;
+    this.#queue = this.#queue.filter((entry) => !drop(entry.message));
+    for (const message of this.#pending) if (drop(message)) this.#pending.delete(message);
+    if (this.#queue.length + this.#pending.size !== before) this.#emitQueue();
   }
 
   async interrupt(): Promise<void> {
@@ -233,14 +284,20 @@ export class Thread {
     return current;
   }
 
-  /** Queues input that already passed the input handlers. */
-  #enqueue(input: UserInput): void {
+  #record(input: UserInput, origin: MessageOrigin): Message {
+    const message: Message = { id: randomUUID(), input, origin };
+    this.#messages.set(message.id, message);
+    return message;
+  }
+
+  /** Queues a message that already passed the input handlers. */
+  #enqueue(entry: Prepared): void {
     if (!this.#busy) {
-      this.#dispatch(input);
+      this.#dispatch(entry);
       return;
     }
-    this.#queue.push(input);
-    this.#emit({ type: "queue.changed", queue: this.#queue });
+    this.#queue.push(entry);
+    this.#emitQueue();
   }
 
   /** Approves a request the user already chose to always allow, if it is one. */
@@ -273,12 +330,12 @@ export class Thread {
     this.#emit({ type: "request.opened", request });
   }
 
-  #dispatch(input: UserInput): void {
+  #dispatch(entry: Prepared): void {
     // Busy is set before the harness confirms so a second send queues instead of racing.
     this.#busy = true;
-    this.session.startTurn(input).catch((error: unknown) => {
+    this.session.startTurn(entry.input).catch((error: unknown) => {
       this.#busy = false;
-      this.#emit({ type: "error", message: errorMessage(error), input });
+      this.#emit({ type: "error", message: errorMessage(error), unsent: entry.message });
       this.#drain();
     });
   }
@@ -286,7 +343,7 @@ export class Thread {
   #drain(): void {
     const next = this.#queue.shift();
     if (!next) return;
-    this.#emit({ type: "queue.changed", queue: this.#queue });
+    this.#emitQueue();
     this.#dispatch(next);
   }
 
@@ -352,9 +409,26 @@ export class Thread {
     if (event.type === "turn.ended" && !this.#busy) this.#drain();
   }
 
+  #emitQueue(): void {
+    this.#emit({ type: "queue.changed", queue: this.queue });
+  }
+
   #emit(event: ThreadEvent): void {
     for (const listener of this.#listeners) listener(event);
   }
+}
+
+/** A message, and the input the harness is sent for it: after the handlers, with its ID. */
+interface Prepared {
+  message: Message;
+  input: UserInput;
+}
+
+function prepare(message: Message, filtered: UserInput): Prepared {
+  return {
+    message,
+    input: { ...filtered, id: message.id, fromUser: message.origin.type === "user" },
+  };
 }
 
 export function appendDelta(item: Item, chunk: string): Item {

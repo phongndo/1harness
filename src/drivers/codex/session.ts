@@ -290,20 +290,24 @@ export class CodexSession implements HarnessSession {
   async startTurn(input: UserInput): Promise<void> {
     const [, name = "", args = ""] = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(input.text.trim()) ?? [];
     if (name === "review") return this.#review(args.trim());
-    if (name === "init") return this.#startTurn([textInput({ text: INIT_PROMPT })]);
+    const id = input.id ?? null;
+    if (name === "init") return this.#startTurn([textInput({ text: INIT_PROMPT })], id);
     const skill = this.#skills.get(name);
     // Codex selects a skill by path, as its own UI does for a `$name` mention.
-    if (skill) return this.#startTurn([...inputItems(input), { type: "skill", name, path: skill }]);
-    await this.#startTurn(inputItems(input));
+    if (skill)
+      return this.#startTurn([...inputItems(input), { type: "skill", name, path: skill }], id);
+    await this.#startTurn(inputItems(input), id);
   }
 
-  async #startTurn(input: unknown[]): Promise<void> {
+  /** Starts a turn; Codex echoes `clientId` on the user message, so the thread can match it. */
+  async #startTurn(input: unknown[], clientId: string | null): Promise<void> {
     this.#turnsStarted = true;
     const policy = codexRuntimePolicy(this.info.runtimeMode, this.#sandbox);
     this.#interruptRequested = false;
     const response = await this.#request<{ turn: CodexTurn }>("turn/start", {
       threadId: this.#threadId(),
       input,
+      ...(clientId ? { clientUserMessageId: clientId } : {}),
       cwd: this.info.cwd,
       approvalPolicy: policy.approvalPolicy,
       approvalsReviewer: policy.approvalsReviewer,
@@ -333,6 +337,7 @@ export class CodexSession implements HarnessSession {
     await this.#request("turn/steer", {
       threadId: this.#threadId(),
       input: inputItems(input),
+      ...(input.id ? { clientUserMessageId: input.id } : {}),
       expectedTurnId: this.#turnId,
     });
   }

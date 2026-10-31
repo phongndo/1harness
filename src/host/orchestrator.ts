@@ -30,6 +30,9 @@ export class OrchestrationError extends Error {
   }
 }
 
+/** How a task stands: its run's status, or why it has none. */
+type TaskStatus = RunRecord["status"] | "starting" | "cancelled";
+
 /** A piece of work one thread gave another: the child thread's first run. */
 interface Task {
   id: string;
@@ -63,9 +66,12 @@ function text(input: Record<string, unknown>, name: string): string | undefined 
 }
 
 function runView(run: RunRecord) {
+  const origin = run.origin;
   return {
     run: run.index,
     status: run.status,
+    // Such as "user", or "report from t3" for a run a task's result started.
+    startedBy: origin && (origin.type === "user" ? "user" : `${origin.type} from ${origin.from}`),
     input: clip(run.input),
     result: clip(run.result),
     error: run.error,
@@ -253,11 +259,13 @@ export class Orchestrator {
           required: ["threadId", "message"],
         },
         execute: async (input, context) => {
-          const target = this.#target(this.#caller(context), input);
+          const caller = this.#caller(context);
+          const target = this.#target(caller, input);
           const message = text(input, "message");
           if (!message) throw new OrchestrationError("invalid_request", "message is empty");
-          if (input["steer"] === true) await target.thread.steer({ text: message });
-          else target.thread.send({ text: message });
+          const origin = { type: "message", from: caller.id } as const;
+          if (input["steer"] === true) await target.thread.steer({ text: message }, origin);
+          else target.thread.send({ text: message }, origin);
           return this.#json({
             threadId: target.id,
             status: target.status,
@@ -311,8 +319,9 @@ export class Orchestrator {
   /**
    * Stops a thread and every thread under it, as the user does with esc: each
    * running turn is interrupted and the agents' queued messages are dropped.
-   * Reports to the stopped threads are not delivered, so none starts again;
-   * the thread's own parent, which goes on, is told it was interrupted.
+   * Reports to the stopped threads are not delivered, and the ones already
+   * queued are dropped, so none starts again; the user's own queued messages
+   * stay. The thread's own parent, which goes on, is told it was interrupted.
    */
   async stop(id: string): Promise<void> {
     const thread = this.#manager.get(id);
@@ -327,6 +336,7 @@ export class Orchestrator {
       child.thread.clearQueue();
       await child.thread.interrupt();
     });
+    thread.thread.clearQueue((message) => message.origin.type !== "user");
     // Agents are stopped as far as they can be; the thread's own failure is the caller's to report.
     await Promise.all([...stopping.map((done) => done.catch(() => {})), thread.thread.interrupt()]);
   }
@@ -476,7 +486,10 @@ export class Orchestrator {
         waiting: 0,
       };
       this.#tasks.set(task.id, task);
-      child.thread.send({ text: this.#brief(brief, role) });
+      child.thread.send(
+        { text: this.#brief(brief, role) },
+        { type: "task", from: caller.id, task: brief },
+      );
       return task;
     } finally {
       this.#reserved--;
@@ -525,13 +538,14 @@ export class Orchestrator {
     const finished = this.#finished(task);
     if (finished) task.seen = true;
     const dropped = !run && finished && child?.status !== "closed";
+    const status: TaskStatus =
+      run?.status ?? (dropped ? "failed" : child?.status === "closed" ? "cancelled" : "starting");
     return {
       taskId: task.id,
       threadId: task.childId,
       harness: child?.harness ?? null,
       title: child?.title ?? null,
-      status:
-        run?.status ?? (dropped ? "failed" : child?.status === "closed" ? "cancelled" : "starting"),
+      status,
       result: clip(run?.result ?? null),
       error: run
         ? run.error
@@ -575,12 +589,16 @@ export class Orchestrator {
       const parent = this.#manager.get(task.parentId);
       if (!parent || this.#manager.closing(parent.id)) continue;
       const view = this.#taskView(task, false);
+      const { status } = view;
+      // Only a finished task is reported, so it is never running or starting.
+      if (status === "running" || status === "starting") continue;
       const outcome = view.result ?? view.error ?? "(no reply)";
-      const message = `[1harness] Task ${task.id} (${child.harness}: ${child.title}) ${view.status}:\n\n${outcome}`;
+      const message = `[1harness] Task ${task.id} (${child.harness}: ${child.title}) ${status}:\n\n${outcome}`;
+      const origin = { type: "report", from: child.id, status, result: outcome } as const;
       if (parent.thread.busy && parent.thread.session.capabilities.steer) {
-        void parent.thread.steer({ text: message });
+        void parent.thread.steer({ text: message }, origin);
       } else {
-        parent.thread.send({ text: message });
+        parent.thread.send({ text: message }, origin);
       }
     }
   }

@@ -31,15 +31,19 @@ class FakeSession {
   readonly turns: string[] = [];
   readonly steered: string[] = [];
   readonly commands: string[] = [];
+  /** What the harness was sent, turns and steers alike. */
+  readonly sent: UserInput[] = [];
   steerFails = false;
 
   async start(): Promise<void> {}
   async startTurn(input: UserInput): Promise<void> {
     this.turns.push(input.text);
+    this.sent.push(input);
   }
   async steer(input: UserInput): Promise<void> {
     if (this.steerFails) throw new Error("turn ended");
     this.steered.push(input.text);
+    this.sent.push(input);
   }
   async runCommand(name: string, args: string): Promise<void> {
     this.commands.push(`${name} ${args}`);
@@ -92,7 +96,7 @@ describe("Thread", () => {
     thread.send({ text: "second" });
     assert.deepEqual(session.turns, ["first"]);
     assert.deepEqual(
-      thread.queue.map((input) => input.text),
+      thread.queue.map((message) => message.input.text),
       ["second"],
     );
     session.events.push({ type: "turn.started", turnId: "1" });
@@ -111,7 +115,7 @@ describe("Thread", () => {
     session.steerFails = true;
     await thread.steer({ text: "late" });
     assert.deepEqual(
-      thread.queue.map((input) => input.text),
+      thread.queue.map((message) => message.input.text),
       ["late"],
     );
   });
@@ -165,7 +169,7 @@ describe("Thread", () => {
     await thread.command(command("ps", false), "");
     assert.deepEqual(session.turns, ["/review the parser"]);
     assert.deepEqual(
-      thread.queue.map((input) => input.text),
+      thread.queue.map((message) => message.input.text),
       ["/init"],
     );
     assert.deepEqual(session.commands, ["ps "]);
@@ -205,8 +209,69 @@ describe("Thread", () => {
     await new Promise((done) => setTimeout(done, 40));
     assert.deepEqual(session.turns, ["slow"]);
     assert.deepEqual(
-      thread.queue.map((input) => input.text),
+      thread.queue.map((message) => message.input.text),
       ["fast"],
+    );
+    await thread.close();
+  });
+
+  it("gives the harness each message's ID, and keeps who sent it", async () => {
+    const { session, thread } = await setup();
+    thread.addInputHandler((input) => ({ text: input.text.toUpperCase() }));
+    thread.send({ text: "brief" }, { type: "task", from: "t1", task: "fix it" });
+    // The handlers pass it on a tick later, and its turn is running once they have.
+    await settle();
+    await thread.steer({ text: "hurry" }, { type: "message", from: "t1" });
+    assert.deepEqual(session.turns, ["BRIEF"]);
+    assert.deepEqual(session.steered, ["HURRY"]);
+    const [first, second] = session.sent.map((input) => thread.message(input.id ?? ""));
+    // The message keeps what was sent, before the handlers changed it.
+    assert.deepEqual(first?.input, { text: "brief" });
+    assert.deepEqual(first?.origin, { type: "task", from: "t1", task: "fix it" });
+    assert.deepEqual(second?.origin, { type: "message", from: "t1" });
+    // Only what the user wrote goes to the harness as theirs.
+    await thread.steer({ text: "mine" });
+    assert.deepEqual(
+      session.sent.map((input) => input.fromUser),
+      [false, false, true],
+    );
+    await thread.close();
+  });
+
+  it("drops only the queued messages a filtered clear picks, in the handlers too", async () => {
+    const { thread } = await setup();
+    const report = { type: "report", from: "t2", status: "completed", result: "ok" } as const;
+    thread.send({ text: "work" });
+    thread.send({ text: "mine" });
+    thread.send({ text: "[1harness] Task" }, report);
+    thread.addInputHandler(async () => {
+      await new Promise((done) => setTimeout(done, 10));
+      return undefined;
+    });
+    thread.send({ text: "late [1harness] Task" }, report);
+    thread.send({ text: "also mine" });
+    thread.clearQueue((message) => message.origin.type !== "user");
+    await new Promise((done) => setTimeout(done, 40));
+    assert.deepEqual(
+      thread.queue.map((message) => message.input.text),
+      ["mine", "also mine"],
+    );
+    await thread.close();
+  });
+
+  it("takes back the message the user queued last, not a report", async () => {
+    const { thread } = await setup();
+    thread.send({ text: "work" });
+    thread.send({ text: "mine" });
+    thread.send(
+      { text: "[1harness] Task" },
+      { type: "report", from: "t2", status: "failed", result: "boom" },
+    );
+    assert.equal(thread.unqueue()?.input.text, "mine");
+    assert.equal(thread.unqueue(), undefined);
+    assert.deepEqual(
+      thread.queue.map((message) => message.origin.type),
+      ["report"],
     );
     await thread.close();
   });

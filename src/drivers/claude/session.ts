@@ -463,16 +463,27 @@ export class ClaudeSession implements HarnessSession {
     this.#interruptRequested = false;
   }
 
+  /**
+   * Sends a prompt under `uuid`, which is new for each send: Claude skips a
+   * prompt whose ID its transcript already has.
+   */
   #sendPrompt(uuid: string, input: UserInput): void {
     this.#emit({
       type: "item.completed",
-      item: { kind: "user_message", id: uuid, text: input.text },
+      item: {
+        kind: "user_message",
+        id: uuid,
+        text: input.text,
+        ...(input.id ? { inputId: input.id } : {}),
+      },
     });
     this.#input.push({
       type: "user",
       message: { role: "user", content: userContent(input) },
       parent_tool_use_id: null,
       uuid: uuid as SDKUserMessage["uuid"] & string,
+      // Claude counts a prompt as the human's only when it is marked so.
+      ...(input.fromUser ? { origin: { kind: "human" } } : {}),
     });
   }
 

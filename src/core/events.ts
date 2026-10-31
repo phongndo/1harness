@@ -66,7 +66,13 @@ export interface TodoStep {
 }
 
 export type Item =
-  | { kind: "user_message"; id: string; text: string }
+  | {
+      kind: "user_message";
+      id: string;
+      text: string;
+      /** The `UserInput.id` this echoes, where the harness reports it. */
+      inputId?: string;
+    }
   | { kind: "assistant_message"; id: string; text: string }
   | { kind: "reasoning"; id: string; text: string }
   | {
@@ -306,6 +312,13 @@ export interface ThreadSummary {
 }
 
 export interface UserInput {
+  /**
+   * Set by the thread that sends it. The driver echoes it as the
+   * `user_message`'s `inputId`, so the thread knows which message that is.
+   */
+  id?: string;
+  /** Set by the thread: whether the user wrote it, rather than another thread. */
+  fromUser?: boolean;
   text: string;
   /** Local images sent with the text, where `capabilities.images` allows. */
   images?: string[];

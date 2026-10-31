@@ -5,7 +5,13 @@ import {
   type HarnessId,
   type SessionOptions,
 } from "../core/events.ts";
-import { Thread, errorMessage, type ThreadEvent } from "../core/thread.ts";
+import {
+  Thread,
+  errorMessage,
+  messageText,
+  type MessageOrigin,
+  type ThreadEvent,
+} from "../core/thread.ts";
 import { createSession } from "../drivers/index.ts";
 import type { ExtensionHost } from "../extensions/host.ts";
 import type { ToolServer } from "../extensions/tool-server.ts";
@@ -17,8 +23,10 @@ export interface RunRecord {
   index: number;
   turnId: string;
   status: "running" | "completed" | "failed" | "interrupted";
-  /** The message that started the run. */
+  /** What started the run: what the user typed, the task without its brief, or a task's result. */
   input: string;
+  /** Who sent that message; null when the harness started the run itself, or it is unknown. */
+  origin: MessageOrigin | null;
   /** The last assistant message, which is the run's result. */
   result: string | null;
   error: string | null;
@@ -292,6 +300,7 @@ export class ThreadManager {
           turnId: event.turnId,
           status: "running",
           input: "",
+          origin: null,
           result: null,
           error: null,
           startedAt: Date.now(),
@@ -309,8 +318,10 @@ export class ThreadManager {
       case "item.completed": {
         const item = event.item;
         if (item.kind === "user_message" && run?.status === "running" && run.input === "") {
-          run.input = item.text;
-          if (!managed.title) managed.title = titleFrom(item.text);
+          const message = item.inputId ? managed.thread.message(item.inputId) : undefined;
+          run.input = message ? messageText(message) : item.text;
+          run.origin = message?.origin ?? null;
+          if (!managed.title) managed.title = titleFrom(run.input);
         }
         if (item.kind === "assistant_message" && event.type === "item.completed" && run) {
           if (item.text.trim()) run.result = item.text;
@@ -319,19 +330,21 @@ export class ThreadManager {
       }
       case "error":
         // A message that could not start its turn is a run that failed at once.
-        if (event.input) {
+        if (event.unsent) {
           const now = Date.now();
+          const input = messageText(event.unsent);
           managed.runs.push({
             index: managed.runs.length + 1,
             turnId: "",
             status: "failed",
-            input: event.input.text,
+            input,
+            origin: event.unsent.origin,
             result: null,
             error: event.message,
             startedAt: now,
             endedAt: now,
           });
-          if (!managed.title) managed.title = titleFrom(event.input.text);
+          if (!managed.title) managed.title = titleFrom(input);
         }
         break;
       case "session.closed":

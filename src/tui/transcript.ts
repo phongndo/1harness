@@ -5,6 +5,7 @@ import {
   formatElapsed,
   isLive,
   paintStatus,
+  plainLine,
   statusDot,
   type AgentRow,
   type AgentStatus,
@@ -20,7 +21,10 @@ export type ToolItem = Extract<
 
 export type Block =
   | { kind: "banner"; title: string; subtitle: string }
-  | { kind: "user"; text: string }
+  /** A message for the agent; `label` says who sent it when the user did not, such as `Task from t1`. */
+  | { kind: "user"; text: string; label?: string }
+  /** A task's result, as it reached the thread that delegated it. */
+  | { kind: "result"; from: string; status: AgentStatus; text: string }
   | { kind: "assistant"; text: string }
   | { kind: "plan"; text: string }
   /** Consecutive tool items, shown as one tree. Settled once their turn has ended. */
@@ -205,7 +209,9 @@ export function renderBlock(block: Block, context: RenderContext): string[] {
         truncate(`${style.bold(style.strong(block.title))} ${style.muted(block.subtitle)}`, width),
       ];
     case "user":
-      return userRows(block.text, width);
+      return userRows(block, width);
+    case "result":
+      return resultRows(block, width);
     case "assistant":
       return block.text.trim() === "" ? [] : renderMarkdown(block.text, width);
     case "plan":
@@ -228,13 +234,23 @@ export function renderBlock(block: Block, context: RenderContext): string[] {
   }
 }
 
-function userRows(text: string, width: number): string[] {
+function userRows(block: Extract<Block, { kind: "user" }>, width: number): string[] {
   const marker = `${style.strong("┃")} `;
-  const lines = text.replace(/\s+$/, "").split("\n");
+  const lines = block.text.replace(/\s+$/, "").split("\n");
   const shown = lines.slice(0, USER_LINES);
-  const rows = shown.flatMap((line) => wrap(marker + style.bold(line), width, marker));
+  const rows = block.label ? [truncate(marker + style.muted(block.label), width)] : [];
+  rows.push(...shown.flatMap((line) => wrap(marker + style.bold(line), width, marker)));
   if (lines.length > shown.length)
     rows.push(marker + style.muted(`… ${lines.length - shown.length} more lines`));
+  return rows;
+}
+
+/** Who a result is from and how the task ended, over its first line. */
+function resultRows(block: Extract<Block, { kind: "result" }>, width: number): string[] {
+  const head = `${statusDot(block.status)} ${style.text(`Result from ${block.from}`)}`;
+  const rows = [truncate(`${head} ${style.muted("·")} ${paintStatus(block.status)}`, width)];
+  const line = plainLine(block.text);
+  if (line) rows.push(truncate(`  ${style.muted(line)}`, width));
   return rows;
 }
 

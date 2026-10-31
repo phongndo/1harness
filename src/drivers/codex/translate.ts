@@ -34,7 +34,7 @@ export type CodexWebSearchAction =
   | { type: "other" };
 
 export type CodexThreadItem =
-  | { type: "userMessage"; id: string; content: CodexUserInput[] }
+  | { type: "userMessage"; id: string; clientId?: string | null; content: CodexUserInput[] }
   | { type: "agentMessage"; id: string; text: string }
   | { type: "plan"; id: string; text: string }
   | { type: "reasoning"; id: string; summary: string[]; content: string[] }
@@ -355,14 +355,19 @@ function webSearchItem(item: Extract<CodexThreadItem, { type: "webSearch" }>, do
 export function toItem(item: CodexThreadItem, done = true): Item | null {
   switch (item.type) {
     case "userMessage": {
-      const { content } = item as Extract<CodexThreadItem, { type: "userMessage" }>;
+      const { content, clientId } = item as Extract<CodexThreadItem, { type: "userMessage" }>;
       const text = content
         // The text already names any skill or mention the message selects.
         .filter((part) => part.type !== "skill" && part.type !== "mention")
         .map((part) => (part.type === "text" ? String(part.text) : `[${part.type}]`))
         .join("\n");
       // A native command's prompt shows as the command the user typed.
-      return { kind: "user_message", id: item.id, text: text === INIT_PROMPT ? "/init" : text };
+      return {
+        kind: "user_message",
+        id: item.id,
+        text: text === INIT_PROMPT ? "/init" : text,
+        ...(clientId ? { inputId: clientId } : {}),
+      };
     }
     case "agentMessage":
       return {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
 import { describe, it } from "node:test";
+import type { Message } from "../core/thread.ts";
 import { formatElapsed, plainLine, type AgentRow } from "./agents.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { Transcript, renderBlock, type ToolItem } from "./transcript.ts";
@@ -19,6 +20,10 @@ const row = (overrides: Partial<AgentRow>): AgentRow => ({
   detail: "",
   ...overrides,
 });
+
+/** A harness's echo of message `id`. */
+const echo = (id: string, text: string) =>
+  ({ kind: "user_message", id, text, inputId: id }) as const;
 
 const delegate = (id: string): ToolItem => ({
   kind: "tool_call",
@@ -232,6 +237,33 @@ describe("ThreadView", () => {
       "  Starting the server",
       "",
       "● Running npm run dev",
+    ]);
+  });
+
+  it("shows a brief as its task and a report as a result, by who sent them", () => {
+    const view = new ThreadView("t1");
+    const brief: Message = {
+      id: "m1",
+      input: { text: "You are doing a task for another agent.\n\nFix the parser" },
+      origin: { type: "task", from: "t1", task: "Fix the parser" },
+    };
+    const report: Message = {
+      id: "m2",
+      input: { text: "[1harness] Task task-1 (codex: Fix) completed:\n\n**Fixed** it" },
+      origin: { type: "report", from: "t2", status: "completed", result: "**Fixed** it\n\nMore." },
+    };
+    view.item(echo("m1", brief.input.text), true, true, brief);
+    view.item(echo("m2", report.input.text), true, true, report);
+    // A harness that cannot say which message it echoes shows the text it got.
+    view.item({ kind: "user_message", id: "u3", text: "from history" }, true, true);
+    assert.deepEqual(plain(view.transcript.view({ ...context, width: 48 }, 20, 0).rows), [
+      "┃ Task from t1",
+      "┃ Fix the parser",
+      "",
+      "● Result from t2 · done",
+      "  Fixed it",
+      "",
+      "┃ from history",
     ]);
   });
 

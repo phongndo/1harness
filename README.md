@@ -93,7 +93,8 @@ status, a timer, and what it found. Its approvals and questions wait in its own
 thread: a line above the composer says an agent needs you, ctrl+o opens it, and
 alt+↑ goes back to the thread that started it. `/threads` (or ctrl+t) switches
 between threads, shown as a tree. Esc and `/stop` stop the thread on screen and
-every agent under it, and what they would have reported is not sent back.
+every agent under it; what they would have reported is not sent back, but
+messages you queued still run.
 `/close` ends a thread along with the threads it started. A thread you leave
 keeps running in the background while it or a thread it started has work, and
 closes once they are done.

@@ -153,8 +153,8 @@ const unqueue: CommandDefinition = {
   description: "move the last queued message back into the editor",
   group: "Session",
   run(context) {
-    const input = context.thread?.unqueue();
-    if (input) context.ui.setInput(input.text);
+    const message = context.thread?.unqueue();
+    if (message) context.ui.setInput(message.input.text);
   },
 };
 

@@ -26,6 +26,11 @@ function userMessage(...content: CodexUserInput[]): CodexThreadItem {
   return { type: "userMessage", id: "u", content };
 }
 
+/** A user message sent with a client ID, or without one. */
+function sent(clientId: string | null): CodexThreadItem {
+  return { type: "userMessage", id: "u", clientId, content: [text("hi")] };
+}
+
 function pending(method: string, params: object, decisions: [string, unknown][] = []) {
   return {
     method,
@@ -140,6 +145,17 @@ describe("toItem", () => {
       id: "u",
       text: "/init",
     });
+  });
+
+  it("names the input a user message echoes by the client ID it was sent with", () => {
+    assert.deepEqual(toItem(sent("m1")), {
+      kind: "user_message",
+      id: "u",
+      text: "hi",
+      inputId: "m1",
+    });
+    // One Codex's own UI sent has no client ID.
+    assert.deepEqual(toItem(sent(null)), { kind: "user_message", id: "u", text: "hi" });
   });
 
   it("maps web search actions and their status", () => {

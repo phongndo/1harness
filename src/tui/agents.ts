@@ -1,4 +1,5 @@
 import { stripVTControlCharacters } from "node:util";
+import type { MessageOrigin } from "../core/thread.ts";
 import type { ManagedThread } from "../host/manager.ts";
 import { inline } from "./markdown.ts";
 import { style } from "./theme.ts";
@@ -31,6 +32,14 @@ export function agentStatus(thread: ManagedThread): AgentStatus {
       return run.status === "failed" ? "failed" : "stopped";
     }
   }
+}
+
+/** How a reported task ended, in the words its agent row uses. */
+export function reportStatus(
+  status: Extract<MessageOrigin, { type: "report" }>["status"],
+): AgentStatus {
+  if (status === "completed") return "done";
+  return status === "failed" ? "failed" : "stopped";
 }
 
 /** Still has work, so its timer runs. */

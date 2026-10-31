@@ -1,7 +1,7 @@
 import type { Report } from "../commands/registry.ts";
 import type { Item } from "../core/events.ts";
-import type { Thread, ThreadEvent } from "../core/thread.ts";
-import type { AgentRow } from "./agents.ts";
+import type { Message, Thread, ThreadEvent } from "../core/thread.ts";
+import { reportStatus, type AgentRow } from "./agents.ts";
 import { Transcript, formatTokens, isToolItem, type Block } from "./transcript.ts";
 
 export type Phase = "Thinking" | "Generating";
@@ -25,6 +25,42 @@ function estimateTokens(text: string): number {
 function reasoningHeading(text: string): string | null {
   const headings = [...text.matchAll(/\*\*([^*\n]{2,80})\*\*/g)];
   return headings.at(-1)?.[1]?.trim() ?? null;
+}
+
+/** How a message shows: the user's own, a task or message with who sent it, or a task's result. */
+function messageBlock(echo: string, message: Message | undefined): Block {
+  if (!message) return { kind: "user", text: echo };
+  const { origin } = message;
+  switch (origin.type) {
+    case "user":
+      return { kind: "user", text: message.input.text };
+    case "task":
+      return { kind: "user", text: origin.task, label: `Task from ${origin.from}` };
+    case "message":
+      return { kind: "user", text: message.input.text, label: `Message from ${origin.from}` };
+    case "report":
+      return {
+        kind: "result",
+        from: origin.from,
+        status: reportStatus(origin.status),
+        text: origin.result,
+      };
+  }
+}
+
+/** A queued message in one line: the user's own text, or who sent it. */
+export function queuedText(message: Message): string {
+  const { origin } = message;
+  switch (origin.type) {
+    case "user":
+      return message.input.text;
+    case "task":
+      return `task from ${origin.from}: ${origin.task}`;
+    case "message":
+      return `message from ${origin.from}: ${message.input.text}`;
+    case "report":
+      return `result from ${origin.from}`;
+  }
 }
 
 /**
@@ -61,11 +97,14 @@ export class ThreadView {
         break;
       case "item.started":
       case "item.updated":
-        this.item(event.item, false, thread.busy);
+      case "item.completed": {
+        const { item } = event;
+        // The message a user_message echoes, where the harness says which it is.
+        const sent =
+          item.kind === "user_message" && item.inputId ? thread.message(item.inputId) : undefined;
+        this.item(item, event.type === "item.completed", thread.busy, sent);
         break;
-      case "item.completed":
-        this.item(event.item, true, thread.busy);
-        break;
+      }
       case "item.delta":
         this.delta(event.itemId, event.chunk, thread);
         break;
@@ -156,17 +195,19 @@ export class ThreadView {
     }
   }
 
-  item(item: Item, completed: boolean, busy: boolean): void {
+  /** Shows an item; `message` is the one a `user_message` echoes, when the thread knows it. */
+  item(item: Item, completed: boolean, busy: boolean, message?: Message): void {
     if (busy && item.kind !== "notice") this.startTurn();
     const existing = this.blocks.get(item.id);
     switch (item.kind) {
       case "user_message": {
-        if (existing?.kind === "user") {
-          existing.text = item.text;
+        const shown = messageBlock(item.text, message);
+        if (existing?.kind === shown.kind) {
+          Object.assign(existing, shown);
           this.transcript.touch(existing);
           return;
         }
-        this.blocks.set(item.id, this.transcript.add({ kind: "user", text: item.text }));
+        this.blocks.set(item.id, this.transcript.add(shown));
         if (this.turn) this.turn.up += estimateTokens(item.text);
         this.scroll = 0;
         return;

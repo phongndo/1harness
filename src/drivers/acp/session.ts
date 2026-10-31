@@ -237,7 +237,12 @@ export class AcpSession implements HarnessSession {
     this.#emit({ type: "turn.started", turnId });
     this.#emit({
       type: "item.completed",
-      item: { kind: "user_message", id: `acp-user-${turnId}`, text: input.text },
+      item: {
+        kind: "user_message",
+        id: `acp-user-${turnId}`,
+        text: input.text,
+        ...(input.id ? { inputId: input.id } : {}),
+      },
     });
     const prompt: unknown[] = [{ type: "text", text: input.text }];
     for (const path of input.images ?? []) {
@@ -430,6 +435,8 @@ export class AcpSession implements HarnessSession {
       });
       return;
     }
+    // The turn already shows its prompt, so an agent that echoes it would show it twice.
+    if (update.sessionUpdate === "user_message_chunk" && this.#turnId !== null) return;
     this.#emitAll(this.#translator.translate(update));
   }
 

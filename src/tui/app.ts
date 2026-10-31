@@ -32,7 +32,7 @@ import { Screen, type CursorPosition } from "./screen.ts";
 import { setLightTheme, style } from "./theme.ts";
 import { spread, truncate, visibleWidth } from "./text.ts";
 import { formatTokens, type Block } from "./transcript.ts";
-import { ThreadView } from "./view.ts";
+import { ThreadView, queuedText } from "./view.ts";
 
 export interface AppOptions {
   harness: HarnessId;
@@ -1449,7 +1449,7 @@ export class App {
     if (this.#view.turn && !this.#prompt) rows.push(this.#activity(width), "");
     const queue = this.#thread?.queue ?? [];
     for (const queued of queue)
-      rows.push(truncate(style.muted(`  ↳ queued: ${oneLine(queued.text)}`), width));
+      rows.push(truncate(style.muted(`  ↳ queued: ${oneLine(queuedText(queued))}`), width));
     if (queue.length > 0) rows.push("");
     const attention = this.#attention(width);
     if (attention) rows.push(attention, "");

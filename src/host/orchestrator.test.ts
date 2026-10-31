@@ -27,6 +27,8 @@ class FakeSession {
   readonly capabilities: Capabilities;
   readonly info: SessionInfo;
   readonly events = new AsyncQueue<HarnessEvent>();
+  /** What each turn was started with, as the harness got it. */
+  readonly prompts: string[] = [];
   readonly steered: string[] = [];
   #turns = 0;
   #pending: (() => void) | null = null;
@@ -67,11 +69,17 @@ class FakeSession {
 
   async startTurn(input: UserInput): Promise<void> {
     if (input.text.endsWith("FAIL")) throw new Error("the harness refused the turn");
+    this.prompts.push(input.text);
     const turnId = `turn-${++this.#turns}`;
     this.events.push({ type: "turn.started", turnId });
     this.events.push({
       type: "item.completed",
-      item: { kind: "user_message", id: `${turnId}-user`, text: input.text },
+      item: {
+        kind: "user_message",
+        id: `${turnId}-user`,
+        text: input.text,
+        ...(input.id ? { inputId: input.id } : {}),
+      },
     });
     const finish = () => {
       this.#running = null;
@@ -312,7 +320,18 @@ describe("Orchestrator", () => {
     const child = manager.get(String(result["threadId"]));
     assert.equal(child?.parentId, parent.id);
     assert.equal(child?.origin, "delegated");
-    assert.match(child?.runs[0]?.input ?? "", /final message goes back to that agent/);
+    // The agent is sent a brief, but its run keeps the task as it was given.
+    const session = child?.thread.session as unknown as FakeSession;
+    assert.match(session.prompts[0] ?? "", /final message goes back to that agent/);
+    assert.equal(child?.runs[0]?.input, "review the parser");
+    assert.deepEqual(child?.runs[0]?.origin, {
+      type: "task",
+      from: parent.id,
+      task: "review the parser",
+    });
+    const read = await call("thread_read", parent, { threadId: child?.id });
+    const [run] = read["runs"] as Record<string, unknown>[];
+    assert.equal(run?.["startedBy"], `task from ${parent.id}`);
     await settle();
     assert.equal(parent.runs.length, 0, "a result the parent waited for is not delivered again");
   });
@@ -322,11 +341,18 @@ describe("Orchestrator", () => {
     const started = await call("delegate_task", parent, { task: "slow work SLOW", wait: false });
     assert.notEqual(started["status"], "completed");
     await settle(80);
-    const delivered = parent.runs[0];
+    const session = parent.thread.session as unknown as FakeSession;
     assert.match(
-      delivered?.input ?? "",
+      session.prompts[0] ?? "",
       /^\[1harness\] Task task-\d+ \(fake: slow work SLOW\) completed:\n\ndone: slow work SLOW/,
     );
+    assert.equal(parent.runs[0]?.input, "done: slow work SLOW");
+    assert.deepEqual(parent.runs[0]?.origin, {
+      type: "report",
+      from: started["threadId"],
+      status: "completed",
+      result: "done: slow work SLOW",
+    });
   });
 
   it("stops a thread and its agents, dropping their queues and what they report", async () => {
@@ -337,16 +363,22 @@ describe("Orchestrator", () => {
     assert.ok(child);
     await settle(5);
     child.thread.send({ text: "and then this" });
+    // The parent has queued a message the user typed and one an agent sent.
+    parent.thread.send({ text: "next" });
+    parent.thread.send({ text: "from an agent" }, { type: "message", from: child.id });
     await orchestrator.stop(parent.id);
     await settle(80);
     assert.deepEqual(
       child.runs.map((run) => run.status),
       ["interrupted"],
     );
-    // The parent's own turn stopped, and no report started another.
+    // The parent's own turn stopped, and only what the user queued ran after it.
     assert.deepEqual(
-      parent.runs.map((run) => run.status),
-      ["interrupted"],
+      parent.runs.map((run) => [run.status, run.input]),
+      [
+        ["interrupted", "plan SLOW"],
+        ["completed", "next"],
+      ],
     );
   });
 
@@ -356,10 +388,8 @@ describe("Orchestrator", () => {
     await settle(5);
     await orchestrator.stop(String(started["threadId"]));
     await settle(60);
-    assert.match(
-      parent.runs[0]?.input ?? "",
-      /^\[1harness\] Task task-\d+ \(fake: slow work SLOW\) interrupted:/,
-    );
+    const origin = parent.runs[0]?.origin;
+    assert.equal(origin?.type === "report" && origin.status, "interrupted");
   });
 
   it("returns the same task for a retried request ID", async () => {
@@ -437,6 +467,7 @@ describe("Orchestrator", () => {
     assert.equal(sent["threadId"], target?.id);
     await manager.wait(String(target?.id), 1000);
     assert.equal(target?.runs.at(-1)?.result, "done: follow up");
+    assert.deepEqual(target?.runs.at(-1)?.origin, { type: "message", from: parent.id });
   });
 
   it("refuses a harness that cannot run as narrowly as the task", async () => {
