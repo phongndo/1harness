@@ -3,8 +3,8 @@ import type { ManagedThread } from "../host/manager.ts";
 import { inline } from "./markdown.ts";
 import { style } from "./theme.ts";
 
-// How the terminal names and colors what threads are doing, so every agent row
-// uses one word per state.
+// How the terminal names and colors what threads are doing, so agent rows and
+// the thread picker use one word per state.
 
 export type AgentStatus =
   | "starting"
@@ -127,4 +127,33 @@ export function plainLine(text: string): string {
   const line = text.split("\n").find((candidate) => candidate.trim() !== "") ?? "";
   const body = line.replace(/^\s*(?:#+\s+|[-*+]\s+|>\s*|\d+\.\s+)/, "");
   return stripVTControlCharacters(inline(body)).trim();
+}
+
+/**
+ * Tree branches for threads in tree order, each one's children after it:
+ * `├ ` and `└ ` before a child, `│ ` under a parent's later siblings.
+ */
+export function treePrefixes(threads: readonly ManagedThread[]): string[] {
+  const shown = new Set(threads.map((thread) => thread.id));
+  const parentOf = (thread: ManagedThread) =>
+    thread.parentId && shown.has(thread.parentId) ? thread.parentId : null;
+  const isLast = (index: number): boolean => {
+    const thread = threads[index];
+    if (!thread) return true;
+    const parent = parentOf(thread);
+    return !threads.slice(index + 1).some((other) => parentOf(other) === parent);
+  };
+  return threads.map((thread, index) => {
+    const parts: string[] = [];
+    let current: ManagedThread | undefined = thread;
+    let position = index;
+    while (current && parentOf(current)) {
+      const last = isLast(position);
+      parts.unshift(current === thread ? (last ? "└ " : "├ ") : last ? "  " : "│ ");
+      const parentId = parentOf(current);
+      position = threads.findIndex((other) => other.id === parentId);
+      current = threads[position];
+    }
+    return parts.join("");
+  });
 }

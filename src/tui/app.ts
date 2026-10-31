@@ -23,7 +23,7 @@ import { ExtensionHost } from "../extensions/host.ts";
 import { ToolServer } from "../extensions/tool-server.ts";
 import { ThreadManager, type ManagedThread, type ManagerEvent } from "../host/manager.ts";
 import { Orchestrator } from "../host/orchestrator.ts";
-import { agentRowOf } from "./agents.ts";
+import { agentRowOf, agentStatus, harnessLabel, treePrefixes } from "./agents.ts";
 import { Editor, applyEditingKey } from "./editor.ts";
 import { InputDecoder, type InputEvent, type Key } from "./input.ts";
 import { Menu, entry, infoPanel, lineStep, type MenuEntry } from "./menu.ts";
@@ -483,18 +483,19 @@ export class App {
     }
   }
 
-  /** Shows a thread, picking one when no ID is given. */
+  /** Shows a thread, picking one from the tree of threads when no ID is given. */
   async #switchThread(id: string): Promise<void> {
     let target = id ? this.#manager.get(id) : undefined;
     if (!target) {
       if (id) throw new Error(`No thread ${id}`);
       const threads = this.#threadOrder();
+      const prefixes = treePrefixes(threads);
       const index = await this.#pick(
         "Threads",
-        threads.map((thread) =>
+        threads.map((thread, row) =>
           entry(
-            `${"  ".repeat(this.#manager.depth(thread.id))}${thread.title || thread.id}`,
-            `${thread.harness} · ${thread.status}`,
+            `${prefixes[row] ?? ""}${thread.title || thread.id}`,
+            `${harnessLabel(thread)} · ${agentStatus(thread)}`,
             { tag: thread.id === this.#currentId ? "current" : thread.id },
           ),
         ),
