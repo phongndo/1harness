@@ -176,7 +176,7 @@ describe("unwrapShell", () => {
 });
 
 describe("CodexTranslator", () => {
-  it("drops notifications for other threads, such as Codex subagents", () => {
+  it("drops notifications for other threads, such as Codex's own agents", () => {
     const translator = new CodexTranslator();
     translator.threadId = "main";
     const delta = { threadId: "child", itemId: "i", delta: "x" };
@@ -185,7 +185,7 @@ describe("CodexTranslator", () => {
       translator.translate("item/agentMessage/delta", { ...delta, threadId: "main" }).length,
       1,
     );
-    // Subagents' requests are answered here, so their resolutions pass.
+    // Agents' requests are answered here, so their resolutions pass.
     assert.deepEqual(
       translator.translate("serverRequest/resolved", { threadId: "child", requestId: 2 }),
       [{ type: "request.resolved", requestId: "codex-request-2" }],

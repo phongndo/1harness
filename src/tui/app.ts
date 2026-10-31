@@ -695,7 +695,7 @@ export class App {
           : (run?.result?.split("\n").find((line) => line.trim()) ?? run?.error ?? child.status);
     view.item(
       {
-        kind: "subagent",
+        kind: "agent",
         id: `thread-${child.id}`,
         description: `${child.harness} · ${child.title || child.id}`,
         summary,

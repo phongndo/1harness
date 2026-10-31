@@ -94,7 +94,7 @@ export type Item =
   | { kind: "web_search"; id: string; query: string; status: ItemStatus }
   | { kind: "todo_list"; id: string; steps: TodoStep[] }
   | { kind: "plan"; id: string; text: string }
-  | { kind: "subagent"; id: string; description: string; summary: string; status: ItemStatus }
+  | { kind: "agent"; id: string; description: string; summary: string; status: ItemStatus }
   | { kind: "notice"; id: string; level: "info" | "warning" | "error"; text: string };
 
 export type ItemKind = Item["kind"];

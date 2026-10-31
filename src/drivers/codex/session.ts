@@ -848,10 +848,10 @@ export class CodexSession implements HarnessSession {
     decisions: Map<string, unknown>,
   ): HarnessRequest | null {
     const reason = typeof params["reason"] === "string" ? params["reason"] : "";
-    // Subagents run in their own threads and ask through the parent's connection.
-    const subagent =
+    // Codex's own agents run in their own threads and ask through the parent's connection.
+    const agent =
       typeof params["threadId"] === "string" && params["threadId"] !== this.info.threadId;
-    const ask = (question: string) => (subagent ? ASK.fromSubagent(question) : question);
+    const ask = (question: string) => (agent ? ASK.fromAgent(question) : question);
     const option = (label: string, decision: unknown): ApprovalOption => {
       const optionId = `d${decisions.size}`;
       decisions.set(optionId, decision);

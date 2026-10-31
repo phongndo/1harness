@@ -34,7 +34,7 @@ export const ASK = {
   tool: (name: string) => `Allow ${name}?`,
   other: "Allow this?",
   visit: (server: string) => `${server} needs you to visit a page`,
-  fromSubagent: (question: string) => `A subagent asks: ${question}`,
+  fromAgent: (question: string) => `Another agent asks: ${question}`,
 };
 
 /** The last part of a path, as questions name files. */

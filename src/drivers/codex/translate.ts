@@ -430,7 +430,7 @@ export function toItem(item: CodexThreadItem, done = true): Item | null {
         .map((state) => state?.message?.trim())
         .filter((message): message is string => Boolean(message));
       return {
-        kind: "subagent",
+        kind: "agent",
         id: item.id,
         description: call.prompt ? `${call.tool}: ${compact(call.prompt)}` : call.tool,
         summary: messages.join("\n"),
@@ -500,7 +500,7 @@ export function errorText(error: CodexTurnError | null): string | null {
 
 /**
  * Translates app-server notifications for one thread. Notifications for other
- * threads, such as Codex's own subagents, are dropped: their work appears
+ * threads, such as Codex's own agents, are dropped: their work appears
  * through the parent's collab tool items.
  */
 export class CodexTranslator {
@@ -552,7 +552,7 @@ export class CodexTranslator {
 
   translate(method: string, params: Record<string, unknown>): HarnessEvent[] {
     const threadId = params["threadId"];
-    // Requests from subagent threads are answered here too, so their resolutions pass.
+    // Requests from agent threads are answered here too, so their resolutions pass.
     if (
       method !== "serverRequest/resolved" &&
       typeof threadId === "string" &&

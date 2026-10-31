@@ -50,7 +50,7 @@ describe("ClaudeTranslator", () => {
     ]);
   });
 
-  it("completes tool calls from their results and ignores subagent transcripts", () => {
+  it("completes tool calls from their results and ignores agent transcripts", () => {
     const translator = new ClaudeTranslator();
     const started = translator.translate(
       assistant("m2", [{ type: "tool_use", id: "tool1", name: "Bash", input: { command: "ls" } }]),

@@ -202,7 +202,7 @@ export function toolItem(id: string, name: string, rawInput: unknown): Item | nu
     case "Task":
     case "Agent":
       return {
-        kind: "subagent",
+        kind: "agent",
         id,
         description: text(input["description"]) || truncate(text(input["prompt"]), 120),
         summary: "",
@@ -282,7 +282,7 @@ function complete(item: Item, output: string, failed: boolean, result?: unknown)
       };
     case "web_search":
       return { ...item, status };
-    case "subagent":
+    case "agent":
       return { ...item, summary: item.summary || truncate(output.trim(), 400), status };
     default:
       return item;
@@ -296,7 +296,7 @@ interface StreamedBlock {
 }
 
 /**
- * Translates Claude Agent SDK messages for the main conversation. Subagent
+ * Translates Claude Agent SDK messages for the main conversation. Agent
  * transcripts are summarized by their task items rather than rendered.
  */
 export class ClaudeTranslator {
@@ -574,7 +574,7 @@ export class ClaudeTranslator {
   }
 
   #result(message: Extract<SDKMessage, { type: "result" }>): HarnessEvent[] {
-    // Subagents and compaction run on other models; the meter follows the main one.
+    // Agents and compaction run on other models; the meter follows the main one.
     const models = Object.entries(message.modelUsage ?? {});
     const main =
       models.find(([model]) => model === this.model) ??
@@ -745,7 +745,7 @@ export class ClaudeTranslator {
       case "task_progress": {
         const toolUseId = message.tool_use_id ?? this.#taskTools.get(message.task_id);
         const item = toolUseId === undefined ? undefined : this.#tools.get(toolUseId);
-        if (!item || item.kind !== "subagent") return [];
+        if (!item || item.kind !== "agent") return [];
         const summary =
           message.summary ?? (message.last_tool_name ? `Using ${message.last_tool_name}` : "");
         const updated: Item = { ...item, summary };
@@ -755,7 +755,7 @@ export class ClaudeTranslator {
       case "task_notification": {
         const toolUseId = message.tool_use_id ?? this.#taskTools.get(message.task_id);
         const item = toolUseId === undefined ? undefined : this.#tools.get(toolUseId);
-        if (item?.kind === "subagent") return [];
+        if (item?.kind === "agent") return [];
         const status = message.status === "completed" ? "finished" : message.status;
         return [
           this.notice(

@@ -329,7 +329,7 @@ export class ClaudeSession implements HarnessSession {
       thinking: { type: "adaptive", display: "summarized" },
       systemPrompt: { type: "preset", preset: "claude_code" },
       canUseTool: (tool, input, context) => this.#canUseTool(tool, input, context),
-      // Running subagents get a one-line summary of what they are doing.
+      // Running agents get a one-line summary of what they are doing.
       agentProgressSummaries: true,
       stderr: (data) => {
         this.#stderr = (this.#stderr + data).slice(-STDERR_TAIL_BYTES);

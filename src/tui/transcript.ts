@@ -7,7 +7,7 @@ import { truncate, visibleWidth, wrap } from "./text.ts";
 
 export type ToolItem = Extract<
   Item,
-  { kind: "command" | "file_change" | "tool_call" | "web_search" | "subagent" }
+  { kind: "command" | "file_change" | "tool_call" | "web_search" | "agent" }
 >;
 
 export type Block =
@@ -45,7 +45,7 @@ export function isToolItem(item: Item): item is ToolItem {
     item.kind === "file_change" ||
     item.kind === "tool_call" ||
     item.kind === "web_search" ||
-    item.kind === "subagent"
+    item.kind === "agent"
   );
 }
 
@@ -295,7 +295,7 @@ function category(item: ToolItem): Category {
       return "edit";
     case "web_search":
       return "search";
-    case "subagent":
+    case "agent":
       return "agent";
     case "tool_call":
       return item.category;
@@ -421,10 +421,11 @@ export function toolLine(item: ToolItem, settled: boolean, cwd: string): string 
     }
     case "web_search":
       return style.muted(`${verb("Searched web", "Searching web", "web search")} ${item.query}`);
-    case "subagent": {
-      const summary = item.summary && !running ? `: ${firstLine(item.summary)}` : "";
+    case "agent": {
+      // The harness's own agents: what they are doing while running, then what they found.
+      const summary = item.summary ? ` · ${firstLine(item.summary)}` : "";
       return style.muted(
-        `${verb("Delegated", "Delegating", "agent")} ${item.description}${summary}`,
+        `${verb("Agent finished", "Agent working on", "agent")} ${item.description}${summary}`,
       );
     }
     case "tool_call": {
