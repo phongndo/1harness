@@ -1484,11 +1484,10 @@ export class App {
     const hint = this.#thread?.session.capabilities.steer
       ? "esc stop · enter adds to turn · tab queues"
       : "esc stop · enter queues";
-    return spread(
-      `${dot} ${style.text(`${phase} (${seconds}s)`)} ${style.muted(tokens)}`,
-      style.muted(hint),
-      width,
-    );
+    const left = `${dot} ${style.text(`${phase} (${seconds}s)`)} ${style.muted(tokens)}`;
+    // A narrow screen keeps what the turn is doing and drops the keys.
+    if (visibleWidth(left) + visibleWidth(hint) + 2 > width) return truncate(left, width);
+    return spread(left, style.muted(hint), width);
   }
 
   #statusLine(width: number): string {
