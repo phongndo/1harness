@@ -49,6 +49,17 @@ describe("InputDecoder", () => {
     ]);
   });
 
+  it("reads alt with an arrow either way terminals send it, not as esc", () => {
+    const decoder = new InputDecoder();
+    assert.deepEqual(keys(decoder.feed("\x1b[1;3A\x1b\x1b[A\x1b\x1bOB\x1b\x1b")), [
+      "meta+up",
+      "meta+up",
+      "meta+down",
+      "escape",
+      "escape",
+    ]);
+  });
+
   it("keeps a paste whole across reads, newlines included", () => {
     const decoder = new InputDecoder();
     assert.deepEqual(decoder.feed("\x1b[200~line one\r\nline"), []);

@@ -181,6 +181,20 @@ export class InputDecoder {
       return 3;
     }
     if (next === "\x1b") {
+      // Some terminals send alt with an arrow or function key as Esc before its sequence.
+      const after = data[index + 2];
+      if (after === "[" || after === "O") {
+        const inner: InputEvent[] = [];
+        const length = this.#escape(data, index + 1, inner);
+        if (length === 0) return 0;
+        for (const event of inner)
+          events.push(
+            event.type === "key"
+              ? { ...event, key: { ...event.key, meta: true, text: "" } }
+              : event,
+          );
+        return 1 + length;
+      }
       events.push(key("escape"));
       return 1;
     }
