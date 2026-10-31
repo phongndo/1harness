@@ -31,11 +31,11 @@ From a checkout, run `pnpm dev` or `node dist/cli.js` after `pnpm build`.
 ```
 
 Both harnesses get the same chat: streamed replies and reasoning, commands with
-their output, diffs, tool calls, todo lists, proposed plans, and subagents.
+their output, diffs, tool calls, todo lists, proposed plans, and agents.
 Approvals and questions offer each harness's own choices. While a turn runs, Enter
-adds a message to it and Tab queues one as the next turn. Esc interrupts. Page Up,
-Page Down, and the mouse wheel scroll the conversation; most terminals select text
-with Shift held while dragging.
+adds a message to it and Tab queues one as the next turn. Esc stops the turn and
+the agents under it. Page Up, Page Down, and the mouse wheel scroll the
+conversation; most terminals select text with Shift held while dragging.
 
 Slash commands switch the model, effort, permission mode, plan mode, and
 harness, and start, resume, or compact threads. Every harness has the same four
@@ -88,11 +88,15 @@ mode, and a harness that cannot run it that narrowly is refused. A retried
 threads working, and sixteen open; `task_cancel` on a finished task closes its
 thread.
 
-A thread an agent starts appears as a row in its parent's conversation. Its
-approvals and questions come to you wherever you are, labelled with the thread.
-`/threads` (or ctrl+t) switches between threads, and `/close` ends one along
-with the threads it started. A thread you leave keeps running in the background
-while it or a thread it started has work, and closes once they are done.
+A thread an agent starts appears as a row in its parent's conversation, with its
+status, a timer, and what it found. Its approvals and questions wait in its own
+thread: a line above the composer says an agent needs you, ctrl+o opens it, and
+alt+↑ goes back to the thread that started it. `/threads` (or ctrl+t) switches
+between threads, shown as a tree. Esc and `/stop` stop the thread on screen and
+every agent under it, and what they would have reported is not sent back.
+`/close` ends a thread along with the threads it started. A thread you leave
+keeps running in the background while it or a thread it started has work, and
+closes once they are done.
 
 ### Extensions
 
