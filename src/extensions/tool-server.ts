@@ -7,6 +7,8 @@ import type { ToolDefinition, ToolResult } from "./api.ts";
 // The newest first; a client asking for another gets the newest.
 const PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
+// A tool call that waits sends a comment this often, so HTTP idle timeouts leave it be.
+const KEEPALIVE_MS = 15_000;
 
 interface JsonRpcMessage {
   jsonrpc?: string;
@@ -47,7 +49,13 @@ export class ToolServer {
     const grant: { thread: Thread | null } = { thread: null };
     this.#grants.set(token, grant);
     return {
-      config: { type: "http", url, headers: { Authorization: `Bearer ${token}` } },
+      // Tools such as delegate_task wait on other work, so calls may take long.
+      config: {
+        type: "http",
+        url,
+        headers: { Authorization: `Bearer ${token}` },
+        timeoutSec: 3600,
+      },
       bind: (thread) => {
         grant.thread = thread;
       },
@@ -105,6 +113,17 @@ export class ToolServer {
       return;
     }
     const messages = (Array.isArray(body) ? body : [body]) as JsonRpcMessage[];
+    // A tool call can wait on other work, so it streams where the client takes a stream.
+    const single = Array.isArray(body) ? undefined : messages[0];
+    if (
+      single?.method === "tools/call" &&
+      single.id !== undefined &&
+      single.id !== null &&
+      request.headers.accept?.includes("text/event-stream")
+    ) {
+      await stream(response, this.#reply(single, grant));
+      return;
+    }
     const replies = (
       await Promise.all(messages.map((message) => this.#reply(message, grant)))
     ).filter((reply) => reply !== null);
@@ -178,6 +197,22 @@ function toolError(id: string | number, text: string) {
 
 function rpcError(id: string | number | null, code: number, message: string) {
   return { jsonrpc: "2.0", id, error: { code, message } };
+}
+
+/**
+ * Answers over an event stream: headers at once, a comment every so often while
+ * the reply is pending, then the reply as the stream's one message.
+ */
+async function stream(response: ServerResponse, reply: Promise<unknown>): Promise<void> {
+  response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+  response.flushHeaders();
+  const timer = setInterval(() => response.write(": keepalive\n\n"), KEEPALIVE_MS);
+  try {
+    const message = await reply;
+    response.end(`event: message\ndata: ${JSON.stringify(message)}\n\n`);
+  } finally {
+    clearInterval(timer);
+  }
 }
 
 function send(response: ServerResponse, status: number, body: unknown): void {

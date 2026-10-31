@@ -71,6 +71,28 @@ describe("ToolServer", () => {
         content: [{ type: "text", text: "hi" }],
       });
       assert.equal(calls[0], thread, "the tool learns which thread called it");
+      // A client that takes a stream gets one, so a long call keeps the connection busy.
+      const streamed = await fetch(grant.config.url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          ...grant.config.headers,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 7,
+          method: "tools/call",
+          params: { name: "echo", arguments: { text: "streamed" } },
+        }),
+      });
+      assert.equal(streamed.headers.get("content-type"), "text/event-stream");
+      const event = /^event: message\ndata: (.+)\n\n$/.exec(await streamed.text());
+      assert.deepEqual(JSON.parse(event?.[1] ?? "null"), {
+        jsonrpc: "2.0",
+        id: 7,
+        result: { content: [{ type: "text", text: "streamed" }] },
+      });
       const failed = await post({
         jsonrpc: "2.0",
         id: 4,
