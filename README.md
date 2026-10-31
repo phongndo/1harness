@@ -37,11 +37,28 @@ adds a message to it and Tab queues one as the next turn. Esc interrupts. Page U
 Page Down, and the mouse wheel scroll the conversation; most terminals select text
 with Shift held while dragging.
 
-Slash commands switch the model, effort, permission mode (`supervised`,
-`auto-edit`, `auto`, `full-access`), plan mode, and harness, and start, resume, or
-compact threads. Each permission mode maps onto the harness's own sandbox and
-approval rules. The harness's own commands and skills appear beside 1harness's,
-less those that only drive its own terminal. Typing after a command offers its
+Slash commands switch the model, effort, permission mode, plan mode, and
+harness, and start, resume, or compact threads. Every harness has the same four
+permission modes and carries each out with its own sandbox and approval rules,
+so details differ: in `auto-edit`, Codex runs commands inside its workspace
+sandbox without asking, where Claude Code asks first.
+
+- `supervised`: read freely; ask before edits and commands;
+- `auto-edit`: edit files without asking; ask before riskier actions;
+- `auto`: a safety check decides what needs asking;
+- `full-access`: never ask.
+
+Threads start in `full-access`. To start somewhere narrower, set `mode` in
+`~/.config/1harness/settings.json`, such as `{ "mode": "auto" }`, or pass
+`--mode` for one run; a `settings.json` that cannot be read starts threads in
+`supervised` until it is fixed. A harness that lacks the mode, or whose own
+settings rule it out (Claude Code's settings, or a sandbox Codex will not grant),
+runs the broadest mode it has below it and says so; one with nothing that narrow
+does not start.
+
+Approvals, plan prompts, and notices use the same words whichever harness asks.
+The harness's own commands and skills appear beside 1harness's, less those that
+only drive its own terminal. Typing after a command offers its
 arguments, such as `/mcp login <server>`. `@` completes files and folders with
 [fff](https://github.com/dmtrKovalenko/fff); a mentioned image is attached.
 `/help` lists everything.
