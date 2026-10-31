@@ -91,6 +91,8 @@ export function agentSpan(thread: ManagedThread): { startedAt: number; endedAt: 
 /** An agent as a parent's transcript shows it, kept current as the agent works. */
 export interface AgentRow {
   threadId: string;
+  /** The parent's tool call that started the agent, which this row shows instead. */
+  callId: string | null;
   /** `claude · haiku`. */
   label: string;
   title: string;
@@ -115,6 +117,7 @@ export function agentRowOf(thread: ManagedThread): AgentRow {
           : "";
   return {
     threadId: thread.id,
+    callId: thread.parentCallId,
     label: harnessLabel(thread),
     title: thread.title || thread.id,
     status,

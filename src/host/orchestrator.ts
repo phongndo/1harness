@@ -35,9 +35,9 @@ type TaskStatus = RunRecord["status"] | "starting" | "cancelled";
 
 /** A piece of work one thread gave another: the child thread's first run. */
 interface Task {
+  /** The child thread's ID, since each child has one task. */
   id: string;
   parentId: string;
-  childId: string;
   requestId: string | null;
   /** The parent has seen the outcome, through a wait or a status read. */
   seen: boolean;
@@ -92,7 +92,6 @@ export class Orchestrator {
   #byRequest = new Map<string, Promise<Task>>();
   /** Tasks being started, counted against the limits before their threads exist. */
   #reserved = 0;
-  #counter = 0;
 
   constructor(manager: ThreadManager, env: NodeJS.ProcessEnv = process.env) {
     this.#manager = manager;
@@ -115,7 +114,7 @@ export class Orchestrator {
       {
         name: "delegate_task",
         description:
-          "Hands a task to another agent in a new thread, on any available harness (see orchestrator_capabilities). The agent sees only the task text, not your conversation, so include the context it needs. By default this waits for the result; with wait set to false it returns a taskId at once, and the result is sent to you as a message when the task finishes.",
+          "Hands a task to another agent in a new thread, on any available harness (see orchestrator_capabilities). The agent sees only the task text, not your conversation, so include the context it needs. By default this waits for the result; with wait set to false it returns a taskId at once, and the result is sent to you as a message when the task finishes. A task's ID is its thread's ID, which the thread tools take too.",
         inputSchema: {
           type: "object",
           properties: {
@@ -162,7 +161,7 @@ export class Orchestrator {
           required: ["task"],
         },
         execute: async (input, context) =>
-          this.#json(await this.#delegate(this.#caller(context), input)),
+          this.#json(await this.#delegate(this.#caller(context), input, context.callId ?? null)),
       },
       {
         name: "task_status",
@@ -198,7 +197,7 @@ export class Orchestrator {
           const task = this.#task(this.#caller(context), input);
           // The caller knows the outcome, so it is not also delivered when the thread closes.
           task.seen = true;
-          const child = this.#manager.get(task.childId);
+          const child = this.#manager.get(task.id);
           if (child && child.status !== "closed") {
             await child.thread.interrupt().catch(() => {});
             await this.#manager.close(child.id);
@@ -380,14 +379,15 @@ export class Orchestrator {
     };
   }
 
-  async #delegate(caller: ManagedThread, input: Record<string, unknown>) {
+  /** `callId` is the caller's tool call, where its harness said which. */
+  async #delegate(caller: ManagedThread, input: Record<string, unknown>, callId: string | null) {
     const requestId = text(input, "requestId") ?? null;
     const wait = input["wait"] !== false;
     const timeout = seconds(input["timeoutSeconds"], DEFAULT_WAIT_SECONDS);
     const key = requestId ? `${caller.id}\0${requestId}` : null;
     let starting = key ? this.#byRequest.get(key) : undefined;
     if (!starting) {
-      starting = this.#start(caller, input, requestId);
+      starting = this.#start(caller, input, requestId, callId);
       if (key) {
         this.#byRequest.set(key, starting);
         // A task that failed to start can be tried again with the same ID.
@@ -404,6 +404,7 @@ export class Orchestrator {
     caller: ManagedThread,
     input: Record<string, unknown>,
     requestId: string | null,
+    callId: string | null,
   ): Promise<Task> {
     const brief = text(input, "task");
     if (!brief) throw new OrchestrationError("invalid_request", "task is empty");
@@ -469,6 +470,7 @@ export class Orchestrator {
           },
           title: titleFrom(text(input, "title") ?? brief),
           parentId: caller.id,
+          parentCallId: callId,
           origin: "delegated",
         });
       } catch (error) {
@@ -477,9 +479,8 @@ export class Orchestrator {
         throw error;
       }
       const task: Task = {
-        id: `task-${++this.#counter}`,
+        id: child.id,
         parentId: caller.id,
-        childId: child.id,
         requestId,
         seen: false,
         delivered: false,
@@ -505,7 +506,7 @@ export class Orchestrator {
 
   /** The task's run has ended, or its thread has gone. */
   #finished(task: Task): boolean {
-    const child = this.#manager.get(task.childId);
+    const child = this.#manager.get(task.id);
     if (!child || child.status === "closed") return true;
     const run = child.runs[0];
     // A thread with nothing to do and no run had its task dropped by an extension.
@@ -514,7 +515,7 @@ export class Orchestrator {
 
   /** Waits for the task to finish, or to need the user, or for the timeout. */
   #waitTask(task: Task, timeoutMs: number): Promise<void> {
-    const child = this.#manager.get(task.childId);
+    const child = this.#manager.get(task.id);
     if (!child || this.#finished(task) || child.status === "waiting") return Promise.resolve();
     task.waiting++;
     return new Promise((resolve) => {
@@ -533,7 +534,7 @@ export class Orchestrator {
   }
 
   #taskView(task: Task, timedOut: boolean) {
-    const child = this.#manager.get(task.childId);
+    const child = this.#manager.get(task.id);
     const run = child?.runs[0];
     const finished = this.#finished(task);
     if (finished) task.seen = true;
@@ -542,7 +543,7 @@ export class Orchestrator {
       run?.status ?? (dropped ? "failed" : child?.status === "closed" ? "cancelled" : "starting");
     return {
       taskId: task.id,
-      threadId: task.childId,
+      threadId: task.id,
       harness: child?.harness ?? null,
       title: child?.title ?? null,
       status,
@@ -581,25 +582,24 @@ export class Orchestrator {
    * allows, or as its next turn.
    */
   #deliver(child: ManagedThread): void {
-    for (const task of this.#tasks.values()) {
-      if (task.childId !== child.id || task.delivered || task.seen || task.waiting > 0) continue;
-      if (!this.#finished(task)) continue;
-      task.delivered = true;
-      // A parent closing with its children has no use for their outcomes.
-      const parent = this.#manager.get(task.parentId);
-      if (!parent || this.#manager.closing(parent.id)) continue;
-      const view = this.#taskView(task, false);
-      const { status } = view;
-      // Only a finished task is reported, so it is never running or starting.
-      if (status === "running" || status === "starting") continue;
-      const outcome = view.result ?? view.error ?? "(no reply)";
-      const message = `[1harness] Task ${task.id} (${child.harness}: ${child.title}) ${status}:\n\n${outcome}`;
-      const origin = { type: "report", from: child.id, status, result: outcome } as const;
-      if (parent.thread.busy && parent.thread.session.capabilities.steer) {
-        void parent.thread.steer({ text: message }, origin);
-      } else {
-        parent.thread.send({ text: message }, origin);
-      }
+    const task = this.#tasks.get(child.id);
+    if (!task || task.delivered || task.seen || task.waiting > 0) return;
+    if (!this.#finished(task)) return;
+    task.delivered = true;
+    // A parent closing with its children has no use for their outcomes.
+    const parent = this.#manager.get(task.parentId);
+    if (!parent || this.#manager.closing(parent.id)) return;
+    const view = this.#taskView(task, false);
+    const { status } = view;
+    // Only a finished task is reported, so it is never running or starting.
+    if (status === "running" || status === "starting") return;
+    const outcome = view.result ?? view.error ?? "(no reply)";
+    const message = `[1harness] Task ${task.id} (${child.harness}: ${child.title}) ${status}:\n\n${outcome}`;
+    const origin = { type: "report", from: child.id, status, result: outcome } as const;
+    if (parent.thread.busy && parent.thread.session.capabilities.steer) {
+      void parent.thread.steer({ text: message }, origin);
+    } else {
+      parent.thread.send({ text: message }, origin);
     }
   }
 

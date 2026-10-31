@@ -1,19 +1,19 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Thread } from "../core/thread.ts";
-import type { ToolDefinition } from "./api.ts";
+import type { ToolContext, ToolDefinition } from "./api.ts";
 import { ToolServer } from "./tool-server.ts";
 
 describe("ToolServer", () => {
   it("serves tools over MCP to sessions that hold a grant", async () => {
-    const calls: unknown[] = [];
+    const calls: ToolContext[] = [];
     const echo: ToolDefinition = {
       name: "echo",
       description: "Repeats its text",
       inputSchema: { type: "object", properties: { text: { type: "string" } } },
       readOnly: true,
       execute: (input, context) => {
-        calls.push(context.thread);
+        calls.push(context);
         if (input["text"] === "boom") throw new Error("exploded");
         return String(input["text"]);
       },
@@ -21,7 +21,10 @@ describe("ToolServer", () => {
     const server = new ToolServer(() => new Map([["echo", { tool: echo }]]), "1.0.0");
     const grant = await server.grant();
     assert.ok(grant && grant.config.type === "http");
-    const thread = {} as Thread;
+    // The harness says which call this is in metadata only its driver reads.
+    const thread = {
+      session: { mcpCallId: (meta: Record<string, unknown>) => String(meta["call"] ?? "") || null },
+    } as unknown as Thread;
     grant.bind(thread);
     const post = async (
       body: unknown,
@@ -65,12 +68,13 @@ describe("ToolServer", () => {
         jsonrpc: "2.0",
         id: 3,
         method: "tools/call",
-        params: { name: "echo", arguments: { text: "hi" } },
+        params: { name: "echo", arguments: { text: "hi" }, _meta: { call: "c1" } },
       });
       assert.deepEqual((call.body as { result: unknown }).result, {
         content: [{ type: "text", text: "hi" }],
       });
-      assert.equal(calls[0], thread, "the tool learns which thread called it");
+      assert.equal(calls[0]?.thread, thread, "the tool learns which thread called it");
+      assert.equal(calls[0]?.callId, "c1", "and which of its calls it is");
       // A client that takes a stream gets one, so a long call keeps the connection busy.
       const streamed = await fetch(grant.config.url, {
         method: "POST",

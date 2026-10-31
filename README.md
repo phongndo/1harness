@@ -83,13 +83,14 @@ when it finishes; `task_status` and `task_cancel` follow it up; `thread_list`,
 `thread_read`, `thread_send`, `thread_wait`, and `thread_interrupt` work on any
 thread; `orchestrator_capabilities` lists the harnesses and limits. A task never
 gets a broader permission mode than the thread that started it, or leaves plan
-mode, and a harness that cannot run it that narrowly is refused. A retried
-`requestId` returns the same task. Delegation stops at three levels deep, eight
+mode, and a harness that cannot run it that narrowly is refused. A task goes by
+its thread's ID, such as `t2`, and a retried `requestId` returns the same task. Delegation stops at three levels deep, eight
 threads working, and sixteen open; `task_cancel` on a finished task closes its
 thread.
 
 A thread an agent starts appears as a row in its parent's conversation, with its
-status, a timer, and what it found. Its approvals and questions wait in its own
+status, a timer, and what it found; on Claude Code and Codex the row takes the
+place of the call that started it. Its approvals and questions wait in its own
 thread: a line above the composer says an agent needs you, ctrl+o opens it, and
 alt+↑ goes back to the thread that started it. `/threads` (or ctrl+t) switches
 between threads, shown as a tree. Esc and `/stop` stop the thread on screen and

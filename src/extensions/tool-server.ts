@@ -175,7 +175,12 @@ export class ToolServer {
         if (!grant.thread) return toolError(id, "The session is still starting");
         try {
           const input = (params["arguments"] ?? {}) as Record<string, unknown>;
-          const result = await entry.tool.execute(input, { thread: grant.thread });
+          const meta = (params["_meta"] ?? {}) as Record<string, unknown>;
+          const callId = grant.thread.session.mcpCallId?.(meta) ?? null;
+          const result = await entry.tool.execute(input, {
+            thread: grant.thread,
+            ...(callId ? { callId } : {}),
+          });
           return { jsonrpc: "2.0", id, result: toolResult(result) };
         } catch (error) {
           return toolError(id, errorMessage(error));

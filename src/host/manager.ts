@@ -41,6 +41,8 @@ export interface ManagedThread {
   readonly harness: HarnessId;
   /** The thread that started this one, for delegated work. */
   readonly parentId: string | null;
+  /** The tool call in the parent's thread that started this one, where its harness said which. */
+  readonly parentCallId: string | null;
   readonly origin: "user" | "delegated";
   readonly thread: Thread;
   readonly createdAt: number;
@@ -63,6 +65,7 @@ export interface CreateThreadOptions {
   settings: SessionOptions;
   title?: string;
   parentId?: string | null;
+  parentCallId?: string | null;
   origin?: "user" | "delegated";
 }
 
@@ -189,6 +192,7 @@ export class ThreadManager {
       title: options.title ?? "",
       harness: options.harness,
       parentId: options.parentId ?? null,
+      parentCallId: options.parentCallId ?? null,
       origin: options.origin ?? "user",
       thread,
       createdAt: Date.now(),

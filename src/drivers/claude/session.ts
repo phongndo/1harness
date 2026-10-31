@@ -295,6 +295,11 @@ export class ClaudeSession implements HarnessSession {
     }
   }
 
+  mcpCallId(meta: Record<string, unknown>): string | null {
+    const id = meta["claudecode/toolUseId"];
+    return typeof id === "string" ? id : null;
+  }
+
   async listThreads(): Promise<ThreadSummary[]> {
     const sessions = await listSessions({ dir: this.info.cwd, limit: 20 });
     return sessions.map((session) => ({

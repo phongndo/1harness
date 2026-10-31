@@ -179,10 +179,18 @@ const settings = (runtimeMode: RuntimeMode = "supervised"): SessionOptions => ({
   resume: null,
 });
 
-async function call(name: string, caller: ManagedThread, input: Record<string, unknown>) {
+async function call(
+  name: string,
+  caller: ManagedThread,
+  input: Record<string, unknown>,
+  callId?: string,
+) {
   const tool = byName.get(name);
   assert.ok(tool, name);
-  const output = await tool.execute(input, { thread: caller.thread });
+  const output = await tool.execute(input, {
+    thread: caller.thread,
+    ...(callId ? { callId } : {}),
+  });
   return JSON.parse(String(output)) as Record<string, unknown>;
 }
 
@@ -311,14 +319,19 @@ describe("ThreadManager", () => {
 describe("Orchestrator", () => {
   it("delegates a task to a child thread and waits for its result", async () => {
     const parent = await manager.create({ harness: "fake", settings: settings() });
-    const result = await call("delegate_task", parent, {
-      task: "review the parser",
-      title: "Review",
-    });
+    const result = await call(
+      "delegate_task",
+      parent,
+      { task: "review the parser", title: "Review" },
+      "call-1",
+    );
     assert.equal(result["status"], "completed");
     assert.equal(result["result"], "done: review the parser");
-    const child = manager.get(String(result["threadId"]));
+    // A task goes by its thread's ID.
+    assert.equal(result["taskId"], result["threadId"]);
+    const child = manager.get(String(result["taskId"]));
     assert.equal(child?.parentId, parent.id);
+    assert.equal(child?.parentCallId, "call-1");
     assert.equal(child?.origin, "delegated");
     // The agent is sent a brief, but its run keeps the task as it was given.
     const session = child?.thread.session as unknown as FakeSession;
@@ -344,7 +357,7 @@ describe("Orchestrator", () => {
     const session = parent.thread.session as unknown as FakeSession;
     assert.match(
       session.prompts[0] ?? "",
-      /^\[1harness\] Task task-\d+ \(fake: slow work SLOW\) completed:\n\ndone: slow work SLOW/,
+      /^\[1harness\] Task t\d+ \(fake: slow work SLOW\) completed:\n\ndone: slow work SLOW/,
     );
     assert.equal(parent.runs[0]?.input, "done: slow work SLOW");
     assert.deepEqual(parent.runs[0]?.origin, {
@@ -506,7 +519,7 @@ describe("Orchestrator", () => {
     assert.deepEqual(closed, [cancelled["threadId"]]);
     assert.equal(cancelled["status"], "interrupted");
     assert.equal(manager.get(String(cancelled["threadId"]))?.status, "closed");
-    await assert.rejects(call("task_status", parent, { taskId: "task-999" }), /task_not_found/);
+    await assert.rejects(call("task_status", parent, { taskId: "t999" }), /task_not_found/);
     await settle();
     assert.equal(parent.runs.length, 0, "a cancelled task's outcome is not delivered");
   });

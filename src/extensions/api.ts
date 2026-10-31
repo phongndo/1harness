@@ -81,6 +81,8 @@ export type ToolResult = string | { content: unknown[]; isError?: boolean };
 export interface ToolContext {
   /** The thread whose agent called the tool. */
   readonly thread: Thread;
+  /** The ID of the tool call item in that thread, where its harness says which call this is. */
+  readonly callId?: string;
 }
 
 /** A tool every harness's agent can call, served to it over MCP. */

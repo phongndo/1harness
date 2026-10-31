@@ -382,6 +382,8 @@ function groupSummary(items: readonly ToolItem[]): string {
 /** A group of one is a single row; more get a sentence over a tree. */
 function toolRows(block: Extract<Block, { kind: "tools" }>, context: RenderContext): string[] {
   const { items } = block;
+  // A group whose only calls started agents shows nothing; the agents' rows show them.
+  if (items.length === 0) return [];
   const running = !block.settled && items.some((item) => item.status === "running");
   const marker = running && !context.blink ? " " : style.strong("●");
   const [only] = items;

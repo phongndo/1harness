@@ -79,6 +79,8 @@ export class ThreadView {
   total = 0;
   /** The agents this thread started, by thread ID, and the blocks that show them. */
   #agents = new Map<string, Extract<Block, { kind: "agents" }>>();
+  /** Tool calls that started agents, which the agents' rows show instead. */
+  #agentCalls = new Set<string>();
   /** How many blocks the transcript had when the turn started. */
   #turnStart = 0;
 
@@ -138,11 +140,13 @@ export class ThreadView {
   }
 
   /**
-   * Shows or updates an agent this thread started. An agent joins the block of
-   * the one before it when nothing came between them, as when a turn starts
-   * several at once with parallel calls.
+   * Shows or updates an agent this thread started, in place of the call that
+   * started it where the row says which. An agent joins the block of the one
+   * before it when nothing came between them, as when a turn starts several at
+   * once with parallel calls.
    */
   agent(row: AgentRow): void {
+    if (row.callId) this.#hideCall(row.callId);
     const shown = this.#agents.get(row.threadId);
     if (shown) {
       const index = shown.rows.findIndex((other) => other.threadId === row.threadId);
@@ -150,7 +154,10 @@ export class ThreadView {
       this.transcript.touch(shown);
       return;
     }
-    const last = this.transcript.last((block) => block.kind === "todos");
+    // Todo lists and groups left empty by calls that started agents show nothing between them.
+    const last = this.transcript.last(
+      (block) => block.kind === "todos" || (block.kind === "tools" && block.items.length === 0),
+    );
     const block =
       last?.kind === "agents" ? last : this.transcript.add({ kind: "agents", rows: [] });
     block.rows.push(row);
@@ -184,6 +191,17 @@ export class ThreadView {
       status === "interrupted" ? "Interrupted · " : status === "failed" ? "Failed · " : "";
     this.transcript.add({ kind: "summary", text: `${label}${seconds}s ${tokens}` });
     if (status === "failed" && error) this.notice("error", error);
+  }
+
+  /** Takes a call that started an agent out of its tool group, now and when it updates. */
+  #hideCall(id: string): void {
+    if (this.#agentCalls.has(id)) return;
+    this.#agentCalls.add(id);
+    const block = this.blocks.get(id);
+    if (block?.kind !== "tools") return;
+    this.blocks.delete(id);
+    block.items = block.items.filter((item) => item.id !== id);
+    this.transcript.touch(block);
   }
 
   /** Marks tool rows that will never finish, once their session has gone. */
@@ -262,7 +280,7 @@ export class ThreadView {
         return;
       }
     }
-    if (!isToolItem(item)) return;
+    if (!isToolItem(item) || this.#agentCalls.has(item.id)) return;
     if (existing?.kind === "tools") {
       const index = existing.items.findIndex((other) => other.id === item.id);
       if (index === -1) existing.items.push(item);

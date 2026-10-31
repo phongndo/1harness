@@ -529,6 +529,12 @@ export class CodexSession implements HarnessSession {
     }
   }
 
+  mcpCallId(meta: Record<string, unknown>): string | null {
+    // The mcpToolCall item's ID; `itemId` is the model API's ID for the same call.
+    const id = meta["callId"];
+    return typeof id === "string" ? id : null;
+  }
+
   async listThreads(): Promise<ThreadSummary[]> {
     const response = await this.#request<{
       data: { id: string; name: string | null; preview: string; updatedAt: number }[];

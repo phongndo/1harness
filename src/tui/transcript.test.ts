@@ -12,6 +12,7 @@ const context = { width: 60, cwd: "/work", blink: true, now: 100_000 };
 
 const row = (overrides: Partial<AgentRow>): AgentRow => ({
   threadId: "t2",
+  callId: null,
   label: "claude · haiku",
   title: "Review the parser",
   status: "working",
@@ -34,6 +35,15 @@ const delegate = (id: string): ToolItem => ({
   summary: "",
   output: "",
   status: "running",
+});
+
+const ran = (id: string, command: string): ToolItem => ({
+  kind: "command",
+  id,
+  command,
+  output: "",
+  exitCode: 0,
+  status: "completed",
 });
 
 describe("Transcript", () => {
@@ -186,8 +196,10 @@ describe("agents", () => {
 describe("ThreadView", () => {
   it("groups agents started one after another", () => {
     const view = new ThreadView("t1");
+    // A harness that does not say which call started an agent keeps the call's row too.
     const agent: AgentRow = {
       threadId: "t2",
+      callId: null,
       label: "claude",
       title: "One",
       status: "working",
@@ -209,6 +221,32 @@ describe("ThreadView", () => {
       "● 2 agents · 1 working · 1 done",
       "├ t2 One  claude                                     done 5s",
       "└ t3 Two  claude                                 working 10s",
+    ]);
+  });
+
+  it("shows an agent in place of the call that started it", () => {
+    const view = new ThreadView("t1");
+    const agent = { label: "codex" };
+    view.startTurn();
+    view.item(ran("c1", "ls"), true, true);
+    view.item(delegate("d1"), false, true);
+    view.item(delegate("d2"), false, true);
+    view.agent(row({ ...agent, threadId: "t2", callId: "d1", title: "One" }));
+    view.agent(row({ ...agent, threadId: "t3", callId: "d2", title: "Two" }));
+    view.item({ ...delegate("d1"), status: "completed" }, true, true);
+    // An agent can show before the call that started it.
+    view.agent(row({ ...agent, threadId: "t4", callId: "d3", title: "Three" }));
+    view.item(delegate("d3"), false, true);
+    view.item(ran("c2", "git status"), true, true);
+    assert.deepEqual(plain(view.transcript.view(context, 20, 0).rows), [
+      "● Ran ls",
+      "",
+      "● 3 agents · 3 working",
+      "├ t2 One  codex                               working 1m 05s",
+      "├ t3 Two  codex                               working 1m 05s",
+      "└ t4 Three  codex                             working 1m 05s",
+      "",
+      "● Ran git status",
     ]);
   });
 
@@ -249,7 +287,7 @@ describe("ThreadView", () => {
     };
     const report: Message = {
       id: "m2",
-      input: { text: "[1harness] Task task-1 (codex: Fix) completed:\n\n**Fixed** it" },
+      input: { text: "[1harness] Task t2 (codex: Fix) completed:\n\n**Fixed** it" },
       origin: { type: "report", from: "t2", status: "completed", result: "**Fixed** it\n\nMore." },
     };
     view.item(echo("m1", brief.input.text), true, true, brief);
