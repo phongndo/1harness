@@ -292,7 +292,13 @@ export interface UserInput {
 /** An MCP server 1harness adds to a session, besides the harness's own. */
 export type McpServerConfig =
   | { type: "stdio"; command: string; args: string[]; env: Record<string, string> }
-  | { type: "http"; url: string; headers: Record<string, string> };
+  | {
+      type: "http";
+      url: string;
+      headers: Record<string, string>;
+      /** How long one tool call may take, for tools that wait on other work. */
+      timeoutSec?: number;
+    };
 
 export interface SessionOptions {
   cwd: string;

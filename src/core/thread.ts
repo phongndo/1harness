@@ -13,7 +13,8 @@ import type {
 export type ThreadEvent =
   | HarnessEvent
   | { type: "queue.changed"; queue: readonly UserInput[] }
-  | { type: "error"; message: string };
+  /** `input` is set when the error is that a message could not start its turn. */
+  | { type: "error"; message: string; input?: UserInput };
 
 export type ThreadListener = (event: ThreadEvent) => void;
 
@@ -64,6 +65,19 @@ export class Thread {
 
   get closed(): boolean {
     return this.#closed;
+  }
+
+  /**
+   * Nothing to do: no turn, nothing queued or still passing input handlers,
+   * and no open request.
+   */
+  get idle(): boolean {
+    return (
+      !this.#busy &&
+      this.#queue.length === 0 &&
+      this.#pendingInputs === 0 &&
+      this.#requests.size === 0
+    );
   }
 
   get queue(): readonly UserInput[] {
@@ -127,15 +141,21 @@ export class Thread {
     }
     // Handlers may be slow; a message sent after this one still goes after it.
     this.#pendingInputs++;
+    // Listeners learn the thread has work before the handlers finish.
+    this.#emit({ type: "queue.changed", queue: this.#queue });
     this.#inputChain = this.#inputChain.then(async () => {
+      let input: UserInput | null;
       try {
-        const input = await this.#filterInput(original);
-        if (input) this.#enqueue(input);
+        input = await this.#filterInput(original);
       } catch (error) {
-        this.#emit({ type: "error", message: `An input handler failed: ${errorMessage(error)}` });
-      } finally {
         this.#pendingInputs--;
+        this.#emit({ type: "error", message: `An input handler failed: ${errorMessage(error)}` });
+        return;
       }
+      this.#pendingInputs--;
+      if (input) this.#enqueue(input);
+      // A dropped message may leave the thread with nothing to do.
+      else this.#emit({ type: "queue.changed", queue: this.#queue });
     });
   }
 
@@ -247,7 +267,7 @@ export class Thread {
     this.#busy = true;
     this.session.startTurn(input).catch((error: unknown) => {
       this.#busy = false;
-      this.#emit({ type: "error", message: errorMessage(error) });
+      this.#emit({ type: "error", message: errorMessage(error), input });
       this.#drain();
     });
   }
