@@ -98,9 +98,7 @@ export function agentRowOf(thread: ManagedThread): AgentRow {
   const asking = thread.thread.requests[0];
   const detail =
     status === "needs you"
-      ? asking?.kind === "question"
-        ? "Has a question"
-        : "Needs approval"
+      ? `${asking?.kind === "question" ? "Has a question" : "Needs approval"} · ctrl+o to answer`
       : status === "done"
         ? plainLine(run?.result ?? "") || "Finished without a reply"
         : status === "failed"

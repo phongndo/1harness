@@ -51,6 +51,8 @@ const KEYS: [string, string][] = [
   ["alt+enter, ctrl+j", "new line"],
   ["shift+tab", "toggle plan mode"],
   ["ctrl+t", "switch threads"],
+  ["ctrl+o", "open the agent that needs you"],
+  ["alt+↑", "go to the thread that started this one"],
   ["@", "mention a file or folder"],
   ["ctrl+j, ctrl+k", "move in any list, completions included"],
   ["j k, g G, ctrl+d ctrl+u", "move in lists that take no typing"],
@@ -514,6 +516,9 @@ export class App {
   #show(thread: ManagedThread): void {
     this.#currentId = thread.id;
     this.#retired.delete(thread.id);
+    // A prompt belongs to the thread it asks for; it comes back with that thread.
+    if (this.#prompt && this.#prompt.asking.threadId !== thread.id) this.#prompt = null;
+    this.#nextRequest();
     // /new and /harness start from the thread on screen.
     const info = thread.thread.session.info;
     this.#harness = thread.harness;
@@ -697,15 +702,17 @@ export class App {
 
   // Requests and pickers
 
+  /**
+   * Shows the current thread's oldest request. Other threads' requests wait
+   * for the user to open them, announced by the attention line, so a prompt
+   * never takes over the composer for a thread not on screen.
+   */
   #nextRequest(): void {
     if (this.#prompt) return;
-    const next = this.#requests[0];
+    const next = this.#requests.find((open) => open.threadId === this.#currentId);
     if (!next) return;
     const request = next.request;
     const respond = (response: Parameters<Thread["respond"]>[1]) => this.#respond(next, response);
-    // A request from a thread not on screen names it.
-    const from = next.threadId === this.#currentId ? null : this.#manager.get(next.threadId);
-    const where = from ? ` · ${from.id} ${from.harness}: ${from.title}` : "";
     if (request.kind === "approval") {
       const initial = Math.max(
         0,
@@ -715,7 +722,7 @@ export class App {
       this.#showPrompt(
         next,
         {
-          header: `Permission needed${where}`,
+          header: "Permission needed",
           tag: command ? "Command" : "",
           title: request.title,
           detail: request.detail ? [request.detail] : [],
@@ -743,7 +750,7 @@ export class App {
       this.#showPrompt(
         next,
         {
-          header: `Question${where}`,
+          header: "Question",
           tag: question.header,
           title: question.question,
           detail: [],
@@ -865,6 +872,19 @@ export class App {
       void this.#switchThread("").catch((error: unknown) =>
         this.#notice("error", errorMessage(error)),
       );
+      return;
+    }
+    // Moving between threads works under a prompt, which comes back with its thread.
+    if (key.ctrl && key.name === "o" && !this.#panel) {
+      const asking = this.#requests.find((open) => open.threadId !== this.#currentId);
+      const thread = asking ? this.#manager.get(asking.threadId) : undefined;
+      if (thread) this.#show(thread);
+      return;
+    }
+    // Without a parent, alt+↑ is up.
+    const parent = this.#manager.get(this.#current?.parentId ?? "");
+    if (key.meta && key.name === "up" && !this.#panel && parent) {
+      this.#show(parent);
       return;
     }
     if (key.name === "pageup" || key.name === "pagedown") {
@@ -1431,6 +1451,8 @@ export class App {
     for (const queued of queue)
       rows.push(truncate(style.muted(`  ↳ queued: ${oneLine(queued.text)}`), width));
     if (queue.length > 0) rows.push("");
+    const attention = this.#attention(width);
+    if (attention) rows.push(attention, "");
 
     let cursor: CursorPosition | null = null;
     if (this.#prompt) {
@@ -1466,6 +1488,22 @@ export class App {
       return { rows: rows.slice(cut), cursor };
     }
     return { rows, cursor };
+  }
+
+  /**
+   * The line that says another thread needs the user, such as an agent's
+   * approval: the oldest one, with how many more are waiting.
+   */
+  #attention(width: number): string | null {
+    const waiting = this.#requests.filter((open) => open.threadId !== this.#currentId);
+    const [first] = waiting;
+    const thread = first ? this.#manager.get(first.threadId) : undefined;
+    if (!first || !thread) return null;
+    const what = first.request.kind === "question" ? "has a question" : "needs approval";
+    const others = new Set(waiting.map((open) => open.threadId)).size - 1;
+    const more = others > 0 ? style.muted(` · ${others} more`) : "";
+    const left = `${style.attention("◆")} ${style.text(thread.id)} ${style.soft(harnessLabel(thread))}${style.muted(" · ")}${style.strong(thread.title || "untitled")} ${style.attention(what)}${more}`;
+    return spread(truncate(left, Math.max(0, width - 14)), style.muted("ctrl+o open"), width);
   }
 
   /** fx's activity line: a blinking dot, the phase and elapsed time, then the token estimate. */
