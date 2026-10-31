@@ -9,7 +9,6 @@ import {
 import type {
   HarnessId,
   HarnessRequest,
-  Item,
   NativeCommand,
   RateLimit,
   SessionInfo,
@@ -18,10 +17,12 @@ import type {
 } from "../core/events.ts";
 import { FileIndex, mentionedImages, type FileMatch } from "../core/files.ts";
 import { configDir, stateDir } from "../core/paths.ts";
-import { Thread, errorMessage, type ThreadEvent } from "../core/thread.ts";
-import { createSession } from "../drivers/index.ts";
+import { errorMessage, type Thread, type ThreadEvent } from "../core/thread.ts";
+import type { ToolDefinition } from "../extensions/api.ts";
 import { ExtensionHost } from "../extensions/host.ts";
 import { ToolServer } from "../extensions/tool-server.ts";
+import { ThreadManager, type ManagedThread, type ManagerEvent } from "../host/manager.ts";
+import { Orchestrator } from "../host/orchestrator.ts";
 import { Editor, applyEditingKey } from "./editor.ts";
 import { InputDecoder, type InputEvent, type Key } from "./input.ts";
 import { Menu, entry, infoPanel, lineStep, type MenuEntry } from "./menu.ts";
@@ -29,7 +30,8 @@ import { ChoicePrompt, type ChoiceConfig, type ChoiceResult } from "./prompt.ts"
 import { Screen, type CursorPosition } from "./screen.ts";
 import { setLightTheme, style } from "./theme.ts";
 import { spread, truncate, visibleWidth } from "./text.ts";
-import { Transcript, formatTokens, isToolItem, type Block } from "./transcript.ts";
+import { formatTokens, type Block } from "./transcript.ts";
+import { ThreadView } from "./view.ts";
 
 export interface AppOptions {
   harness: HarnessId;
@@ -45,6 +47,7 @@ const KEYS: [string, string][] = [
   ["tab", "while working, queue as the next turn"],
   ["alt+enter, ctrl+j", "new line"],
   ["shift+tab", "toggle plan mode"],
+  ["ctrl+t", "switch threads"],
   ["@", "mention a file or folder"],
   ["ctrl+j, ctrl+k", "move in any list, completions included"],
   ["j k, g G, ctrl+d ctrl+u", "move in lists that take no typing"],
@@ -56,8 +59,6 @@ const KEYS: [string, string][] = [
   ["shift+drag", "select text in most terminals"],
 ];
 
-type Phase = "Thinking" | "Generating";
-
 const FRAME_MS = 16;
 const MENTION_LIMIT = 50;
 const BLINK_MS = 500;
@@ -68,19 +69,17 @@ const SEQUENCE_TIMEOUT_MS = 40;
 // The SDK warns that full access skips canUseTool, which 1harness keeps for later mode changes.
 const IGNORED_STDERR = [/CLAUDE_SDK_CAN_USE_TOOL_SHADOWED/, /^\(Use `node --trace-warnings/];
 
-/** Rough tokens for text, as fx estimates its live counters. */
-function estimateTokens(text: string): number {
-  return text.length / 4;
+interface OpenRequest {
+  threadId: string;
+  request: HarnessRequest;
+}
+
+function sameRequest(a: OpenRequest, threadId: string, requestId: string): boolean {
+  return a.threadId === threadId && a.request.id === requestId;
 }
 
 function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
-}
-
-/** The last bold heading in reasoning text, as Codex writes its summaries. */
-function reasoningHeading(text: string): string | null {
-  const headings = [...text.matchAll(/\*\*([^*\n]{2,80})\*\*/g)];
-  return headings.at(-1)?.[1]?.trim() ?? null;
 }
 
 /** How a file mention is written: `@path`, quoted when the path has spaces. */
@@ -100,13 +99,20 @@ export class App {
   #screen = new Screen(process.stdout);
   #decoder = new InputDecoder();
   #editor = new Editor();
-  #transcript = new Transcript();
+  /** The harness and settings the next thread starts with. */
   #harness: HarnessId;
   #settings: SessionOptions;
   #version: string;
-  #thread: Thread | null = null;
-  #unsubscribe: (() => void) | null = null;
-  #info: SessionInfo | null = null;
+  /** Every thread, live or in the background; the one shown is `#currentId`. */
+  #manager: ThreadManager;
+  #orchestrator: Orchestrator;
+  #orchestratorTools: ReadonlyMap<string, { tool: ToolDefinition }>;
+  #views = new Map<string, ThreadView>();
+  /** What shows before the first thread starts; the first thread then takes it over. */
+  #home = new ThreadView("home");
+  #currentId: string | null = null;
+  /** The line a thread being opened shows first, such as "New codex thread". */
+  #announce: string | null = null;
   /** Lists that commands keep for the thread, such as models, fetched on first use. */
   #lookups = new Map<string, unknown[] | Promise<unknown[]>>();
   /** 1harness's commands, extensions' included. */
@@ -114,29 +120,17 @@ export class App {
   #context: CommandContext;
   #extensions: ExtensionHost;
   #extraExtensions: string[];
-  /** Disconnects the extensions from the current thread. */
-  #detach: (() => void) | null = null;
-  /** Serves extensions' tools to every session over MCP. */
+  /** Serves extensions' and the orchestrator's tools to every session over MCP. */
   #tools: ToolServer;
-  #revokeTools: (() => void) | null = null;
-  /** Config problems already shown, so each appears once. */
-  #warned = new Set<string>();
-
-  /** Item ID to the block that shows it. */
-  #blocks = new Map<string, Block>();
-  #turn: {
-    startedAt: number;
-    up: number;
-    down: number;
-    phase: Phase;
-    /** The heading of the latest reasoning summary, which Codex shows as its status. */
-    heading: string | null;
-  } | null = null;
   /** Commands the harness runs itself, shown beside 1harness's own. */
   #nativeCommands: NativeCommand[] = [];
 
-  #prompt: { prompt: ChoicePrompt; requestId: string | null } | null = null;
-  #requests: HarnessRequest[] = [];
+  /** The prompt on screen, and the request it answers; request IDs are only unique per thread. */
+  #prompt: { prompt: ChoicePrompt; asking: OpenRequest } | null = null;
+  /** Open requests from every thread, oldest first; background ones say whose they are. */
+  #requests: OpenRequest[] = [];
+  /** Threads left running in the background, closed once they and their children are done. */
+  #retired = new Set<string>();
   #panel:
     | { kind: "menu"; menu: Menu; onDone: (index: number | null) => void }
     | { kind: "info"; title: string; rows: [string, string][] }
@@ -152,9 +146,6 @@ export class App {
   #mention: { menu: Menu; start: number; entries: MenuEntry[]; matches: FileMatch[] } | null = null;
   #mentionDismissed: string | null = null;
 
-  /** Rows the view sits above the bottom of the transcript; 0 follows new output. */
-  #scroll = 0;
-  #total = 0;
   #exitArmed = false;
   #exiting = false;
   #blinkOn = true;
@@ -184,7 +175,38 @@ export class App {
       commands: this.#commands,
       ui: this.#context.ui,
     });
-    this.#tools = new ToolServer(() => this.#extensions.tools, options.version);
+    this.#tools = new ToolServer(
+      () => new Map([...this.#extensions.tools, ...this.#orchestratorTools]),
+      options.version,
+    );
+    this.#manager = new ThreadManager({
+      version: options.version,
+      extensions: this.#extensions,
+      tools: this.#tools,
+      onWarning: (text) => this.#notice("warning", text),
+    });
+    this.#orchestrator = new Orchestrator(this.#manager);
+    this.#orchestratorTools = new Map(
+      this.#orchestrator.tools.map((tool) => [tool.name, { tool }]),
+    );
+    this.#manager.subscribe((event) => this.#managerEvent(event));
+  }
+
+  /** The view on screen: the current thread's, or the startup one. */
+  get #view(): ThreadView {
+    return (this.#currentId && this.#views.get(this.#currentId)) || this.#home;
+  }
+
+  get #current(): ManagedThread | undefined {
+    return this.#currentId ? this.#manager.get(this.#currentId) : undefined;
+  }
+
+  get #thread(): Thread | null {
+    return this.#current?.thread ?? null;
+  }
+
+  get #info(): SessionInfo | null {
+    return this.#current?.thread.session.info ?? null;
   }
 
   /** The context every command runs with: this client's UI and the current thread. */
@@ -205,7 +227,8 @@ export class App {
             options?.filter ?? false,
           ),
         progress: (text) => {
-          const line = this.#transcript.add<Extract<Block, { kind: "notice" }>>({
+          const view = this.#view;
+          const line = view.transcript.add<Extract<Block, { kind: "notice" }>>({
             kind: "notice",
             level: "info",
             text,
@@ -214,7 +237,7 @@ export class App {
           return (level, outcome) => {
             line.level = level;
             line.text = outcome;
-            this.#transcript.touch(line);
+            view.transcript.touch(line);
             this.#schedule();
           };
         },
@@ -258,6 +281,35 @@ export class App {
         group: "General",
         run: () => this.#status(),
       },
+      {
+        name: "threads",
+        usage: "[id]",
+        description: "switch to another thread, such as one an agent started (also ctrl+t)",
+        group: "Session",
+        complete: () => ({
+          start: 0,
+          items: this.#threadOrder().map((thread) => ({
+            value: thread.id,
+            detail: `${thread.harness} · ${thread.status} · ${thread.title}`,
+            more: false,
+          })),
+        }),
+        run: (_context, args) => this.#switchThread(args),
+      },
+      {
+        name: "close",
+        usage: "[id]",
+        description: "end a thread and the threads it started",
+        group: "Session",
+        available: () => this.#manager.list().some((thread) => thread.status !== "closed"),
+        run: async (_context, args) => {
+          const id = args || this.#currentId;
+          const thread = id ? this.#manager.get(id) : undefined;
+          if (!thread) throw new Error(`No thread ${id ?? ""}`);
+          await this.#manager.close(thread.id);
+          this.#notice("info", `Closed ${thread.id} ${thread.title}`.trim());
+        },
+      },
     ];
   }
 
@@ -275,7 +327,7 @@ export class App {
     this.#screen.enter();
     await this.#detectTheme();
 
-    this.#transcript.add({
+    this.#home.transcript.add({
       kind: "banner",
       title: "1harness",
       subtitle: `v${this.#version} · Run /help for commands`,
@@ -354,43 +406,127 @@ export class App {
 
   // Session lifecycle
 
+  /**
+   * Starts a thread and shows it. The one shown before keeps running in the
+   * background while it has work, or threads it started do; otherwise it ends.
+   * If the new thread cannot start, the one shown before stays.
+   */
   async #open(harness: HarnessId, settings: SessionOptions, announce = true): Promise<void> {
-    await this.#closeThread();
-    this.#harness = harness;
-    this.#settings = settings;
-    this.#lookups.clear();
-    this.#info = null;
-    if (settings.resume) this.#notice("info", `Resuming ${harness} thread ${settings.resume}`);
-    else if (announce) this.#notice("info", `New ${harness} thread`);
+    const previous = this.#current;
+    const before = { harness: this.#harness, settings: this.#settings };
+    this.#announce = settings.resume
+      ? `Resuming ${harness} thread ${settings.resume}`
+      : announce
+        ? `New ${harness} thread`
+        : null;
     try {
-      const mcp = await this.#extensions.sessionServers(this.#tools);
-      for (const warning of mcp.warnings) {
-        if (this.#warned.has(warning)) continue;
-        this.#warned.add(warning);
-        this.#notice("warning", `MCP config: ${warning}`);
-      }
-      let created: Thread | null = null;
-      const toolPolicy = this.#extensions.toolPolicy(() => created);
-      const options = {
-        ...settings,
-        ...(Object.keys(mcp.servers).length > 0 ? { mcpServers: mcp.servers } : {}),
-        ...(toolPolicy ? { toolPolicy } : {}),
-      };
-      const thread = new Thread(createSession(harness, options, { version: this.#version }));
-      created = thread;
-      mcp.grant?.bind(thread);
-      this.#revokeTools = mcp.grant?.revoke ?? null;
-      this.#thread = thread;
-      this.#unsubscribe = thread.subscribe((event) => this.#event(event));
-      this.#detach = this.#extensions.attach(thread);
-      this.#info = thread.session.info;
-      this.#schedule();
-      await thread.start();
-      void this.#loadCommands();
+      // The manager announces the thread, which shows it.
+      await this.#manager.create({ harness, settings });
     } catch (error) {
+      if (previous && previous.status !== "closed" && previous.id !== this.#currentId)
+        this.#show(previous);
+      this.#harness = before.harness;
+      this.#settings = before.settings;
       this.#notice("error", `Could not start ${harness}: ${errorMessage(error)}`);
+      return;
+    } finally {
+      this.#announce = null;
     }
+    // As asked for, since the harness may not report them all yet.
     this.#settings = { ...settings, resume: null };
+    void this.#loadCommands();
+    if (previous && previous.id !== this.#currentId) await this.#retire(previous);
+  }
+
+  /** Whether a thread or one it started still has work. */
+  #busy(thread: ManagedThread): boolean {
+    return [thread, ...this.#manager.descendants(thread.id)].some(
+      (other) => other.status !== "closed" && (other.status === "starting" || !other.thread.idle),
+    );
+  }
+
+  /** Ends a thread left behind, or lets it finish in the background first. */
+  async #retire(thread: ManagedThread): Promise<void> {
+    if (thread.status === "closed") return;
+    if (this.#busy(thread)) {
+      this.#retired.add(thread.id);
+      this.#notice("info", `${thread.id} keeps working in the background; /threads switches back.`);
+      return;
+    }
+    await this.#manager.close(thread.id);
+  }
+
+  /** Closes background threads that have finished, unless the one on screen is among them. */
+  #closeRetired(): void {
+    for (const id of this.#retired) {
+      const thread = this.#manager.get(id);
+      if (!thread || thread.status === "closed") {
+        this.#retired.delete(id);
+        continue;
+      }
+      const family = [thread, ...this.#manager.descendants(id)];
+      if (this.#busy(thread) || family.some((other) => other.id === this.#currentId)) continue;
+      this.#retired.delete(id);
+      void this.#manager.close(id);
+    }
+  }
+
+  /** Shows a thread, picking one when no ID is given. */
+  async #switchThread(id: string): Promise<void> {
+    let target = id ? this.#manager.get(id) : undefined;
+    if (!target) {
+      if (id) throw new Error(`No thread ${id}`);
+      const threads = this.#threadOrder();
+      const index = await this.#pick(
+        "Threads",
+        threads.map((thread) =>
+          entry(
+            `${"  ".repeat(this.#manager.depth(thread.id))}${thread.title || thread.id}`,
+            `${thread.harness} · ${thread.status}`,
+            { tag: thread.id === this.#currentId ? "current" : thread.id },
+          ),
+        ),
+        Math.max(
+          0,
+          threads.findIndex((thread) => thread.id === this.#currentId),
+        ),
+        true,
+      );
+      target = index === null ? undefined : threads[index];
+    }
+    if (!target || target.id === this.#currentId) return;
+    this.#show(target);
+  }
+
+  #show(thread: ManagedThread): void {
+    this.#currentId = thread.id;
+    this.#retired.delete(thread.id);
+    // /new and /harness start from the thread on screen.
+    const info = thread.thread.session.info;
+    this.#harness = thread.harness;
+    this.#settings = {
+      ...this.#settings,
+      cwd: info.cwd,
+      model: info.model,
+      effort: info.effort,
+      runtimeMode: info.runtimeMode,
+      interactionMode: info.interactionMode,
+      resume: null,
+    };
+    this.#lookups.clear();
+    this.#nativeCommands = [];
+    void this.#loadCommands();
+    this.#schedule();
+  }
+
+  /** Threads with each one's children right after it. */
+  #threadOrder(): ManagedThread[] {
+    const all = this.#manager.list();
+    const under = (parentId: string | null): ManagedThread[] =>
+      all
+        .filter((thread) => thread.parentId === parentId)
+        .flatMap((thread) => [thread, ...under(thread.id)]);
+    return under(null);
   }
 
   /** Fetches the harness's own commands for completion and /help. */
@@ -413,30 +549,14 @@ export class App {
     }
   }
 
-  async #closeThread(): Promise<void> {
-    const thread = this.#thread;
-    if (!thread) return;
-    this.#unsubscribe?.();
-    this.#detach?.();
-    this.#revokeTools?.();
-    this.#thread = null;
-    this.#unsubscribe = null;
-    this.#detach = null;
-    this.#revokeTools = null;
-    this.#prompt = null;
-    this.#requests = [];
-    this.#endTurn(null, null);
-    this.#settle();
-    this.#nativeCommands = [];
-    await thread.close().catch(() => {});
-  }
-
   async #exit(): Promise<void> {
     if (this.#exiting) return;
     this.#exiting = true;
     const resume = this.#info?.threadId;
     const harness = this.#harness;
-    await this.#closeThread();
+    this.#prompt = null;
+    this.#requests = [];
+    await this.#manager.closeAll();
     this.#files?.close();
     await this.#tools.close();
     await this.#extensions.close();
@@ -468,205 +588,135 @@ export class App {
 
   // Thread events
 
-  #event(event: ThreadEvent): void {
+  #managerEvent(event: ManagerEvent): void {
     switch (event.type) {
-      case "session.updated":
-        this.#info = event.info;
-        this.#settings = {
-          ...this.#settings,
-          model: event.info.model,
-          effort: event.info.effort,
-          runtimeMode: event.info.runtimeMode,
-          interactionMode: event.info.interactionMode,
-        };
-        break;
-      case "turn.started":
-        this.#startTurn();
-        break;
-      case "turn.ended":
-        this.#endTurn(event.status, event.error);
-        break;
-      case "item.started":
-      case "item.updated":
-        this.#item(event.item, false);
-        break;
-      case "item.completed":
-        this.#item(event.item, true);
-        break;
-      case "item.delta":
-        this.#delta(event.itemId, event.chunk);
-        break;
-      case "request.opened":
-        this.#requests.push(event.request);
-        this.#nextRequest();
-        break;
-      case "request.resolved":
-        this.#requests = this.#requests.filter((request) => request.id !== event.requestId);
-        if (this.#prompt?.requestId === event.requestId) {
-          this.#prompt = null;
-          this.#nextRequest();
+      case "thread.created": {
+        const thread = event.thread;
+        // The first thread takes over the startup view, banner and all.
+        const firstView = this.#currentId === null && !this.#views.has(this.#home.id);
+        const view = firstView ? this.#home : new ThreadView(thread.id);
+        this.#views.set(thread.id, view);
+        if (firstView) this.#views.set(this.#home.id, view);
+        if (thread.parentId) this.#childRow(thread);
+        // Threads the user opens are shown; ones agents start run in the background.
+        if (thread.origin === "user") {
+          this.#show(thread);
+          if (this.#announce) view.notice("info", this.#announce);
         }
         break;
-      case "error":
-        this.#notice("error", event.message);
+      }
+      case "thread.updated": {
+        const thread = event.thread;
+        if (thread.parentId) this.#childRow(thread);
+        if (thread.status === "closed") {
+          this.#dropRequests(thread.id);
+          // For a harness that closes without saying so; otherwise already done.
+          const view = this.#views.get(thread.id);
+          view?.endTurn(null, null);
+          view?.settle();
+        }
+        this.#closeRetired();
         break;
-      case "session.closed":
-        this.#endTurn(null, null);
-        this.#settle();
-        this.#prompt = null;
-        this.#requests = [];
-        if (event.error)
-          this.#notice("error", `Session ended: ${event.error}\nUse /new to start again.`);
-        break;
-      case "commands.updated":
-        void this.#loadCommands();
-        break;
-      case "usage.updated":
-      case "queue.changed":
+      }
+      case "thread.event":
+        this.#threadEvent(event.threadId, event.event);
         break;
     }
     this.#schedule();
   }
 
-  #startTurn(): void {
-    this.#turn ??= { startedAt: Date.now(), up: 0, down: 0, phase: "Thinking", heading: null };
-  }
-
-  /**
-   * Closes the turn with fx's duration line. Commands can outlive the turn, as
-   * Codex's background terminals do, so their rows stay live until they finish.
-   */
-  #endTurn(status: "completed" | "interrupted" | "failed" | null, error: string | null): void {
-    for (const [id, block] of this.#blocks) {
-      // Todo lists keep one ID across turns, but each turn shows its own.
-      if (block.kind === "todos") this.#blocks.delete(id);
-    }
-    const turn = this.#turn;
-    this.#turn = null;
-    if (!turn || status === null) return;
-    const seconds = Math.round((Date.now() - turn.startedAt) / 1000);
-    const tokens = `(↑${formatTokens(Math.ceil(turn.up))} ↓${formatTokens(Math.ceil(turn.down))})`;
-    const label =
-      status === "interrupted" ? "Interrupted · " : status === "failed" ? "Failed · " : "";
-    this.#transcript.add({ kind: "summary", text: `${label}${seconds}s ${tokens}` });
-    if (status === "failed" && error) this.#notice("error", error);
-  }
-
-  /** Marks tool rows that will never finish, once their session has gone. */
-  #settle(): void {
-    for (const block of new Set(this.#blocks.values())) {
-      if (block.kind !== "tools" || block.settled) continue;
-      block.settled = true;
-      this.#transcript.touch(block);
-    }
-  }
-
-  #item(item: Item, completed: boolean): void {
-    if (this.#thread?.busy && item.kind !== "notice") this.#startTurn();
-    const existing = this.#blocks.get(item.id);
-    switch (item.kind) {
-      case "user_message": {
-        if (existing?.kind === "user") {
-          existing.text = item.text;
-          this.#transcript.touch(existing);
-          return;
-        }
-        this.#blocks.set(item.id, this.#transcript.add({ kind: "user", text: item.text }));
-        if (this.#turn) this.#turn.up += estimateTokens(item.text);
-        this.#scroll = 0;
+  #threadEvent(threadId: string, event: ThreadEvent): void {
+    const managed = this.#manager.get(threadId);
+    const view = this.#views.get(threadId);
+    const current = threadId === this.#currentId;
+    switch (event.type) {
+      case "session.updated":
+        if (current)
+          this.#settings = {
+            ...this.#settings,
+            model: event.info.model,
+            effort: event.info.effort,
+            runtimeMode: event.info.runtimeMode,
+            interactionMode: event.info.interactionMode,
+          };
         return;
-      }
-      case "assistant_message": {
-        const block =
-          existing?.kind === "assistant"
-            ? existing
-            : this.#transcript.add({ kind: "assistant", text: "" });
-        this.#blocks.set(item.id, block);
-        if (this.#turn && item.text.length > block.text.length)
-          this.#turn.down += estimateTokens(item.text.slice(block.text.length));
-        if (item.text.length >= block.text.length || completed) block.text = item.text;
-        this.#transcript.touch(block);
-        if (completed && this.#turn) this.#turn.phase = "Thinking";
+      case "request.opened":
+        this.#requests.push({ threadId, request: event.request });
+        this.#nextRequest();
         return;
-      }
-      case "reasoning":
-        if (this.#turn) {
-          this.#turn.phase = "Thinking";
-          this.#turn.heading = reasoningHeading(item.text) ?? this.#turn.heading;
+      case "request.resolved": {
+        this.#requests = this.#requests.filter(
+          (open) => !sameRequest(open, threadId, event.requestId),
+        );
+        const asking = this.#prompt?.asking;
+        if (asking && sameRequest(asking, threadId, event.requestId)) {
+          this.#prompt = null;
+          this.#nextRequest();
         }
         return;
-      case "plan": {
-        const block =
-          existing?.kind === "plan" ? existing : this.#transcript.add({ kind: "plan", text: "" });
-        this.#blocks.set(item.id, block);
-        block.text = item.text;
-        this.#transcript.touch(block);
-        return;
       }
-      case "todo_list": {
-        const block =
-          existing?.kind === "todos"
-            ? existing
-            : this.#transcript.add({ kind: "todos", steps: item.steps });
-        this.#blocks.set(item.id, block);
-        block.steps = item.steps;
-        this.#transcript.touch(block);
+      case "commands.updated":
+        if (current) void this.#loadCommands();
         return;
-      }
-      case "notice": {
-        // Notices with a stable ID, such as retries, update one line.
-        if (existing?.kind === "notice") {
-          existing.level = item.level;
-          existing.text = item.text;
-          this.#transcript.touch(existing);
-          return;
-        }
-        const block = this.#transcript.add({ kind: "notice", level: item.level, text: item.text });
-        if (item.id) this.#blocks.set(item.id, block);
-        return;
-      }
+      case "session.closed":
+        this.#dropRequests(threadId);
+        break;
+      default:
+        break;
     }
-    if (!isToolItem(item)) return;
-    if (existing?.kind === "tools") {
-      const index = existing.items.findIndex((other) => other.id === item.id);
-      if (index === -1) existing.items.push(item);
-      else existing.items[index] = item;
-      this.#transcript.touch(existing);
-      return;
-    }
-    // A todo list updated between tool calls does not split their group.
-    const last = this.#transcript.last((block) => block.kind === "todos");
-    const block =
-      last?.kind === "tools" && !last.settled
-        ? last
-        : this.#transcript.add({ kind: "tools", items: [], settled: false });
-    block.items.push(item);
-    this.#blocks.set(item.id, block);
-    this.#transcript.touch(block);
+    if (view && managed) view.apply(event, managed.thread);
   }
 
-  #delta(itemId: string, chunk: string): void {
-    if (this.#turn) this.#turn.down += estimateTokens(chunk);
-    const block = this.#blocks.get(itemId);
-    if (block?.kind === "assistant" || block?.kind === "plan") {
-      block.text += chunk;
-      this.#transcript.touch(block);
-      if (this.#turn) this.#turn.phase = "Generating";
-      return;
+  /** Forgets a closed thread's requests, closing its prompt if one is open. */
+  #dropRequests(threadId: string): void {
+    this.#requests = this.#requests.filter((open) => open.threadId !== threadId);
+    if (this.#prompt?.asking.threadId === threadId) {
+      this.#prompt = null;
+      this.#nextRequest();
     }
-    const item = this.#thread?.item(itemId);
-    if (this.#turn && item?.kind === "reasoning") {
-      this.#turn.phase = "Thinking";
-      this.#turn.heading = reasoningHeading(item.text) ?? this.#turn.heading;
-    }
+  }
+
+  /** The row in a parent's transcript for a thread it started. */
+  #childRow(child: ManagedThread): void {
+    const view = child.parentId ? this.#views.get(child.parentId) : undefined;
+    if (!view) return;
+    const run = child.runs.at(-1);
+    const active = child.status === "starting" || child.status === "working";
+    const summary =
+      child.status === "waiting"
+        ? "waiting for you · /threads"
+        : active
+          ? `working · ${child.id}`
+          : (run?.result?.split("\n").find((line) => line.trim()) ?? run?.error ?? child.status);
+    view.item(
+      {
+        kind: "subagent",
+        id: `thread-${child.id}`,
+        description: `${child.harness} · ${child.title || child.id}`,
+        summary,
+        status:
+          active || child.status === "waiting"
+            ? "running"
+            : run?.status === "completed"
+              ? "completed"
+              : "failed",
+      },
+      !active,
+      false,
+    );
   }
 
   // Requests and pickers
 
   #nextRequest(): void {
     if (this.#prompt) return;
-    const request = this.#requests[0];
-    if (!request) return;
+    const next = this.#requests[0];
+    if (!next) return;
+    const request = next.request;
+    const respond = (response: Parameters<Thread["respond"]>[1]) => this.#respond(next, response);
+    // A request from a thread not on screen names it.
+    const from = next.threadId === this.#currentId ? null : this.#manager.get(next.threadId);
+    const where = from ? ` · ${from.id} ${from.harness}: ${from.title}` : "";
     if (request.kind === "approval") {
       const initial = Math.max(
         0,
@@ -674,9 +724,9 @@ export class App {
       );
       const command = /^\$ /m.test(request.detail);
       this.#showPrompt(
-        request.id,
+        next,
         {
-          header: "Permission needed",
+          header: `Permission needed${where}`,
           tag: command ? "Command" : "",
           title: request.title,
           detail: request.detail ? [request.detail] : [],
@@ -689,10 +739,7 @@ export class App {
         (result) => {
           const option =
             result.kind === "options" ? request.options[result.indexes[0] ?? 0] : undefined;
-          this.#respond(
-            request.id,
-            option ? { kind: "approval", optionId: option.id } : { kind: "cancel" },
-          );
+          respond(option ? { kind: "approval", optionId: option.id } : { kind: "cancel" });
         },
       );
       return;
@@ -701,13 +748,13 @@ export class App {
     const ask = (index: number) => {
       const question = request.questions[index];
       if (!question) {
-        this.#respond(request.id, { kind: "question", answers });
+        respond({ kind: "question", answers });
         return;
       }
       this.#showPrompt(
-        request.id,
+        next,
         {
-          header: "Question",
+          header: `Question${where}`,
           tag: question.header,
           title: question.question,
           detail: [],
@@ -719,7 +766,7 @@ export class App {
         },
         (result) => {
           if (result.kind === "cancel") {
-            this.#respond(request.id, { kind: "cancel" });
+            respond({ kind: "cancel" });
             return;
           }
           answers[question.id] =
@@ -734,7 +781,7 @@ export class App {
   }
 
   #showPrompt(
-    requestId: string | null,
+    asking: OpenRequest,
     config: ChoiceConfig,
     onDone: (result: ChoiceResult) => void,
   ): void {
@@ -743,15 +790,17 @@ export class App {
       onDone(result);
       this.#schedule();
     });
-    this.#prompt = { prompt, requestId };
-    this.#scroll = 0;
+    this.#prompt = { prompt, asking };
+    this.#view.scroll = 0;
     this.#schedule();
   }
 
-  #respond(requestId: string, response: Parameters<Thread["respond"]>[1]): void {
-    this.#requests = this.#requests.filter((request) => request.id !== requestId);
-    this.#thread
-      ?.respond(requestId, response)
+  #respond(asked: OpenRequest, response: Parameters<Thread["respond"]>[1]): void {
+    const { threadId, request } = asked;
+    this.#requests = this.#requests.filter((open) => !sameRequest(open, threadId, request.id));
+    this.#manager
+      .get(threadId)
+      ?.thread.respond(request.id, response)
       .catch((error: unknown) => this.#notice("error", errorMessage(error)));
     this.#nextRequest();
   }
@@ -794,7 +843,8 @@ export class App {
         return;
       case "background":
         setLightTheme(event.light);
-        this.#transcript.invalidate();
+        for (const view of new Set([this.#home, ...this.#views.values()]))
+          view.transcript.invalidate();
         return;
       case "wheel":
         this.#scrollBy(-event.delta * WHEEL_ROWS);
@@ -820,6 +870,12 @@ export class App {
     }
     if (key.ctrl && key.name === "l") {
       this.#screen.invalidate();
+      return;
+    }
+    if (key.ctrl && key.name === "t" && !this.#prompt && !this.#panel) {
+      void this.#switchThread("").catch((error: unknown) =>
+        this.#notice("error", errorMessage(error)),
+      );
       return;
     }
     if (key.name === "pageup" || key.name === "pagedown") {
@@ -1126,13 +1182,13 @@ export class App {
       case "tab":
         if (key.shift) void this.#command("/plan");
         else if (this.#thread?.busy && this.#editor.text.trim() !== "") {
-          this.#scroll = 0;
+          this.#view.scroll = 0;
           this.#thread.send({ text: this.#editor.take() });
         }
         return;
       case "escape":
         if (this.#thread?.busy) void this.#interrupt();
-        else this.#scroll = 0;
+        else this.#view.scroll = 0;
         return;
       case "up":
         if (!this.#editor.up()) this.#editor.historyUp();
@@ -1153,7 +1209,7 @@ export class App {
   }
 
   #scrollBy(rows: number): void {
-    this.#scroll = Math.max(0, this.#scroll + rows);
+    this.#view.scroll = Math.max(0, this.#view.scroll + rows);
   }
 
   #submit(raw: string): void {
@@ -1163,7 +1219,7 @@ export class App {
     this.#slash = null;
     this.#args = null;
     this.#mention = null;
-    this.#scroll = 0;
+    this.#view.scroll = 0;
     if (text.startsWith("/") && !text.startsWith("//")) {
       void this.#command(text);
       return;
@@ -1271,7 +1327,7 @@ export class App {
     const usage = this.#usageSummary();
     const rows: [string, string][] = [
       ["Harness", `${info.harness}${info.version ? ` ${info.version}` : ""}`],
-      ["Thread", info.threadId ?? "not started"],
+      ["Thread", `${this.#currentId ?? ""} · ${info.threadId ?? "not started"}`],
       ["Folder", info.cwd],
       ["Model", `${info.model ?? "default"}${info.effort ? ` · ${info.effort}` : ""}`],
       ["Mode", `${info.runtimeMode}${info.interactionMode === "plan" ? " · plan" : ""}`],
@@ -1283,8 +1339,7 @@ export class App {
   }
 
   #report(report: Report): void {
-    this.#transcript.add({ kind: "report", ...report });
-    this.#scroll = 0;
+    this.#view.report(report);
     this.#schedule();
   }
 
@@ -1295,7 +1350,7 @@ export class App {
   }
 
   #notice(level: "info" | "warning" | "error", text: string): void {
-    this.#transcript.add({ kind: "notice", level, text });
+    this.#view.notice(level, text);
     this.#schedule();
   }
 
@@ -1325,22 +1380,23 @@ export class App {
     const width = this.#screen.columns;
     const height = this.#screen.rows;
     const context = { width, cwd: this.#cwd(), blink: this.#blinkOn };
+    const shown = this.#view;
     let footer = this.#footer(width, height);
     const room = Math.max(0, height - footer.rows.length);
-    let view = this.#transcript.view(context, room, this.#scroll);
-    if (this.#scroll > 0) {
+    let view = shown.transcript.view(context, room, shown.scroll);
+    if (shown.scroll > 0) {
       // Hold the view still while output arrives below it.
       const scroll = Math.min(
         Math.max(0, view.total - room),
-        this.#scroll + Math.max(0, view.total - this.#total),
+        shown.scroll + Math.max(0, view.total - shown.total),
       );
-      if (scroll !== this.#scroll) {
-        this.#scroll = scroll;
-        view = this.#transcript.view(context, room, scroll);
+      if (scroll !== shown.scroll) {
+        shown.scroll = scroll;
+        view = shown.transcript.view(context, room, scroll);
         footer = this.#footer(width, height);
       }
     }
-    this.#total = view.total;
+    shown.total = view.total;
     const cursor = footer.cursor
       ? { row: view.rows.length + footer.cursor.row, column: footer.cursor.column }
       : null;
@@ -1350,7 +1406,7 @@ export class App {
 
   /** Runs the blink only while something on screen is in progress. */
   #animate(): void {
-    const active = this.#turn !== null || this.#transcript.animating;
+    const active = this.#view.turn !== null || this.#view.transcript.animating;
     if (active && !this.#blinkTimer) {
       this.#blinkTimer = setInterval(() => {
         this.#blinkOn = !this.#blinkOn;
@@ -1366,7 +1422,7 @@ export class App {
   /** The rows below the transcript: activity, queue, and the composer or a panel. */
   #footer(width: number, height: number): { rows: string[]; cursor: CursorPosition | null } {
     const rows: string[] = [""];
-    if (this.#turn && !this.#prompt) rows.push(this.#activity(width), "");
+    if (this.#view.turn && !this.#prompt) rows.push(this.#activity(width), "");
     const queue = this.#thread?.queue ?? [];
     for (const queued of queue)
       rows.push(truncate(style.muted(`  ↳ queued: ${oneLine(queued.text)}`), width));
@@ -1410,14 +1466,14 @@ export class App {
 
   /** fx's activity line: a blinking dot, the phase and elapsed time, then the token estimate. */
   #activity(width: number): string {
-    const turn = this.#turn;
+    const turn = this.#view.turn;
     if (!turn) return "";
     const seconds = Math.floor((Date.now() - turn.startedAt) / 1000);
     // Streaming text, then running tools, then what the model says it is doing.
     const phase =
       turn.phase === "Generating"
         ? "Generating"
-        : this.#transcript.animating
+        : this.#view.transcript.animating
           ? "Running"
           : (turn.heading ?? turn.phase);
     const dot = this.#blinkOn ? style.text("•") : " ";
@@ -1442,6 +1498,13 @@ export class App {
     }
     const usage = this.#usageSummary();
     if (usage) parts.push(usage);
+    // With more than one thread, which one this is and what the others are doing.
+    const threads = this.#manager.list().filter((thread) => thread.status !== "closed");
+    if (threads.length > 1 && this.#currentId) parts.push(this.#currentId);
+    const others = threads.filter(
+      (thread) => thread.id !== this.#currentId && thread.status !== "idle",
+    ).length;
+    if (others > 0) parts.push(`${others} other ${others === 1 ? "thread" : "threads"} working`);
     // Subscription limits appear once they need attention.
     for (const limit of this.#thread?.usage?.limits ?? []) {
       if (limit.status === "ok") continue;
@@ -1453,7 +1516,8 @@ export class App {
     }
     let left = `${style.text(info?.runtimeMode ?? this.#settings.runtimeMode)}${style.muted(` · ${parts.join(" · ")}`)}`;
     if (info?.interactionMode === "plan") left += `${style.muted(" · ")}${style.strong("plan")}`;
-    const right = this.#scroll > 0 ? style.muted(`↓ ${this.#scroll} more lines · pgdn`) : "";
+    const scroll = this.#view.scroll;
+    const right = scroll > 0 ? style.muted(`↓ ${scroll} more lines · pgdn`) : "";
     return spread(left, right, width);
   }
 }
