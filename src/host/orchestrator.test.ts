@@ -30,6 +30,8 @@ class FakeSession {
   readonly steered: string[] = [];
   #turns = 0;
   #pending: (() => void) | null = null;
+  /** The running turn, which an interrupt ends. */
+  #running: { turnId: string; timer: NodeJS.Timeout | null } | null = null;
 
   constructor(
     options: SessionOptions,
@@ -72,6 +74,7 @@ class FakeSession {
       item: { kind: "user_message", id: `${turnId}-user`, text: input.text },
     });
     const finish = () => {
+      this.#running = null;
       this.events.push({
         type: "item.completed",
         item: {
@@ -107,14 +110,25 @@ class FakeSession {
       });
       return;
     }
-    setTimeout(finish, input.text.endsWith("SLOW") ? 40 : 1);
+    this.#running = { turnId, timer: setTimeout(finish, input.text.endsWith("SLOW") ? 40 : 1) };
   }
 
   async steer(input: UserInput): Promise<void> {
     this.steered.push(input.text);
   }
 
-  async interrupt(): Promise<void> {}
+  async interrupt(): Promise<void> {
+    const running = this.#running;
+    if (!running) return;
+    this.#running = null;
+    if (running.timer) clearTimeout(running.timer);
+    this.events.push({
+      type: "turn.ended",
+      turnId: running.turnId,
+      status: "interrupted",
+      error: null,
+    });
+  }
 
   async respond(requestId: string, _response: RequestResponse): Promise<void> {
     this.events.push({ type: "request.resolved", requestId });
@@ -143,6 +157,7 @@ let manager: ThreadManager;
 let tools: ToolServer;
 let extensions: ExtensionHost;
 let byName: Map<string, ToolDefinition>;
+let orchestrator: Orchestrator;
 let unregister: (() => void)[] = [];
 /** The errors an extension saw sessions close with. */
 const closedEvents: (string | null)[] = [];
@@ -204,7 +219,7 @@ before(async () => {
   let orchestratorTools = new Map<string, { tool: ToolDefinition }>();
   tools = new ToolServer(() => orchestratorTools, "test");
   manager = new ThreadManager({ version: "test", extensions, tools });
-  const orchestrator = new Orchestrator(manager);
+  orchestrator = new Orchestrator(manager);
   byName = new Map(orchestrator.tools.map((tool) => [tool.name, tool]));
   orchestratorTools = new Map(orchestrator.tools.map((tool) => [tool.name, { tool }]));
   await extensions.loadAll([extension]);
@@ -311,6 +326,39 @@ describe("Orchestrator", () => {
     assert.match(
       delivered?.input ?? "",
       /^\[1harness\] Task task-\d+ \(fake: slow work SLOW\) completed:\n\ndone: slow work SLOW/,
+    );
+  });
+
+  it("stops a thread and its agents, dropping their queues and what they report", async () => {
+    const parent = await manager.create({ harness: "fake", settings: settings() });
+    parent.thread.send({ text: "plan SLOW" });
+    const started = await call("delegate_task", parent, { task: "slow work SLOW", wait: false });
+    const child = manager.get(String(started["threadId"]));
+    assert.ok(child);
+    await settle(5);
+    child.thread.send({ text: "and then this" });
+    await orchestrator.stop(parent.id);
+    await settle(80);
+    assert.deepEqual(
+      child.runs.map((run) => run.status),
+      ["interrupted"],
+    );
+    // The parent's own turn stopped, and no report started another.
+    assert.deepEqual(
+      parent.runs.map((run) => run.status),
+      ["interrupted"],
+    );
+  });
+
+  it("tells the parent of a thread stopped on its own that it was interrupted", async () => {
+    const parent = await manager.create({ harness: "fake", settings: settings() });
+    const started = await call("delegate_task", parent, { task: "slow work SLOW", wait: false });
+    await settle(5);
+    await orchestrator.stop(String(started["threadId"]));
+    await settle(60);
+    assert.match(
+      parent.runs[0]?.input ?? "",
+      /^\[1harness\] Task task-\d+ \(fake: slow work SLOW\) interrupted:/,
     );
   });
 

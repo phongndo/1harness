@@ -308,6 +308,29 @@ export class Orchestrator {
     ];
   }
 
+  /**
+   * Stops a thread and every thread under it, as the user does with esc: each
+   * running turn is interrupted and the agents' queued messages are dropped.
+   * Reports to the stopped threads are not delivered, so none starts again;
+   * the thread's own parent, which goes on, is told it was interrupted.
+   */
+  async stop(id: string): Promise<void> {
+    const thread = this.#manager.get(id);
+    if (!thread) return;
+    const below = this.#manager.descendants(id);
+    const stopped = new Set([id, ...below.map((child) => child.id)]);
+    for (const task of this.#tasks.values()) if (stopped.has(task.parentId)) task.seen = true;
+    const stopping = below.map(async (child) => {
+      if (this.#manager.closing(child.id)) return;
+      // One still starting has not been sent its task, so it is closed instead.
+      if (child.status === "starting") return this.#manager.close(child.id);
+      child.thread.clearQueue();
+      await child.thread.interrupt();
+    });
+    // Agents are stopped as far as they can be; the thread's own failure is the caller's to report.
+    await Promise.all([...stopping.map((done) => done.catch(() => {})), thread.thread.interrupt()]);
+  }
+
   /** Open threads, and the ones among them with work, counting tasks still starting. */
   #counts(): { open: number; running: number } {
     const open = this.#manager.list().filter((thread) => !this.#manager.closing(thread.id));
