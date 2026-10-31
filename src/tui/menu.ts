@@ -95,8 +95,12 @@ export class Menu {
   setEntries(entries: MenuEntry[]): void {
     const label = this.selected()?.label;
     this.#entries = entries;
-    const visible = this.#visible();
-    const kept = visible.findIndex(({ entry: item }) => item.label === label);
+    this.select(label ?? "");
+  }
+
+  /** Selects the entry with this label, or the first when none has it. */
+  select(label: string): void {
+    const kept = this.#visible().findIndex(({ entry: item }) => item.label === label);
     this.#index = kept === -1 ? 0 : kept;
   }
 

@@ -1070,21 +1070,33 @@ export class App {
       this.#slash = null;
       return;
     }
-    const entries = this.#available()
-      .filter((command) =>
-        [command.name, ...(command.aliases ?? [])].some((name) => `/${name}`.startsWith(text)),
-      )
-      .map((command) => entry(`/${command.name}`, command.description, { tag: command.group }));
-    for (const command of this.#nativeCommands) {
-      if (![command.name, ...command.aliases].some((name) => `/${name}`.startsWith(text))) continue;
-      entries.push(entry(`/${command.name}`, command.description, { tag: this.#tag(command) }));
-    }
+    const entries: MenuEntry[] = [];
+    // A command typed in full comes first and is selected, so /mode runs /mode, not /model.
+    let exact: string | null = null;
+    const add = (names: string[], made: MenuEntry) => {
+      if (!names.some((name) => `/${name}`.startsWith(text))) return;
+      if (exact === null && names.some((name) => `/${name}` === text)) {
+        exact = made.label;
+        entries.unshift(made);
+      } else entries.push(made);
+    };
+    for (const command of this.#available())
+      add(
+        [command.name, ...(command.aliases ?? [])],
+        entry(`/${command.name}`, command.description, { tag: command.group }),
+      );
+    for (const command of this.#nativeCommands)
+      add(
+        [command.name, ...command.aliases],
+        entry(`/${command.name}`, command.description, { tag: this.#tag(command) }),
+      );
     if (entries.length === 0) {
       this.#slash = null;
       return;
     }
     if (this.#slash) this.#slash.setEntries(entries);
     else this.#slash = new Menu({ title: "Commands", entries });
+    if (exact !== null) this.#slash.select(exact);
   }
 
   /** Opens, narrows, or closes the file menu for an `@` word at the cursor. */
