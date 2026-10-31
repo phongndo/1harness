@@ -206,6 +206,10 @@ export class AcpSession implements HarnessSession {
     if (this.#modes.length > 0 && this.#options.runtimeMode !== this.info.runtimeMode) {
       await this.setRuntimeMode(this.#options.runtimeMode).catch(() => {});
     }
+    // Plan is one of the agent's modes, so it goes on after the runtime mode.
+    if (this.#options.interactionMode === "plan" && this.capabilities.planMode) {
+      await this.setInteractionMode("plan").catch(() => {});
+    }
     this.#emitInfo();
   }
 

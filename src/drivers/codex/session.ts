@@ -1174,7 +1174,11 @@ export function codexMcpConfig(servers: Record<string, McpServerConfig>): Record
       Object.entries(servers).map(([name, server]) => [
         name,
         server.type === "http"
-          ? { url: server.url, http_headers: server.headers }
+          ? {
+              url: server.url,
+              http_headers: server.headers,
+              ...(server.timeoutSec ? { tool_timeout_sec: server.timeoutSec } : {}),
+            }
           : { command: server.command, args: server.args, env: server.env },
       ]),
     ),

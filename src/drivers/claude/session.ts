@@ -9,6 +9,8 @@ import {
   type CanUseTool,
   type EffortLevel,
   type HookCallback,
+  type McpHttpServerConfig,
+  type McpStdioServerConfig,
   type Options,
   type PermissionMode,
   type PermissionResult,
@@ -31,6 +33,7 @@ import {
   type McpAction,
   type McpActionResult,
   type McpServer,
+  type McpServerConfig,
   type ModelOption,
   type NativeCommand,
   type RequestResponse,
@@ -329,7 +332,7 @@ export class ClaudeSession implements HarnessSession {
       ...(this.#config.executable ? { pathToClaudeCodeExecutable: this.#config.executable } : {}),
       ...(resume ? { resume } : {}),
       // Added to the servers Claude Code reads from its own settings, for this session only.
-      ...(this.#config.mcpServers ? { mcpServers: this.#config.mcpServers } : {}),
+      ...(this.#config.mcpServers ? { mcpServers: claudeMcpServers(this.#config.mcpServers) } : {}),
       // Hooks run before the permission check, so the policy sees calls even in full access.
       ...(this.#config.toolPolicy ? { hooks: { PreToolUse: [{ hooks: [this.#checkTool] }] } } : {}),
     };
@@ -841,4 +844,23 @@ function userContent(input: UserInput): SDKUserMessage["message"]["content"] {
     })),
     { type: "text" as const, text: input.text },
   ];
+}
+
+/** 1harness's servers in the SDK's shape, with call timeouts in milliseconds. */
+function claudeMcpServers(
+  servers: Record<string, McpServerConfig>,
+): Record<string, McpHttpServerConfig | McpStdioServerConfig> {
+  return Object.fromEntries(
+    Object.entries(servers).map(([name, server]) => [
+      name,
+      server.type === "http"
+        ? {
+            type: "http",
+            url: server.url,
+            headers: server.headers,
+            ...(server.timeoutSec ? { timeout: server.timeoutSec * 1000 } : {}),
+          }
+        : { type: "stdio", command: server.command, args: server.args, env: server.env },
+    ]),
+  );
 }
