@@ -1,4 +1,10 @@
-import type { HarnessId, SessionOptions } from "../core/events.ts";
+import {
+  fitRuntimeMode,
+  isRuntimeMode,
+  modeRank,
+  type HarnessId,
+  type SessionOptions,
+} from "../core/events.ts";
 import { Thread, errorMessage, type ThreadEvent } from "../core/thread.ts";
 import { createSession } from "../drivers/index.ts";
 import type { ExtensionHost } from "../extensions/host.ts";
@@ -58,6 +64,19 @@ export interface ManagerOptions {
   tools: ToolServer;
   /** Problems with the shared MCP config, reported once each. */
   onWarning?: (text: string) => void;
+}
+
+/** A thread that cannot run as narrowly as asked; it is closed rather than started. */
+export class ModeError extends Error {
+  readonly code:
+    | "runtime_mode_unavailable"
+    | "plan_mode_unavailable"
+    | "runtime_mode_escalation_denied";
+
+  constructor(code: ModeError["code"], message: string) {
+    super(message);
+    this.code = code;
+  }
 }
 
 const TITLE_LENGTH = 48;
@@ -181,6 +200,7 @@ export class ThreadManager {
     this.#emit({ type: "thread.created", thread: managed });
     try {
       await thread.start();
+      await holdModes(managed, options.settings);
     } catch (error) {
       managed.error = errorMessage(error);
       await this.close(managed.id);
@@ -353,4 +373,41 @@ export class ThreadManager {
   #emit(event: ManagerEvent): void {
     for (const listener of this.#listeners) listener(event);
   }
+}
+
+/**
+ * Makes a started thread run no freer than its settings ask, whatever its
+ * harness: a harness without the mode runs the broadest one it has below it,
+ * and one that cannot go that narrow, or into plan mode, is refused. A harness
+ * that lists no modes keeps its own and asks through its own approvals.
+ */
+async function holdModes(managed: ManagedThread, settings: SessionOptions): Promise<void> {
+  const session = managed.thread.session;
+  const asked = settings.runtimeMode;
+  const offered = session.capabilities.runtimeModes;
+  // Drivers load without type checks, so one that lists other modes fails here, not later.
+  const unknown = offered.filter((mode) => !isRuntimeMode(mode));
+  if (unknown.length > 0)
+    throw new Error(`The ${managed.harness} driver lists unknown modes: ${unknown.join(", ")}`);
+  if (offered.length > 0) {
+    const target = fitRuntimeMode(asked, offered);
+    if (!target)
+      throw new ModeError(
+        "runtime_mode_unavailable",
+        `${managed.harness} has no mode as narrow as ${asked}`,
+      );
+    if (modeRank(session.info.runtimeMode) > modeRank(target)) await session.setRuntimeMode(target);
+  }
+  const plan = settings.interactionMode === "plan";
+  if (plan && session.info.interactionMode !== "plan") {
+    if (!session.capabilities.planMode)
+      throw new ModeError("plan_mode_unavailable", `${managed.harness} has no plan mode`);
+    await session.setInteractionMode("plan");
+  }
+  const { runtimeMode, interactionMode } = session.info;
+  if (modeRank(runtimeMode) > modeRank(asked) || (plan && interactionMode !== "plan"))
+    throw new ModeError(
+      "runtime_mode_escalation_denied",
+      `${managed.harness} would run ${runtimeMode}${interactionMode === "plan" ? " in plan mode" : ""}, more than asked`,
+    );
 }

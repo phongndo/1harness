@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { extname } from "node:path";
+import { readFileSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { extname, join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import {
   getSessionMessages,
@@ -24,6 +25,8 @@ import {
 import { AsyncQueue } from "../../core/async-queue.ts";
 import {
   RUNTIME_MODES,
+  isRuntimeMode,
+  fitRuntimeMode,
   type ApprovalOption,
   type Capabilities,
   type HarnessEvent,
@@ -45,8 +48,10 @@ import {
 } from "../../core/events.ts";
 import { errorMessage } from "../../core/thread.ts";
 import { toolAction } from "../../core/tools.ts";
+import { ANSWER, ASK, PLAN_TITLE, fileName, planOptions } from "../../core/wording.ts";
 import {
   ClaudeTranslator,
+  claudeRuntimeModes,
   permissionModeFor,
   runtimeModeFor,
   summarizeInput,
@@ -57,18 +62,7 @@ import {
 const CAPABILITIES: Capabilities = {
   steer: true,
   planMode: true,
-  runtimeModes: [
-    {
-      id: "supervised",
-      description: "ask before edits and commands, as Claude Code does by default",
-    },
-    { id: "auto-edit", description: "accept edits without asking; ask before commands" },
-    {
-      id: "auto",
-      description: "Claude Code's auto mode: a classifier approves or blocks each action",
-    },
-    { id: "full-access", description: "never ask; bypass permissions" },
-  ],
+  runtimeModes: RUNTIME_MODES,
   images: true,
   toolChecks: true,
   nativeSlashCommands: true,
@@ -93,13 +87,6 @@ const TERMINAL_COMMANDS = ["color", "doctor", "focus", "reload-plugins"];
 const HISTORY_MESSAGES = 200;
 const STDERR_TAIL_BYTES = 16_384;
 
-const MODE_LABELS: Record<RuntimeMode, string> = {
-  supervised: "manually approve edits",
-  "auto-edit": "auto-accept edits",
-  auto: "auto mode",
-  "full-access": "full access",
-};
-
 export interface ClaudeSessionConfig extends SessionOptions {
   /** A `claude` executable to run instead of the SDK's bundled one. */
   executable: string | null;
@@ -119,7 +106,7 @@ const REJECTED =
 
 /** Drives Claude Code through the Claude Agent SDK in streaming-input mode. */
 export class ClaudeSession implements HarnessSession {
-  readonly capabilities = CAPABILITIES;
+  readonly capabilities: Capabilities;
   readonly info: SessionInfo;
   #config: ClaudeSessionConfig;
   #query: Query | null = null;
@@ -130,6 +117,10 @@ export class ClaudeSession implements HarnessSession {
   #turn: Turn | null = null;
   #interruptRequested = false;
   #bypassAllowed: boolean;
+  /** Why the thread starts in a narrower mode than asked, said once it starts. */
+  #stepDown: string | null = null;
+  /** The modes Claude Code's settings leave on. */
+  #allowed: RuntimeMode[];
   #generation = 0;
   #stderr = "";
   #closed = false;
@@ -142,17 +133,33 @@ export class ClaudeSession implements HarnessSession {
 
   constructor(config: ClaudeSessionConfig) {
     this.#config = config;
-    this.#bypassAllowed = config.runtimeMode === "full-access";
+    this.#allowed = claudeRuntimeModes(claudeSettings(config.cwd));
+    // Claude Code refuses full access as root unless it runs in a sandbox.
+    const root = process.getuid?.() === 0 && !process.env["IS_SANDBOX"];
+    const modes = root ? this.#allowed.filter((mode) => mode !== "full-access") : this.#allowed;
+    this.capabilities = { ...CAPABILITIES, runtimeModes: modes };
+    // A mode that is turned off steps down to the broadest one left.
+    const runtimeMode = fitRuntimeMode(config.runtimeMode, modes) ?? "supervised";
+    if (runtimeMode !== config.runtimeMode)
+      this.#stepDown = `${this.#unavailable(config.runtimeMode)}, so this thread runs in ${runtimeMode}`;
+    this.#bypassAllowed = runtimeMode === "full-access";
     this.info = {
       harness: "claude",
       threadId: config.resume,
       cwd: config.cwd,
       model: config.model,
       effort: config.effort,
-      runtimeMode: config.runtimeMode,
+      runtimeMode,
       interactionMode: config.interactionMode,
       version: null,
     };
+  }
+
+  /** Why a mode is not offered. */
+  #unavailable(mode: RuntimeMode): string {
+    return this.#allowed.includes(mode)
+      ? "Claude Code does not run full-access as root"
+      : `Claude Code's settings turn off ${mode}`;
   }
 
   get events(): AsyncIterable<HarnessEvent> {
@@ -161,12 +168,14 @@ export class ClaudeSession implements HarnessSession {
 
   async start(): Promise<void> {
     if (this.#config.resume) await this.#replayHistory(this.#config.resume);
+    // After any history, where the user is looking.
+    if (this.#stepDown) this.#emit(this.#translator.notice("warning", this.#stepDown));
     this.#open(this.#config.resume);
     this.#emitInfo();
   }
 
   async startTurn(input: UserInput): Promise<void> {
-    if (!this.#query) throw new Error("The Claude session is not running");
+    if (!this.#query) throw new Error("The session is not running");
     const uuid = randomUUID();
     this.#interruptRequested = false;
     this.#turn = { id: uuid, outstanding: new Set([uuid]), synthetic: false };
@@ -204,6 +213,7 @@ export class ClaudeSession implements HarnessSession {
   }
 
   async setRuntimeMode(mode: RuntimeMode): Promise<void> {
+    if (!this.capabilities.runtimeModes.includes(mode)) throw new Error(this.#unavailable(mode));
     await this.#applyPermissionMode(mode, this.info.interactionMode);
   }
 
@@ -251,7 +261,7 @@ export class ClaudeSession implements HarnessSession {
   }
 
   async runCommand(name: string): Promise<void> {
-    throw new Error(`Claude Code runs /${name} as a turn`);
+    throw new Error(`/${name} runs as a turn`);
   }
 
   async listMcpServers(): Promise<McpServer[]> {
@@ -277,13 +287,11 @@ export class ClaudeSession implements HarnessSession {
           message:
             action === "enable"
               ? `Enabled ${server}`
-              : `Disabled ${server}; Claude Code keeps it off in this folder until you enable it`,
+              : `Disabled ${server}; it stays off in this folder until you enable it`,
           url: null,
         };
       case "login":
-        throw new Error(
-          `Claude Code signs in to ${server} only in its own terminal: run claude, then /mcp`,
-        );
+        throw new Error(`${this.info.harness} does not let 1harness sign in to a server`);
     }
   }
 
@@ -306,7 +314,7 @@ export class ClaudeSession implements HarnessSession {
   }
 
   #require(): Query {
-    if (!this.#query) throw new Error("The Claude session is not running");
+    if (!this.#query) throw new Error("The session is not running");
     return this.#query;
   }
 
@@ -480,8 +488,7 @@ export class ClaudeSession implements HarnessSession {
     const mode = permissionModeFor(runtimeMode, interactionMode);
     if (mode === "bypassPermissions" && !this.#bypassAllowed) {
       // Claude only allows full access in a session started with it, so restart and resume.
-      if (this.#turn)
-        throw new Error("Stop the running turn before switching Claude to full access");
+      if (this.#turn) throw new Error("Stop the running turn before switching to full access");
       this.#bypassAllowed = true;
       this.info.runtimeMode = runtimeMode;
       this.info.interactionMode = interactionMode;
@@ -565,8 +572,8 @@ export class ClaudeSession implements HarnessSession {
     if (tool === "AskUserQuestion") return this.#askQuestions(id, input, context);
     if (tool === "ExitPlanMode") return this.#approvePlan(id, input, context);
 
-    // The options Claude Code itself offers.
-    const options: ApprovalOption[] = [{ id: "allow", label: "Yes", effect: "allow" }];
+    // The choices Claude Code itself offers, in 1harness's words.
+    const options: ApprovalOption[] = [{ id: "allow", label: ANSWER.yes, effect: "allow" }];
     if (!context.suppressAlwaysAllowRule) {
       options.push({
         id: "allowSession",
@@ -574,13 +581,11 @@ export class ClaudeSession implements HarnessSession {
         effect: "allow-always",
       });
     }
-    options.push({
-      id: "deny",
-      label: "No, and tell Claude what to do differently",
-      effect: "deny",
-    });
+    options.push({ id: "deny", label: ANSWER.noAndExplain, effect: "deny" });
     const prompt = approvalPrompt(tool, input);
+    // Claude Code's own sentence for the prompt goes under 1harness's question.
     const detail = [
+      context.title ?? "",
       ...prompt.detail,
       context.description ?? "",
       stripVTControlCharacters(context.decisionReason ?? ""),
@@ -590,7 +595,7 @@ export class ClaudeSession implements HarnessSession {
       {
         kind: "approval",
         id,
-        title: context.title ?? prompt.title,
+        title: prompt.title,
         detail: distinctLines(detail).join("\n"),
         action: toolAction(tool, input),
         options,
@@ -679,20 +684,12 @@ export class ClaudeSession implements HarnessSession {
         type: "item.completed",
         item: { kind: "plan", id: `plan-${context.toolUseID}`, text: plan },
       });
-    const current = this.info.runtimeMode;
-    const choices: RuntimeMode[] = ["auto-edit", "supervised"];
-    if (!choices.includes(current)) choices.unshift(current);
-    const options: ApprovalOption[] = choices.map((mode) => ({
-      id: mode,
-      label: `Yes, and ${MODE_LABELS[mode]}`,
-      effect: "allow",
-    }));
-    options.push({ id: "keep", label: "No, keep planning", effect: "deny" });
+    const options = planOptions(this.info.runtimeMode, this.capabilities.runtimeModes);
     const response = await this.#ask(
       {
         kind: "approval",
         id,
-        title: "Ready to implement this plan?",
+        title: PLAN_TITLE,
         detail: "",
         action: { type: "other" },
         options,
@@ -701,7 +698,7 @@ export class ClaudeSession implements HarnessSession {
       context.signal,
     );
     const choice = response.kind === "approval" ? response.optionId : "keep";
-    const mode = RUNTIME_MODES.find((entry) => entry === choice);
+    const mode = isRuntimeMode(choice) ? choice : undefined;
     if (!mode) {
       return {
         behavior: "deny",
@@ -750,11 +747,7 @@ function failureText(result: SDKResultMessage): string {
   return result.subtype.replaceAll("_", " ");
 }
 
-function fileName(path: unknown): string {
-  return typeof path === "string" ? (path.split("/").at(-1) ?? path) : "the file";
-}
-
-/** The question and detail Claude Code shows for a tool, with the diff for edits. */
+/** The question and detail for a tool, with the diff for edits. */
 function approvalPrompt(
   tool: string,
   input: Record<string, unknown>,
@@ -762,7 +755,7 @@ function approvalPrompt(
   switch (tool) {
     case "Bash":
     case "PowerShell":
-      return { title: "Do you want to proceed?", detail: [`$ ${String(input["command"] ?? "")}`] };
+      return { title: ASK.command, detail: [`$ ${String(input["command"] ?? "")}`] };
     case "Edit":
     case "MultiEdit":
     case "Write":
@@ -770,21 +763,16 @@ function approvalPrompt(
       const item = toolItem("", tool, input);
       const changes = item?.kind === "file_change" ? item.changes : [];
       const path = input["file_path"] ?? input["notebook_path"];
-      const title =
-        tool === "Write"
-          ? `Do you want to create ${fileName(path)}?`
-          : `Do you want to make this edit to ${fileName(path)}?`;
+      const file = typeof path === "string" ? fileName(path) : "the file";
+      const title = tool === "Write" ? ASK.create(file) : ASK.edit(file);
       return { title, detail: [String(path ?? ""), ...changes.map((change) => change.diff)] };
     }
     case "WebFetch":
-      return {
-        title: "Do you want to allow Claude to fetch this content?",
-        detail: [String(input["url"] ?? "")],
-      };
+      return { title: ASK.fetch, detail: [String(input["url"] ?? "")] };
     default: {
       const mcp = /^mcp__(.+?)__(.+)$/.exec(tool);
       const name = mcp ? `${mcp[1]} · ${mcp[2]}` : tool;
-      return { title: `Do you want to allow ${name}?`, detail: [summarizeInput(input)] };
+      return { title: ASK.tool(name), detail: [summarizeInput(input)] };
     }
   }
 }
@@ -793,19 +781,19 @@ function approvalPrompt(
 function alwaysAllowLabel(tool: string, suggestions: PermissionUpdate[] | undefined): string {
   for (const suggestion of suggestions ?? []) {
     if (suggestion.type === "setMode" && suggestion.mode === "acceptEdits") {
-      return "Yes, allow all edits during this session";
+      return ANSWER.again("edits");
     }
     if (suggestion.type === "addDirectories") {
-      return `Yes, and allow access to ${suggestion.directories.join(", ")} this session`;
+      return ANSWER.again(`access to ${suggestion.directories.join(", ")}`);
     }
     if (suggestion.type === "addRules") {
       const rule = suggestion.rules[0];
       if (rule?.ruleContent) {
-        return `Yes, and don't ask again for \`${rule.ruleContent}\` ${tool === "Bash" ? "commands" : "this session"}`;
+        return ANSWER.again(`\`${rule.ruleContent}\`${tool === "Bash" ? " commands" : ""}`);
       }
     }
   }
-  return `Yes, and don't ask again for ${tool} this session`;
+  return ANSWER.again(tool);
 }
 
 /** Drops empty lines and ones an earlier line already says, such as a path's file name. */
@@ -863,4 +851,43 @@ function claudeMcpServers(
         : { type: "stdio", command: server.command, args: server.args, env: server.env },
     ]),
   );
+}
+
+/**
+ * Claude Code's settings files, managed ones included, which can turn modes
+ * off. Policy that arrives another way, such as a macOS profile or from the
+ * server, is not read here; the mode Claude Code reports once it starts is.
+ */
+function claudeSettings(cwd: string, env: NodeJS.ProcessEnv = process.env): unknown[] {
+  const home = env["CLAUDE_CONFIG_DIR"] || join(homedir(), ".claude");
+  const managed =
+    process.platform === "darwin"
+      ? "/Library/Application Support/ClaudeCode"
+      : process.platform === "win32"
+        ? "C:\\Program Files\\ClaudeCode"
+        : "/etc/claude-code";
+  const dropIns = join(managed, "managed-settings.d");
+  let extra: string[] = [];
+  try {
+    extra = readdirSync(dropIns)
+      .filter((name) => name.endsWith(".json"))
+      .toSorted()
+      .map((name) => join(dropIns, name));
+  } catch {
+    // No drop-in folder.
+  }
+  const files = [
+    join(home, "settings.json"),
+    join(cwd, ".claude", "settings.json"),
+    join(cwd, ".claude", "settings.local.json"),
+    join(managed, "managed-settings.json"),
+    ...extra,
+  ];
+  return files.flatMap((file) => {
+    try {
+      return [JSON.parse(readFileSync(file, "utf8")) as unknown];
+    } catch {
+      return [];
+    }
+  });
 }

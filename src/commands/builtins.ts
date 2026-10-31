@@ -1,5 +1,6 @@
 import type { McpAction, McpServer, ModelOption, ThreadSummary } from "../core/events.ts";
 import { errorMessage } from "../core/thread.ts";
+import { MODE_DESCRIPTIONS } from "../core/wording.ts";
 import { drivers } from "../drivers/index.ts";
 import {
   completion,
@@ -261,21 +262,21 @@ const mode: CommandDefinition = {
   available: (context) => (liveSession(context)?.capabilities.runtimeModes.length ?? 0) > 0,
   complete: (context) => ({
     start: 0,
-    items: (liveSession(context)?.capabilities.runtimeModes ?? []).map((option) =>
-      completion(option.id, option.description),
+    items: (liveSession(context)?.capabilities.runtimeModes ?? []).map((id) =>
+      completion(id, MODE_DESCRIPTIONS[id]),
     ),
   }),
   async run(context, args) {
     const session = context.session();
     const modes = session.capabilities.runtimeModes;
-    let chosen = modes.find((option) => option.id === args);
+    let chosen = modes.find((id) => id === args);
     if (!chosen) {
-      const current = modes.findIndex((option) => option.id === context.info?.runtimeMode);
+      const current = context.info ? modes.indexOf(context.info.runtimeMode) : -1;
       const index = await context.ui.pick(
         "Permission modes",
-        modes.map((option, position) => ({
-          label: option.id,
-          detail: option.description,
+        modes.map((id, position) => ({
+          label: id,
+          detail: MODE_DESCRIPTIONS[id],
           tag: position === current ? "current" : "",
         })),
         { initial: Math.max(0, current) },
@@ -283,8 +284,8 @@ const mode: CommandDefinition = {
       chosen = index === null ? undefined : modes[index];
     }
     if (!chosen) return;
-    await session.setRuntimeMode(chosen.id);
-    context.ui.notify("info", `Mode: ${chosen.id}`);
+    await session.setRuntimeMode(chosen);
+    context.ui.notify("info", `Mode: ${chosen}`);
   },
 };
 
@@ -353,12 +354,16 @@ const mcp: CommandDefinition = {
       context.ui.report(mcpServerReport(server));
       return;
     }
+    // Every harness says the same when it keeps an action to itself.
+    if (!session.mcpAction || !session.capabilities.mcpActions.includes(action as McpAction))
+      throw new Error(
+        `${context.harness} does not let 1harness ${MCP_ACTIONS[action as McpAction].description}; do it in ${context.harness} itself`,
+      );
     // Actions can take seconds, so a line says what is happening and then how it went.
     const settle = context.ui.progress(
       `${MCP_ACTIONS[action as McpAction].progress} ${server.name}…`,
     );
     try {
-      if (!session.mcpAction) throw new Error(`${context.harness} cannot manage MCP servers`);
       const result = await session.mcpAction(action as McpAction, server.name);
       settle("info", result.url ? `${result.message}:\n${result.url}` : result.message);
     } catch (error) {

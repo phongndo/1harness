@@ -1,15 +1,14 @@
-import type { RuntimeMode } from "../core/events.ts";
+import { isRuntimeMode, modeRank } from "../core/events.ts";
 import { drivers, findDriver } from "../drivers/index.ts";
 import type { ToolContext, ToolDefinition } from "../extensions/api.ts";
-import { titleFrom, type ManagedThread, type RunRecord, type ThreadManager } from "./manager.ts";
+import {
+  ModeError,
+  titleFrom,
+  type ManagedThread,
+  type RunRecord,
+  type ThreadManager,
+} from "./manager.ts";
 
-// Narrowest first: a thread may start or steer others only at or below its own.
-const MODE_RANK: Record<RuntimeMode, number> = {
-  supervised: 0,
-  "auto-edit": 1,
-  auto: 2,
-  "full-access": 3,
-};
 const ROLES = ["implementation", "research", "review", "design", "test", "general"];
 /** How many delegations deep work may go below a user's thread. */
 export const MAX_DEPTH = 3;
@@ -61,10 +60,6 @@ function text(input: Record<string, unknown>, name: string): string | undefined 
   if (typeof value !== "string")
     throw new OrchestrationError("invalid_request", `${name} must be a string`);
   return value.trim() || undefined;
-}
-
-function isRuntimeMode(value: string): value is RuntimeMode {
-  return Object.hasOwn(MODE_RANK, value);
 }
 
 function runView(run: RunRecord) {
@@ -124,7 +119,8 @@ export class Orchestrator {
             },
             harness: {
               type: "string",
-              description: "The harness to run it, such as claude or codex. Yours by default.",
+              description:
+                "The harness to run it, one orchestrator_capabilities lists. Yours by default.",
             },
             model: {
               type: "string",
@@ -395,7 +391,7 @@ export class Orchestrator {
     const mode = asked === undefined || asked === "inherit" ? info.runtimeMode : asked;
     if (!isRuntimeMode(mode))
       throw new OrchestrationError("invalid_request", `no runtime mode ${mode}`);
-    if (MODE_RANK[mode] > MODE_RANK[info.runtimeMode])
+    if (modeRank(mode) > modeRank(info.runtimeMode))
       throw new OrchestrationError(
         "runtime_mode_escalation_denied",
         `a ${info.runtimeMode} thread cannot start ${mode} work`,
@@ -426,24 +422,25 @@ export class Orchestrator {
     // Held until the task is sent, when its thread counts as working.
     this.#reserved++;
     try {
-      const child = await this.#manager.create({
-        harness,
-        settings: {
-          cwd: info.cwd,
-          model: text(input, "model") ?? (sameHarness ? info.model : null),
-          effort: text(input, "effort") ?? (sameHarness ? info.effort : null),
-          runtimeMode: mode,
-          interactionMode: plan ? "plan" : "default",
-          resume: null,
-        },
-        title: titleFrom(text(input, "title") ?? brief),
-        parentId: caller.id,
-        origin: "delegated",
-      });
+      let child: ManagedThread;
       try {
-        await this.#enforceModes(child, mode, plan);
+        child = await this.#manager.create({
+          harness,
+          settings: {
+            cwd: info.cwd,
+            model: text(input, "model") ?? (sameHarness ? info.model : null),
+            effort: text(input, "effort") ?? (sameHarness ? info.effort : null),
+            runtimeMode: mode,
+            interactionMode: plan ? "plan" : "default",
+            resume: null,
+          },
+          title: titleFrom(text(input, "title") ?? brief),
+          parentId: caller.id,
+          origin: "delegated",
+        });
       } catch (error) {
-        await this.#manager.close(child.id);
+        // A harness that cannot run the task as narrowly as asked is refused, with why.
+        if (error instanceof ModeError) throw new OrchestrationError(error.code, error.message);
         throw error;
       }
       const task: Task = {
@@ -461,40 +458,6 @@ export class Orchestrator {
     } finally {
       this.#reserved--;
     }
-  }
-
-  /**
-   * Makes a new thread run no freer than its task allows, or refuses the task:
-   * a harness without the mode asked for runs the broadest one it has below it.
-   */
-  async #enforceModes(child: ManagedThread, mode: RuntimeMode, plan: boolean): Promise<void> {
-    const session = child.thread.session;
-    const offered = session.capabilities.runtimeModes.map((option) => option.id);
-    if (offered.length > 0) {
-      const target = offered
-        .filter((option) => MODE_RANK[option] <= MODE_RANK[mode])
-        .toSorted((a, b) => MODE_RANK[b] - MODE_RANK[a])[0];
-      if (!target)
-        throw new OrchestrationError(
-          "runtime_mode_unavailable",
-          `${child.harness} has no mode as narrow as ${mode}`,
-        );
-      if (session.info.runtimeMode !== target) await session.setRuntimeMode(target);
-    }
-    if (plan && session.info.interactionMode !== "plan") {
-      if (!session.capabilities.planMode)
-        throw new OrchestrationError(
-          "plan_mode_unavailable",
-          `${child.harness} has no plan mode, so it cannot take planning work`,
-        );
-      await session.setInteractionMode("plan");
-    }
-    const { runtimeMode, interactionMode } = session.info;
-    if (MODE_RANK[runtimeMode] > MODE_RANK[mode] || (plan && interactionMode !== "plan"))
-      throw new OrchestrationError(
-        "runtime_mode_escalation_denied",
-        `${child.harness} would run ${runtimeMode}${interactionMode === "plan" ? " in plan mode" : ""}, more than the task allows`,
-      );
   }
 
   #brief(task: string, role: string | undefined): string {
@@ -633,7 +596,7 @@ export class Orchestrator {
       throw new OrchestrationError("thread_closed", `thread ${target.id} is closed`);
     const mine = caller.thread.session.info;
     const theirs = target.thread.session.info;
-    if (MODE_RANK[theirs.runtimeMode] > MODE_RANK[mine.runtimeMode])
+    if (modeRank(theirs.runtimeMode) > modeRank(mine.runtimeMode))
       throw new OrchestrationError(
         "runtime_mode_escalation_denied",
         `thread ${target.id} runs ${theirs.runtimeMode}, more than this thread's ${mine.runtimeMode}`,

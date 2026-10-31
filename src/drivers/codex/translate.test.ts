@@ -5,6 +5,7 @@ import { codexMcpConfig, codexResponse, decisionEffect } from "./session.ts";
 import {
   CodexTranslator,
   codexRuntimePolicy,
+  grantedRuntimeMode,
   toItem,
   toMcpServer,
   unwrapShell,
@@ -390,6 +391,26 @@ describe("toMcpServer", () => {
         .item.text,
       "Could not sign in to docs: denied",
     );
+  });
+});
+
+describe("grantedRuntimeMode", () => {
+  it("runs in the mode the granted sandbox allows, never broader than asked", () => {
+    const workspace = {
+      type: "workspaceWrite" as const,
+      writableRoots: [],
+      networkAccess: false,
+      excludeTmpdirEnvVar: false,
+      excludeSlashTmp: false,
+    };
+    assert.equal(grantedRuntimeMode("auto", workspace), "auto");
+    assert.equal(grantedRuntimeMode("full-access", workspace), "auto-edit");
+    assert.equal(
+      grantedRuntimeMode("full-access", { type: "readOnly", networkAccess: false }),
+      "supervised",
+    );
+    assert.equal(grantedRuntimeMode("supervised", workspace), "supervised");
+    assert.equal(grantedRuntimeMode("supervised", { type: "dangerFullAccess" }), "full-access");
   });
 });
 

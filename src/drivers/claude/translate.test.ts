@@ -4,6 +4,7 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { toolAction } from "../../core/tools.ts";
 import {
   ClaudeTranslator,
+  claudeRuntimeModes,
   permissionModeFor,
   runtimeModeFor,
   toMcpServer,
@@ -406,6 +407,27 @@ describe("permission modes", () => {
     assert.equal(permissionModeFor("full-access", "plan"), "plan");
     assert.equal(runtimeModeFor("bypassPermissions"), "full-access");
     assert.equal(runtimeModeFor("plan"), null);
+  });
+
+  it("leaves out the modes Claude Code's settings turn off", () => {
+    assert.deepEqual(claudeRuntimeModes([{}, null]), [
+      "supervised",
+      "auto-edit",
+      "auto",
+      "full-access",
+    ]);
+    assert.deepEqual(
+      claudeRuntimeModes([
+        { permissions: { disableBypassPermissionsMode: "disable" } },
+        { disableAutoMode: "disable" },
+      ]),
+      ["supervised", "auto-edit"],
+    );
+    assert.deepEqual(claudeRuntimeModes([{ permissions: { disableAutoMode: "disable" } }]), [
+      "supervised",
+      "auto-edit",
+      "full-access",
+    ]);
   });
 });
 

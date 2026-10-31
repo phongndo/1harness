@@ -1,17 +1,19 @@
-import type {
-  CommandAction,
-  FileChange,
-  HarnessEvent,
-  Item,
-  ItemStatus,
-  McpServer,
-  McpServerState,
-  RateLimit,
-  RuntimeMode,
-  TodoStep,
-  TurnStatus,
-  Usage,
+import {
+  modeRank,
+  type CommandAction,
+  type FileChange,
+  type HarnessEvent,
+  type Item,
+  type ItemStatus,
+  type McpServer,
+  type McpServerState,
+  type RateLimit,
+  type RuntimeMode,
+  type TodoStep,
+  type TurnStatus,
+  type Usage,
 } from "../../core/events.ts";
+import { limitNotice } from "../../core/wording.ts";
 import { INIT_PROMPT } from "./prompts.ts";
 
 // The subset of the app-server protocol this driver reads. Generate the full
@@ -186,6 +188,24 @@ export function codexRuntimePolicy(
   }
 }
 
+/**
+ * The mode a thread runs in, given the sandbox Codex granted for the one
+ * asked for. Codex's own requirements can grant a narrower sandbox; outside
+ * one, a thread counts as full access.
+ */
+export function grantedRuntimeMode(asked: RuntimeMode, sandbox: CodexSandboxPolicy): RuntimeMode {
+  if (sandbox.type === codexRuntimePolicy(asked).sandboxPolicy.type) return asked;
+  switch (sandbox.type) {
+    case "readOnly":
+      return "supervised";
+    case "workspaceWrite":
+      return modeRank(asked) < modeRank("auto-edit") ? asked : "auto-edit";
+    case "dangerFullAccess":
+    case "externalSandbox":
+      return "full-access";
+  }
+}
+
 export function itemStatus(status: string): ItemStatus {
   switch (status) {
     case "completed":
@@ -214,6 +234,18 @@ function contentText(content: JsonValue[]): string {
       return compact(part);
     })
     .join("\n");
+}
+
+/** Codex's file changes as 1harness's, moves included. */
+export function fileChanges(
+  changes: Extract<CodexThreadItem, { type: "fileChange" }>["changes"],
+): FileChange[] {
+  return changes.map((entry) => ({
+    path: entry.path,
+    kind: changeKind(entry.kind.type),
+    diff: entry.diff,
+    ...(entry.kind.move_path ? { movePath: entry.kind.move_path } : {}),
+  }));
 }
 
 function changeKind(kind: string): FileChange["kind"] {
@@ -362,12 +394,7 @@ export function toItem(item: CodexThreadItem, done = true): Item | null {
       return {
         kind: "file_change",
         id: item.id,
-        changes: change.changes.map((entry) => ({
-          path: entry.path,
-          kind: changeKind(entry.kind.type),
-          diff: entry.diff,
-          ...(entry.kind.move_path ? { movePath: entry.kind.move_path } : {}),
-        })),
+        changes: fileChanges(change.changes),
         status: itemStatus(change.status),
       };
     }
@@ -674,7 +701,8 @@ export class CodexTranslator {
         if (review.status !== "denied" && review.status !== "timedOut") return [];
         const verdict = review.status === "denied" ? "denied" : "timed out on";
         const rationale = review.rationale ? `: ${review.rationale}` : "";
-        return [this.notice("warning", `Auto-review ${verdict} an action${rationale}`)];
+        // Codex's auto-review is the safety check auto mode describes.
+        return [this.notice("warning", `The safety check ${verdict} an action${rationale}`)];
       }
       case "warning":
       case "guardianWarning":
@@ -720,12 +748,12 @@ export class CodexTranslator {
       if (limit.status === "ok") this.#warned.delete(key);
       else if (!this.#warned.has(key)) {
         this.#warned.add(key);
-        events.push(this.notice("warning", limitWarning(limit)));
+        events.push(this.notice("warning", limitNotice(limit)));
       }
     }
     if (reached && !this.#warned.has("reached")) {
       this.#warned.add("reached");
-      events.push(this.notice("warning", "Codex usage limit reached"));
+      events.push(this.notice("warning", "Usage limit reached"));
     } else if (!reached) this.#warned.delete("reached");
     events.push(this.#usageEvent());
     return events;
@@ -740,15 +768,6 @@ export class CodexTranslator {
     if (resets.length === 0) return error;
     return `${error}\nResets ${new Date(Math.max(...resets)).toLocaleString()}`;
   }
-}
-
-export function limitWarning(limit: RateLimit): string {
-  const used = limit.usedPercent === null ? "" : ` ${Math.round(limit.usedPercent)}% used`;
-  const resets =
-    limit.resetsAt === null ? "" : `, resets ${new Date(limit.resetsAt).toLocaleString()}`;
-  return limit.status === "exceeded"
-    ? `${limit.label} usage limit reached${resets}`
-    : `${limit.label} usage limit:${used}${resets}`;
 }
 
 export function codexRequestId(id: unknown): string {

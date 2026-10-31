@@ -3,10 +3,13 @@ import { extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AsyncQueue } from "../../core/async-queue.ts";
 import {
+  RUNTIME_MODES,
+  isRuntimeMode,
   type ApprovalAction,
   type ApprovalOption,
   type ApprovalRequest,
   type Capabilities,
+  type FileChange,
   type HarnessEvent,
   type HarnessRequest,
   type HarnessSession,
@@ -26,6 +29,7 @@ import {
 } from "../../core/events.ts";
 import { errorMessage } from "../../core/thread.ts";
 import { toolAction } from "../../core/tools.ts";
+import { ANSWER, ASK, PLAN_TITLE, askForChanges, planOptions } from "../../core/wording.ts";
 import { HookServer } from "./hook-server.ts";
 import { INIT_PROMPT } from "./prompts.ts";
 import { JsonRpcProcess, RpcError, type RequestId } from "../jsonrpc.ts";
@@ -33,6 +37,8 @@ import {
   CodexTranslator,
   codexRequestId,
   codexRuntimePolicy,
+  fileChanges,
+  grantedRuntimeMode,
   toItem,
   toMcpServer,
   unwrapShell,
@@ -77,18 +83,7 @@ const THREAD_CONFIG = {
 const CAPABILITIES: Capabilities = {
   steer: true,
   planMode: true,
-  runtimeModes: [
-    {
-      id: "supervised",
-      description: "read-only sandbox; ask before anything not known to be safe",
-    },
-    { id: "auto-edit", description: "write inside the workspace sandbox; ask to go beyond it" },
-    {
-      id: "auto",
-      description: "workspace sandbox; Codex's auto-review decides what needs approval",
-    },
-    { id: "full-access", description: "never ask; no sandbox" },
-  ],
+  runtimeModes: RUNTIME_MODES,
   images: true,
   toolChecks: true,
   nativeSlashCommands: false,
@@ -105,7 +100,7 @@ const CAPABILITIES: Capabilities = {
  */
 const COMMANDS: NativeCommand[] = [
   nativeCommand("review", "review my current changes and find issues", "[instructions]", true),
-  nativeCommand("init", "create an AGENTS.md file with instructions for Codex", "", true),
+  nativeCommand("init", "create an AGENTS.md file with instructions for the agent", "", true),
   nativeCommand("rename", "rename the current thread", "<name>", false),
   nativeCommand("ps", "list background terminals", "", false),
   // Codex's /stop, by its other name, since 1harness's /stop interrupts the turn.
@@ -150,7 +145,7 @@ export class CodexSession implements HarnessSession {
   #events = new AsyncQueue<HarnessEvent>();
   #translator = new CodexTranslator();
   #pending = new Map<string, PendingRequest>();
-  #fileChanges = new Map<string, { path: string; diff: string }[]>();
+  #fileChanges = new Map<string, FileChange[]>();
   /** Shell processes by command item, for stopping them with the turn. */
   #processes = new Map<string, string>();
   #sandbox: CodexSandboxPolicy | null = null;
@@ -191,7 +186,7 @@ export class CodexSession implements HarnessSession {
     this.#hooks = hooks;
     const rpc = new JsonRpcProcess(this.#config.command, ["app-server"], {
       cwd: this.#config.cwd,
-      name: "codex app-server",
+      name: "Codex",
       // The hook finds this session through its environment, which Codex passes on.
       env: hooks
         ? { ...process.env, ONEHARNESS_HOOK_URL: hooks.url, ONEHARNESS_HOOK_TOKEN: hooks.token }
@@ -258,6 +253,16 @@ export class CodexSession implements HarnessSession {
 
     this.#translator.threadId = response.thread.id;
     this.#sandbox = response.sandbox;
+    const granted = response.sandbox
+      ? grantedRuntimeMode(this.info.runtimeMode, response.sandbox)
+      : this.info.runtimeMode;
+    if (granted !== this.info.runtimeMode) {
+      this.#notice(
+        "warning",
+        `Codex's settings do not allow ${this.info.runtimeMode}, so this thread runs in ${granted}`,
+      );
+      this.info.runtimeMode = granted;
+    }
     this.info.threadId = response.thread.id;
     this.info.model = response.model;
     this.info.effort = this.info.effort ?? response.reasoningEffort;
@@ -459,7 +464,7 @@ export class CodexSession implements HarnessSession {
         this.#notice("info", "Stopped all background terminals");
         return;
     }
-    throw new Error(`Codex has no /${name} command`);
+    throw new Error(`${this.info.harness} cannot run /${name}`);
   }
 
   async listMcpServers(): Promise<McpServer[]> {
@@ -506,16 +511,16 @@ export class CodexSession implements HarnessSession {
           },
         );
         return {
-          message: `Open this page to sign in to ${server}; Codex connects once you finish`,
+          message: `Open this page to sign in to ${server}; it connects once you finish`,
           url: response.authorizationUrl,
         };
       }
       case "reconnect":
         // Codex reloads every server from its config; it has no reconnect for one.
         await this.#request("config/mcpServer/reload", undefined);
-        return { message: "Codex reloaded all its MCP servers", url: null };
+        return { message: "Reconnected every MCP server", url: null };
       default:
-        throw new Error(`Codex turns MCP servers on and off only in its config files`);
+        throw new Error(`${this.info.harness} does not let 1harness turn a server on or off`);
     }
   }
 
@@ -590,9 +595,9 @@ export class CodexSession implements HarnessSession {
       request: {
         kind: "approval",
         id,
-        title: "Let 1harness check Codex's tool calls?",
+        title: "Let 1harness check tool calls in this thread?",
         detail:
-          "An extension checks tool calls before they run. Codex runs that check only through a hook you trust, so 1harness records the trust in ~/.codex/config.toml. Codex asks again if the hook changes.",
+          "An extension checks tool calls before they run. This harness runs such checks only through a hook you trust, so 1harness records that trust in its config, ~/.codex/config.toml. You are asked again if the hook changes.",
         action: { type: "other" },
         options: [
           { id: "trust", label: "Yes, trust 1harness's hook", effect: "allow-always" },
@@ -619,7 +624,7 @@ export class CodexSession implements HarnessSession {
     // Codex reads hooks when a thread starts. One with no turns yet is swapped
     // for a fresh one that runs the hook; others pick it up from the next thread.
     if (!fresh || this.#turnsStarted || !this.#threadParams) {
-      this.#notice("info", "1harness checks Codex's tool calls from the next thread (/new)");
+      this.#notice("info", "1harness checks tool calls from the next thread (/new)");
       return;
     }
     const response = await this.#request<ThreadResponse>(
@@ -630,7 +635,7 @@ export class CodexSession implements HarnessSession {
     this.#translator.threadId = response.thread.id;
     this.info.threadId = response.thread.id;
     this.#emitInfo();
-    this.#notice("info", "1harness now checks Codex's tool calls");
+    this.#notice("info", "1harness now checks tool calls");
   }
 
   /** Resumes with only the latest turns, unarchiving the thread if Codex archived it. */
@@ -661,12 +666,12 @@ export class CodexSession implements HarnessSession {
   }
 
   #threadId(): string {
-    if (!this.info.threadId) throw new Error("The Codex thread has not started");
+    if (!this.info.threadId) throw new Error("The thread has not started");
     return this.info.threadId;
   }
 
   #request<T>(method: string, params: unknown, timeoutMs?: number): Promise<T> {
-    if (!this.#rpc) return Promise.reject(new Error("The Codex session has not started"));
+    if (!this.#rpc) return Promise.reject(new Error("The session has not started"));
     return this.#rpc.request<T>(method, params, timeoutMs);
   }
 
@@ -743,10 +748,7 @@ export class CodexSession implements HarnessSession {
     const item = params["item"] as CodexThreadItem;
     if (item.type === "fileChange" && method === "item/started") {
       const { changes } = item as Extract<CodexThreadItem, { type: "fileChange" }>;
-      this.#fileChanges.set(
-        item.id,
-        changes.map((change) => ({ path: change.path, diff: change.diff })),
-      );
+      this.#fileChanges.set(item.id, fileChanges(changes));
     }
     if (item.type === "commandExecution") {
       const command = item as Extract<CodexThreadItem, { type: "commandExecution" }>;
@@ -773,16 +775,15 @@ export class CodexSession implements HarnessSession {
   /** Codex's own UI asks to implement a finished plan; accepting leaves plan mode. */
   #offerImplementation(): void {
     const id = `codex-plan-${Date.now()}`;
+    const options = planOptions(this.info.runtimeMode, CAPABILITIES.runtimeModes);
     this.#pending.set(id, {
       method: "1harness/implementPlan",
       params: {},
       decisions: new Map(),
       resolve: (result) => {
-        if (result !== "implement") return;
-        this.info.interactionMode = "default";
-        this.#emitInfo();
-        // The turn appears like any other, through Codex's own events.
-        void this.startTurn({ text: IMPLEMENT_PLAN }).catch((error: unknown) =>
+        const mode = isRuntimeMode(result) ? result : undefined;
+        if (!mode) return;
+        void this.#implementPlan(mode).catch((error: unknown) =>
           this.#emit(this.#translator.notice("error", errorMessage(error))),
         );
       },
@@ -792,16 +793,22 @@ export class CodexSession implements HarnessSession {
       request: {
         kind: "approval",
         id,
-        title: "Implement this plan?",
+        title: PLAN_TITLE,
         detail: "",
         action: { type: "other" },
-        options: [
-          { id: "implement", label: "Yes, implement this plan", effect: "allow" },
-          { id: "stay", label: "No, stay in plan mode", effect: "deny" },
-        ],
-        defaultOptionId: "implement",
+        options,
+        defaultOptionId: options[0]?.id ?? "",
       },
     });
+  }
+
+  /** Leaves plan mode in the chosen runtime mode and starts the implementation turn. */
+  async #implementPlan(mode: RuntimeMode): Promise<void> {
+    if (mode !== this.info.runtimeMode) await this.setRuntimeMode(mode);
+    this.info.interactionMode = "default";
+    this.#emitInfo();
+    // The turn appears like any other, through Codex's own events.
+    await this.startTurn({ text: IMPLEMENT_PLAN });
   }
 
   #serverRequest(method: string, raw: unknown, rpcId: RequestId): Promise<unknown> {
@@ -844,7 +851,7 @@ export class CodexSession implements HarnessSession {
     // Subagents run in their own threads and ask through the parent's connection.
     const subagent =
       typeof params["threadId"] === "string" && params["threadId"] !== this.info.threadId;
-    const from = subagent ? "A subagent asks: " : "";
+    const ask = (question: string) => (subagent ? ASK.fromSubagent(question) : question);
     const option = (label: string, decision: unknown): ApprovalOption => {
       const optionId = `d${decisions.size}`;
       decisions.set(optionId, decision);
@@ -859,13 +866,13 @@ export class CodexSession implements HarnessSession {
       case "item/permissions/requestApproval":
         return approval(
           id,
-          `${from}Grant additional permissions?`,
+          ask(ASK.permissions),
           { type: "other" },
           [reason, describePermissions(params["permissions"])],
           [
-            option("Yes, for this turn", "turn"),
-            option("Yes, for this session", "session"),
-            option("No", "deny"),
+            option(ANSWER.forTurn, "turn"),
+            option(ANSWER.forSession, "session"),
+            option(ANSWER.no, "deny"),
           ],
         );
       case "item/fileChange/requestApproval": {
@@ -878,7 +885,7 @@ export class CodexSession implements HarnessSession {
         ];
         return approval(
           id,
-          `${from}Would you like to make the following edits?`,
+          ask(askForChanges(changes)),
           { type: "file_change", paths: changes.map((change) => change.path) },
           [reason, ...changes.map((change) => `${change.path}\n${change.diff}`)],
           available.map((decision) => option(decisionLabel(decision, "edits"), decision)),
@@ -899,13 +906,13 @@ export class CodexSession implements HarnessSession {
     fallback.push("decline", "cancel");
     const available = (params["availableDecisions"] as unknown[] | null | undefined) ?? fallback;
     const title = network
-      ? `Allow network access to ${network.host}?`
+      ? ASK.network(network.host)
       : params["kind"] === "writeStdin"
-        ? "Send input to the running command?"
-        : "Would you like to run the following command?";
+        ? ASK.commandInput
+        : ASK.command;
     return approval(
       id,
-      from + title,
+      ask(title),
       command && !network && params["kind"] !== "writeStdin"
         ? {
             type: "command",
@@ -956,16 +963,13 @@ function approval(
   };
 }
 
-/** Labels a native approval decision the way Codex's own UI does. */
+/** Labels a native approval decision in 1harness's words. */
 function decisionLabel(decision: unknown, subject: "command" | "edits"): string {
-  if (decision === "accept") return "Yes, proceed";
-  if (decision === "acceptForSession") {
-    return subject === "command"
-      ? "Yes, and don't ask again for this command this session"
-      : "Yes, and don't ask again for these files this session";
-  }
-  if (decision === "decline") return "No, continue without it";
-  if (decision === "cancel") return "No, and tell Codex what to do differently";
+  if (decision === "accept") return ANSWER.yes;
+  if (decision === "acceptForSession")
+    return ANSWER.again(subject === "command" ? "this command" : "these files");
+  if (decision === "decline") return ANSWER.noAndContinue;
+  if (decision === "cancel") return ANSWER.noAndExplain;
   const record = (decision ?? {}) as Record<string, Record<string, unknown> | undefined>;
   const amendment = record["acceptWithExecpolicyAmendment"]?.["execpolicy_amendment"];
   if (Array.isArray(amendment)) {
@@ -973,15 +977,14 @@ function decisionLabel(decision: unknown, subject: "command" | "edits"): string 
     const tokens = amendment.map(String);
     const prefix =
       tokens.length === 3 && /^-l?c$/.test(tokens[1] ?? "") ? (tokens[2] ?? "") : tokens.join(" ");
-    return `Yes, and don't ask again for commands starting with \`${prefix}\``;
+    // Codex keeps these rules beyond the session.
+    return ANSWER.always(`commands starting with \`${prefix}\``);
   }
   const network = record["applyNetworkPolicyAmendment"]?.["network_policy_amendment"] as
     | { host: string; action: string }
     | undefined;
   if (network) {
-    return network.action === "deny"
-      ? `No, and always block ${network.host}`
-      : `Yes, and always allow ${network.host}`;
+    return network.action === "deny" ? ANSWER.never(network.host) : ANSWER.always(network.host);
   }
   return JSON.stringify(decision);
 }
@@ -1059,13 +1062,13 @@ function elicitationRequest(
   if (mode === "url") {
     return approval(
       id,
-      `${server} needs you to visit a page`,
+      ASK.visit(server),
       { type: "other" },
       [message, String(params["url"])],
       [
-        option("Done, continue", { action: "accept" }),
-        option("Decline", { action: "decline" }),
-        option("Cancel", { action: "cancel" }),
+        option(ANSWER.done, { action: "accept" }),
+        option(ANSWER.no, { action: "decline" }),
+        option(ANSWER.cancel, { action: "cancel" }),
       ],
     );
   }
@@ -1095,7 +1098,7 @@ function elicitationRequest(
 
   const once = content(null);
   if (once) {
-    const options = [option("Approve", { action: "accept", content: once, _meta: null })];
+    const options = [option(ANSWER.yes, { action: "accept", content: once, _meta: null })];
     for (const persist of ["session", "always"] as const) {
       const remembered = content(persist);
       const offered = fields.some(([key, field]) =>
@@ -1105,7 +1108,7 @@ function elicitationRequest(
       );
       if (remembered && offered) {
         options.push(
-          option(persist === "session" ? "Always allow this session" : "Always allow", {
+          option(persist === "session" ? ANSWER.again() : ANSWER.always(), {
             action: "accept",
             content: remembered,
             _meta: { persist },
@@ -1113,7 +1116,10 @@ function elicitationRequest(
         );
       }
     }
-    options.push(option("Decline", { action: "decline" }), option("Cancel", { action: "cancel" }));
+    options.push(
+      option(ANSWER.no, { action: "decline" }),
+      option(ANSWER.cancel, { action: "cancel" }),
+    );
     return approval(id, `${server}: ${message}`, { type: "other" }, [], options);
   }
   return {
@@ -1212,7 +1218,7 @@ export function codexResponse(pending: PendingRequest, response: RequestResponse
     return response.kind === "approval" ? response.optionId : "skip";
   }
   if (method === "1harness/implementPlan") {
-    return response.kind === "approval" ? response.optionId : "stay";
+    return response.kind === "approval" ? response.optionId : "keep";
   }
   if (method === "item/tool/requestUserInput") {
     const answers = response.kind === "question" ? response.answers : {};

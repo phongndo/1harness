@@ -31,11 +31,17 @@ class FakeSession {
   #turns = 0;
   #pending: (() => void) | null = null;
 
-  constructor(options: SessionOptions, modes = ALL_MODES, planMode = true) {
+  constructor(
+    options: SessionOptions,
+    modes = ALL_MODES,
+    planMode = true,
+    // A harness that starts in its own mode whatever it is asked, as some ACP agents do.
+    starts: RuntimeMode | null = null,
+  ) {
     this.capabilities = {
       steer: true,
       planMode,
-      runtimeModes: modes.map((id) => ({ id, description: id })),
+      runtimeModes: modes,
       images: false,
       toolChecks: false,
       nativeSlashCommands: false,
@@ -48,7 +54,8 @@ class FakeSession {
       model: options.model,
       effort: options.effort,
       // Each harness reports the mode it really runs.
-      runtimeMode: modes.includes(options.runtimeMode) ? options.runtimeMode : modes.at(-1)!,
+      runtimeMode:
+        starts ?? (modes.includes(options.runtimeMode) ? options.runtimeMode : modes.at(-1)!),
       interactionMode: planMode ? options.interactionMode : "default",
       version: null,
     };
@@ -167,6 +174,12 @@ before(async () => {
       unavailable: () => null,
       create: (options) => new FakeSession(options),
     }),
+    registerDriver({
+      id: "fake-sticky",
+      label: "Fake sticky",
+      unavailable: () => null,
+      create: (options) => new FakeSession(options, ALL_MODES, true, "full-access"),
+    }),
     // Only broad modes, and no plan mode.
     registerDriver({
       id: "fake-wide",
@@ -225,6 +238,24 @@ describe("ThreadManager", () => {
     );
     await manager.close(thread.id);
     assert.equal(thread.status, "closed");
+  });
+
+  it("holds every thread to its mode, whatever mode its harness starts in", async () => {
+    const sticky = await manager.create({ harness: "fake-sticky", settings: settings() });
+    assert.equal(sticky.thread.session.info.runtimeMode, "supervised");
+    await assert.rejects(
+      manager.create({ harness: "fake-wide", settings: settings("auto-edit") }),
+      /fake-wide has no mode as narrow as auto-edit/,
+    );
+    const wide = await manager.create({ harness: "fake-wide", settings: settings("full-access") });
+    assert.equal(wide.thread.session.info.runtimeMode, "full-access");
+    await assert.rejects(
+      manager.create({
+        harness: "fake-wide",
+        settings: { ...settings("full-access"), interactionMode: "plan" },
+      }),
+      /fake-wide has no plan mode/,
+    );
   });
 
   it("settles a wait when a message is dropped or cannot start", async () => {
@@ -374,7 +405,9 @@ describe("Orchestrator", () => {
       call("delegate_task", planner, { task: "x", harness: "fake-wide" }),
       /plan_mode_unavailable/,
     );
-    const wide = manager.list().filter((thread) => thread.harness === "fake-wide");
+    const wide = manager
+      .list()
+      .filter((thread) => thread.parentId === parent.id || thread.parentId === planner.id);
     assert.equal(wide.length, 2);
     assert.ok(wide.every((thread) => thread.status === "closed"));
   });

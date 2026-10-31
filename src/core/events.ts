@@ -6,6 +6,7 @@ export type HarnessId = string;
 
 /** How much the agent may do without asking. Each driver maps it onto native enforcement. */
 export type RuntimeMode = "supervised" | "auto-edit" | "auto" | "full-access";
+/** Narrowest first. */
 export const RUNTIME_MODES: readonly RuntimeMode[] = [
   "supervised",
   "auto-edit",
@@ -13,10 +14,30 @@ export const RUNTIME_MODES: readonly RuntimeMode[] = [
   "full-access",
 ];
 
-/** A runtime mode as one harness carries it out, in that harness's own terms. */
-export interface ModeOption {
-  id: RuntimeMode;
-  description: string;
+export function isRuntimeMode(value: unknown): value is RuntimeMode {
+  return RUNTIME_MODES.some((mode) => mode === value);
+}
+
+/** How much a mode allows: 0 for the narrowest. */
+export function modeRank(mode: RuntimeMode): number {
+  return RUNTIME_MODES.indexOf(mode);
+}
+
+/** The mode threads start in unless the user's settings or `--mode` say otherwise. */
+export const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
+
+/**
+ * The broadest of `offered` at or below `requested`, so a harness without a
+ * mode steps down instead of up; null when it has none that narrow.
+ */
+export function fitRuntimeMode(
+  requested: RuntimeMode,
+  offered: readonly RuntimeMode[],
+): RuntimeMode | null {
+  const fits = RUNTIME_MODES.filter(
+    (mode) => modeRank(mode) <= modeRank(requested) && offered.includes(mode),
+  );
+  return fits.at(-1) ?? null;
 }
 
 export type InteractionMode = "default" | "plan";
@@ -203,7 +224,8 @@ export interface Capabilities {
   /** Messages can join the running turn instead of waiting for it to finish. */
   steer: boolean;
   planMode: boolean;
-  runtimeModes: readonly ModeOption[];
+  /** The runtime modes the harness can carry out; `MODE_DESCRIPTIONS` says what each means. */
+  runtimeModes: readonly RuntimeMode[];
   /** Messages can carry images. */
   images: boolean;
   /** `SessionOptions.toolPolicy` sees every tool call, even in full access. */

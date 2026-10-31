@@ -7,19 +7,21 @@ import type {
   SDKPartialAssistantMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import type {
-  FileChange,
-  HarnessEvent,
-  InteractionMode,
-  Item,
-  McpServer,
-  McpServerState,
-  RateLimit,
-  RuntimeMode,
-  TodoStep,
-  ToolCategory,
-  Usage,
+import {
+  RUNTIME_MODES,
+  type FileChange,
+  type HarnessEvent,
+  type InteractionMode,
+  type Item,
+  type McpServer,
+  type McpServerState,
+  type RateLimit,
+  type RuntimeMode,
+  type TodoStep,
+  type ToolCategory,
+  type Usage,
 } from "../../core/events.ts";
+import { limitNotice } from "../../core/wording.ts";
 
 type ContentBlock = SDKAssistantMessage["message"]["content"][number];
 type StreamEvent = SDKPartialAssistantMessage["event"];
@@ -37,6 +39,27 @@ const LIMIT_LABELS: Record<string, string> = {
   seven_day_overage_included: "weekly",
   overage: "extra usage",
 };
+
+/**
+ * The runtime modes Claude Code's settings leave on. Any settings file can
+ * turn off full access (`permissions.disableBypassPermissionsMode`) or auto
+ * mode (`disableAutoMode`, at the top or under `permissions`).
+ */
+export function claudeRuntimeModes(settings: readonly unknown[]): RuntimeMode[] {
+  const sources = settings.map((entry) => (entry ?? {}) as Record<string, unknown>);
+  const permissions = sources.map(
+    (source) => (source["permissions"] ?? {}) as Record<string, unknown>,
+  );
+  const bypassOff = permissions.some(
+    (entry) => entry["disableBypassPermissionsMode"] === "disable",
+  );
+  const autoOff =
+    sources.some((source) => source["disableAutoMode"] === "disable") ||
+    permissions.some((entry) => entry["disableAutoMode"] === "disable");
+  return RUNTIME_MODES.filter(
+    (mode) => !(mode === "full-access" && bypassOff) && !(mode === "auto" && autoOff),
+  );
+}
 
 export function permissionModeFor(
   runtimeMode: RuntimeMode,
@@ -422,7 +445,7 @@ export class ClaudeTranslator {
         usage.output_tokens;
     }
     if (message.error) {
-      events.push(this.notice("error", `Claude API error: ${message.error}`));
+      events.push(this.notice("error", `API error: ${message.error}`));
     }
     for (const block of message.message.content as ContentBlock[]) {
       switch (block.type) {
@@ -602,16 +625,9 @@ export class ClaudeTranslator {
     this.#limits.set(key, limit);
     const events: HarnessEvent[] = [];
     if (status !== "ok" && previous?.status !== status) {
-      const resets =
-        limit.resetsAt === null ? "" : `, resets ${new Date(limit.resetsAt).toLocaleString()}`;
-      events.push(
-        this.notice(
-          "warning",
-          status === "exceeded"
-            ? `Claude ${label} usage limit reached${resets}. Claude Code waits for it to reset; esc stops the turn.`
-            : `Claude ${label} usage limit is nearly used${resets}`,
-        ),
-      );
+      // Claude Code holds the turn until the limit resets rather than failing it.
+      const waits = status === "exceeded" ? ". The turn waits for it to reset; esc stops it." : "";
+      events.push(this.notice("warning", `${limitNotice(limit)}${waits}`));
     }
     events.push(this.#usageEvent());
     return events;

@@ -2,24 +2,25 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { extname } from "node:path";
 import { AsyncQueue } from "../../core/async-queue.ts";
-import type {
-  ApprovalOption,
-  Capabilities,
-  HarnessEvent,
-  HarnessSession,
-  InteractionMode,
-  McpServerConfig,
-  ModeOption,
-  ModelOption,
-  NativeCommand,
-  RequestResponse,
-  RuntimeMode,
-  SessionInfo,
-  SessionOptions,
-  ThreadSummary,
-  UserInput,
+import {
+  fitRuntimeMode,
+  type ApprovalOption,
+  type Capabilities,
+  type HarnessEvent,
+  type HarnessSession,
+  type InteractionMode,
+  type McpServerConfig,
+  type ModelOption,
+  type NativeCommand,
+  type RequestResponse,
+  type RuntimeMode,
+  type SessionInfo,
+  type SessionOptions,
+  type ThreadSummary,
+  type UserInput,
 } from "../../core/events.ts";
 import { errorMessage } from "../../core/thread.ts";
+import { ANSWER, ASK, askFor, askForChanges, fileName } from "../../core/wording.ts";
 import { JsonRpcProcess, RpcError } from "../jsonrpc.ts";
 import {
   AcpTranslator,
@@ -72,6 +73,15 @@ const MODE_NAMES: Record<RuntimeMode, string[]> = {
   "full-access": ["full-access", "yolo", "bypasspermissions", "bypass", "full"],
 };
 const PLAN_NAMES = ["plan", "architect"];
+
+/**
+ * ACP's one-time choices, in the words every harness's choices use. An agent's
+ * "always" choices keep its own names, which say what is allowed and for how long.
+ */
+const KIND_LABELS: Record<string, string> = {
+  allow_once: ANSWER.yes,
+  reject_once: ANSWER.no,
+};
 const IMAGE_TYPES: Record<string, string> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -203,9 +213,16 @@ export class AcpSession implements HarnessSession {
     this.info.model =
       this.#config.find((option) => option.id === "model")?.currentValue ?? this.info.model;
     if (this.#options.model) await this.setModel(this.#options.model).catch(() => {});
-    if (this.#modes.length > 0 && this.#options.runtimeMode !== this.info.runtimeMode) {
-      await this.setRuntimeMode(this.#options.runtimeMode).catch(() => {});
-    }
+    // A mode the agent lacks steps down to the broadest one it has below it. The
+    // thread manager refuses the thread if the agent still runs broader than asked.
+    const requested = this.#options.runtimeMode;
+    const mode = fitRuntimeMode(requested, this.capabilities.runtimeModes);
+    if (mode && mode !== this.info.runtimeMode) await this.setRuntimeMode(mode).catch(() => {});
+    if (mode && mode !== requested && this.info.runtimeMode === mode)
+      this.#notice(
+        "warning",
+        `${this.#spec.label} has no ${requested} mode, so this thread runs in ${mode}`,
+      );
     // Plan is one of the agent's modes, so it goes on after the runtime mode.
     if (this.#options.interactionMode === "plan" && this.capabilities.planMode) {
       await this.setInteractionMode("plan").catch(() => {});
@@ -343,12 +360,9 @@ export class AcpSession implements HarnessSession {
 
   #applyModes(modes: SessionResponse["modes"]): void {
     this.#modes = modes?.availableModes ?? [];
-    const runtimeModes: ModeOption[] = [];
-    for (const [mode, names] of Object.entries(MODE_NAMES) as [RuntimeMode, string[]][]) {
-      const match = modeFor(this.#modes, names);
-      if (match) runtimeModes.push({ id: mode, description: match.description ?? match.name });
-    }
-    this.capabilities.runtimeModes = runtimeModes;
+    this.capabilities.runtimeModes = (
+      Object.entries(MODE_NAMES) as [RuntimeMode, string[]][]
+    ).flatMap(([mode, names]) => (modeFor(this.#modes, names) ? [mode] : []));
     this.capabilities.planMode = modeFor(this.#modes, PLAN_NAMES) !== undefined;
     if (modes) this.#currentMode(modes.currentModeId);
   }
@@ -363,7 +377,9 @@ export class AcpSession implements HarnessSession {
     const runtime = (Object.entries(MODE_NAMES) as [RuntimeMode, string[]][]).find(([, names]) =>
       names.includes(id),
     );
-    if (runtime) this.info.runtimeMode = runtime[0];
+    // A mode 1harness cannot name may allow anything, so it counts as full access
+    // until the thread is moved to one it can.
+    this.info.runtimeMode = runtime ? runtime[0] : "full-access";
   }
 
   #endTurn(turnId: string, stopReason: string, error: string | null): void {
@@ -434,9 +450,14 @@ export class AcpSession implements HarnessSession {
         : item.kind === "file_change"
           ? item.changes.map((change) => `${change.path}\n${change.diff}`).join("\n")
           : "";
+    // Choices read as on every harness, unless the agent offers two of a kind.
+    const kinds = params.options.map((option) => option.kind);
     const options: ApprovalOption[] = params.options.map((option) => ({
       id: option.optionId,
-      label: option.name,
+      label:
+        kinds.indexOf(option.kind) === kinds.lastIndexOf(option.kind)
+          ? (KIND_LABELS[option.kind] ?? option.name)
+          : option.name,
       effect:
         option.kind === "allow_once"
           ? "allow"
@@ -446,6 +467,7 @@ export class AcpSession implements HarnessSession {
               ? "deny"
               : "other",
     }));
+    const action = approvalAction(params.toolCall);
     return new Promise((resolve) => {
       this.#pending.set(id, { options: params.options, resolve });
       this.#emit({
@@ -453,9 +475,18 @@ export class AcpSession implements HarnessSession {
         request: {
           kind: "approval",
           id,
-          title: params.toolCall.title ?? `Allow ${this.#spec.label} to continue?`,
-          detail: detail.trim(),
-          action: approvalAction(params.toolCall),
+          title:
+            params.toolCall.kind === "move" && item.kind === "file_change" && item.changes[0]
+              ? ASK.move(fileName(item.changes[0].path))
+              : item.kind === "file_change"
+                ? askForChanges(item.changes)
+                : askFor(action),
+          // The agent's own name for the call says what it is about.
+          detail: [params.toolCall.title ?? "", detail]
+            .filter((line) => line.trim() !== "")
+            .join("\n")
+            .trim(),
+          action,
           options,
           defaultOptionId: options[0]?.id ?? "",
         },
@@ -478,12 +509,12 @@ export class AcpSession implements HarnessSession {
   }
 
   #sessionId(): string {
-    if (!this.info.threadId) throw new Error(`The ${this.#spec.label} session has not started`);
+    if (!this.info.threadId) throw new Error("The session has not started");
     return this.info.threadId;
   }
 
   #request<T>(method: string, params: unknown): Promise<T> {
-    if (!this.#rpc) return Promise.reject(new Error(`${this.#spec.label} has not started`));
+    if (!this.#rpc) return Promise.reject(new Error("The session has not started"));
     return this.#rpc.request<T>(method, params);
   }
 
