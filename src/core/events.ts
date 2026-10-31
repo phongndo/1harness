@@ -382,8 +382,9 @@ export interface HarnessSession {
   /** Runs one of `capabilities.mcpActions` on a server. */
   mcpAction?(action: McpAction, server: string): Promise<McpActionResult>;
   /**
-   * The ID of the tool call item behind a call to one of 1harness's MCP tools,
-   * from the `_meta` the harness sends with the call, where it says which.
+   * The ID of the tool call item behind a call to `tool`, one of 1harness's MCP
+   * tools: from the `_meta` the harness sends with the call, where it says
+   * which, or null when it cannot tell.
    */
-  mcpCallId?(meta: Record<string, unknown>): string | null;
+  mcpCallId?(meta: Record<string, unknown>, tool: string): string | null;
 }
