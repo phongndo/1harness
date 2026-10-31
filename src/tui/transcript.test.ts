@@ -1,12 +1,35 @@
 import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
 import { describe, it } from "node:test";
+import { formatElapsed, plainLine, type AgentRow } from "./agents.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { Transcript, renderBlock, type ToolItem } from "./transcript.ts";
 import { ThreadView } from "./view.ts";
 
 const plain = (rows: string[]) => rows.map((row) => stripVTControlCharacters(row));
-const context = { width: 60, cwd: "/work", blink: true };
+const context = { width: 60, cwd: "/work", blink: true, now: 100_000 };
+
+const row = (overrides: Partial<AgentRow>): AgentRow => ({
+  threadId: "t2",
+  label: "claude · haiku",
+  title: "Review the parser",
+  status: "working",
+  startedAt: 35_000,
+  endedAt: null,
+  detail: "",
+  ...overrides,
+});
+
+const delegate = (id: string): ToolItem => ({
+  kind: "tool_call",
+  id,
+  tool: "delegate_task",
+  server: "1harness",
+  category: "other",
+  summary: "",
+  output: "",
+  status: "running",
+});
 
 describe("Transcript", () => {
   it("separates blocks with blank rows and views the bottom", () => {
@@ -102,7 +125,88 @@ describe("tool groups", () => {
   });
 });
 
+describe("agents", () => {
+  it("shows one agent with its status and timer", () => {
+    assert.deepEqual(plain(renderBlock({ kind: "agents", rows: [row({})] }, context)), [
+      "● t2 Review the parser  claude · haiku        working 1m 05s",
+    ]);
+  });
+
+  it("groups agents a turn started under a count of their states", () => {
+    const rows = [
+      row({ status: "done", endedAt: 57_000, detail: "Found 3 issues" }),
+      row({
+        threadId: "t3",
+        label: "codex",
+        title: "Write the tests",
+        status: "needs you",
+        detail: "Needs approval · ctrl+o to answer",
+      }),
+    ];
+    assert.deepEqual(plain(renderBlock({ kind: "agents", rows }, context)), [
+      "● 2 agents · 1 needs you · 1 done",
+      "├ t2 Review the parser  claude · haiku              done 22s",
+      "│ Found 3 issues",
+      "└ t3 Write the tests  codex                 needs you 1m 05s",
+      "  Needs approval · ctrl+o to answer",
+    ]);
+  });
+
+  it("keeps who an agent is when its status does not fit", () => {
+    const rows = renderBlock(
+      { kind: "agents", rows: [row({ status: "needs you" })] },
+      {
+        ...context,
+        width: 17,
+      },
+    );
+    assert.deepEqual(plain(rows), ["◆ t2 Review the …"]);
+  });
+
+  it("previews a reply as the transcript reads it, code spans whole", () => {
+    assert.equal(
+      plainLine("\n## Fixed `__init__.py` and **the** [docs](https://x.y)"),
+      "Fixed __init__.py and the docs (https://x.y)",
+    );
+  });
+
+  it("formats timers with padded seconds and minutes", () => {
+    assert.deepEqual(
+      [formatElapsed(9_400), formatElapsed(65_000), formatElapsed(3_720_000)],
+      ["9s", "1m 05s", "1h 02m"],
+    );
+  });
+});
+
 describe("ThreadView", () => {
+  it("groups agents started one after another", () => {
+    const view = new ThreadView("t1");
+    const agent: AgentRow = {
+      threadId: "t2",
+      label: "claude",
+      title: "One",
+      status: "working",
+      startedAt: 90_000,
+      endedAt: null,
+      detail: "",
+    };
+    view.item(delegate("d1"), false, true);
+    view.item(delegate("d2"), false, true);
+    view.agent(agent);
+    view.agent({ ...agent, threadId: "t3", title: "Two" });
+    view.agent({ ...agent, status: "done", endedAt: 95_000 });
+    // An agent at work is not a tool running.
+    view.item({ ...delegate("d1"), status: "completed" }, true, true);
+    view.item({ ...delegate("d2"), status: "completed" }, true, true);
+    assert.equal(view.transcript.animating, true);
+    assert.equal(view.transcript.running, false);
+    assert.deepEqual(plain(view.transcript.view(context, 10, 0).rows).slice(-3), [
+      "● 2 agents · 1 working · 1 done",
+      "├ t2 One  claude                                     done 5s",
+      "└ t3 Two  claude                                 working 10s",
+    ]);
+  });
+
   it("counts the files an edit changed", () => {
     const view = new ThreadView("t1");
     view.item(

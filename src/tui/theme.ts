@@ -1,5 +1,6 @@
 // fx's monochrome palette: hierarchy comes from 256-color grays and weight, with
-// color reserved for links and diff markers. Values follow fx's dark and light themes.
+// color reserved for links, diff markers, and what agents are doing. Values
+// follow fx's dark and light themes.
 
 const colorEnabled = process.env["NO_COLOR"] === undefined;
 
@@ -16,6 +17,10 @@ interface Palette {
   link: number;
   added: number;
   removed: number;
+  /** An agent at work. */
+  active: number;
+  /** An agent waiting on the user. */
+  attention: number;
 }
 
 const DARK: Palette = {
@@ -27,6 +32,8 @@ const DARK: Palette = {
   link: 75,
   added: 71,
   removed: 167,
+  active: 75,
+  attention: 179,
 };
 
 const LIGHT: Palette = {
@@ -38,6 +45,8 @@ const LIGHT: Palette = {
   link: 25,
   added: 71,
   removed: 167,
+  active: 25,
+  attention: 136,
 };
 
 let palette = DARK;
@@ -75,6 +84,8 @@ export const style = {
   link: color("link"),
   added: color("added"),
   removed: color("removed"),
+  active: color("active"),
+  attention: color("attention"),
 };
 
 /** Parses an OSC 11 reply such as `rgb:ffff/ffff/ffff` and reports whether the background is light. */

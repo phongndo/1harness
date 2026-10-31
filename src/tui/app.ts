@@ -23,6 +23,7 @@ import { ExtensionHost } from "../extensions/host.ts";
 import { ToolServer } from "../extensions/tool-server.ts";
 import { ThreadManager, type ManagedThread, type ManagerEvent } from "../host/manager.ts";
 import { Orchestrator } from "../host/orchestrator.ts";
+import { agentRowOf } from "./agents.ts";
 import { Editor, applyEditingKey } from "./editor.ts";
 import { InputDecoder, type InputEvent, type Key } from "./input.ts";
 import { Menu, entry, infoPanel, lineStep, type MenuEntry } from "./menu.ts";
@@ -684,31 +685,7 @@ export class App {
   /** The row in a parent's transcript for a thread it started. */
   #childRow(child: ManagedThread): void {
     const view = child.parentId ? this.#views.get(child.parentId) : undefined;
-    if (!view) return;
-    const run = child.runs.at(-1);
-    const active = child.status === "starting" || child.status === "working";
-    const summary =
-      child.status === "waiting"
-        ? "waiting for you · /threads"
-        : active
-          ? `working · ${child.id}`
-          : (run?.result?.split("\n").find((line) => line.trim()) ?? run?.error ?? child.status);
-    view.item(
-      {
-        kind: "agent",
-        id: `thread-${child.id}`,
-        description: `${child.harness} · ${child.title || child.id}`,
-        summary,
-        status:
-          active || child.status === "waiting"
-            ? "running"
-            : run?.status === "completed"
-              ? "completed"
-              : "failed",
-      },
-      !active,
-      false,
-    );
+    view?.agent(agentRowOf(child));
   }
 
   // Requests and pickers
@@ -1396,7 +1373,7 @@ export class App {
     if (this.#exiting) return;
     const width = this.#screen.columns;
     const height = this.#screen.rows;
-    const context = { width, cwd: this.#cwd(), blink: this.#blinkOn };
+    const context = { width, cwd: this.#cwd(), blink: this.#blinkOn, now: Date.now() };
     const shown = this.#view;
     let footer = this.#footer(width, height);
     const room = Math.max(0, height - footer.rows.length);
@@ -1490,7 +1467,7 @@ export class App {
     const phase =
       turn.phase === "Generating"
         ? "Generating"
-        : this.#view.transcript.animating
+        : this.#view.transcript.running
           ? "Running"
           : (turn.heading ?? turn.phase);
     const dot = this.#blinkOn ? style.text("•") : " ";

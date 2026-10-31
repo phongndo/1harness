@@ -1,6 +1,7 @@
 import type { Report } from "../commands/registry.ts";
 import type { Item } from "../core/events.ts";
 import type { Thread, ThreadEvent } from "../core/thread.ts";
+import type { AgentRow } from "./agents.ts";
 import { Transcript, formatTokens, isToolItem, type Block } from "./transcript.ts";
 
 export type Phase = "Thinking" | "Generating";
@@ -40,6 +41,8 @@ export class ThreadView {
   /** Rows the view sits above the bottom of the transcript; 0 follows new output. */
   scroll = 0;
   total = 0;
+  /** The agents this thread started, by thread ID, and the blocks that show them. */
+  #agents = new Map<string, Extract<Block, { kind: "agents" }>>();
 
   constructor(id: string) {
     this.id = id;
@@ -89,6 +92,27 @@ export class ThreadView {
 
   startTurn(): void {
     this.turn ??= { startedAt: Date.now(), up: 0, down: 0, phase: "Thinking", heading: null };
+  }
+
+  /**
+   * Shows or updates an agent this thread started. An agent joins the block of
+   * the one before it when nothing came between them, as when a turn starts
+   * several at once with parallel calls.
+   */
+  agent(row: AgentRow): void {
+    const shown = this.#agents.get(row.threadId);
+    if (shown) {
+      const index = shown.rows.findIndex((other) => other.threadId === row.threadId);
+      shown.rows[index] = row;
+      this.transcript.touch(shown);
+      return;
+    }
+    const last = this.transcript.last((block) => block.kind === "todos");
+    const block =
+      last?.kind === "agents" ? last : this.transcript.add({ kind: "agents", rows: [] });
+    block.rows.push(row);
+    this.#agents.set(row.threadId, block);
+    this.transcript.touch(block);
   }
 
   /**

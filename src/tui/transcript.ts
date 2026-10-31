@@ -1,9 +1,17 @@
 import { isAbsolute, relative } from "node:path";
 import type { ReportSpan } from "../commands/registry.ts";
 import type { CommandAction, FileChange, Item, TodoStep } from "../core/events.ts";
+import {
+  formatElapsed,
+  isLive,
+  paintStatus,
+  statusDot,
+  type AgentRow,
+  type AgentStatus,
+} from "./agents.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { style } from "./theme.ts";
-import { truncate, visibleWidth, wrap } from "./text.ts";
+import { spread, truncate, visibleWidth, wrap } from "./text.ts";
 
 export type ToolItem = Extract<
   Item,
@@ -21,6 +29,8 @@ export type Block =
   | { kind: "notice"; level: "info" | "warning" | "error"; text: string }
   /** A 1harness command's output, such as /mcp: a heading over aligned lines. */
   | { kind: "report"; title: string; lines: ReportSpan[][] }
+  /** The agents a turn started: one row each, with its status and how it ended. */
+  | { kind: "agents"; rows: AgentRow[] }
   /** The muted line that closes a turn: duration and token estimate. */
   | { kind: "summary"; text: string };
 
@@ -29,6 +39,8 @@ export interface RenderContext {
   cwd: string;
   /** Phase of the shared blink, for markers of work in progress. */
   blink: boolean;
+  /** The time timers count to. */
+  now: number;
 }
 
 interface Entry {
@@ -109,6 +121,11 @@ export class Transcript {
 
   /** Whether any block shows work in progress and needs the blink. */
   get animating(): boolean {
+    return this.#entries.some((entry) => isAnimated(entry.block));
+  }
+
+  /** Whether a tool row is still running; agents at work are not counted. */
+  get running(): boolean {
     return this.#entries.some((entry) => isRunningGroup(entry.block));
   }
 
@@ -145,7 +162,8 @@ export class Transcript {
   }
 
   #rows(entry: Entry, context: RenderContext): string[] {
-    const blink = isRunningGroup(entry.block) && context.blink;
+    // A live block renders again on each blink, which also moves its timers on.
+    const blink = isAnimated(entry.block) && context.blink;
     const cache = entry.cache;
     if (
       cache &&
@@ -159,6 +177,11 @@ export class Transcript {
     entry.cache = { width: context.width, version: entry.version, blink, rows };
     return rows;
   }
+}
+
+function isAnimated(block: Block): boolean {
+  if (block.kind === "agents") return block.rows.some((row) => isLive(row.status));
+  return isRunningGroup(block);
 }
 
 function isRunningGroup(block: Block): boolean {
@@ -193,6 +216,8 @@ export function renderBlock(block: Block, context: RenderContext): string[] {
       return noticeRows(block, width);
     case "report":
       return reportRows(block, width);
+    case "agents":
+      return agentRows(block, context);
     case "summary":
       return [truncate(style.muted(`  ${block.text}`), width)];
   }
@@ -485,4 +510,55 @@ function describeAction(action: CommandAction, done: boolean, cwd: string): stri
     case "other":
       return "";
   }
+}
+
+// Agents 1harness runs
+
+const STATUS_ORDER: readonly AgentStatus[] = [
+  "needs you",
+  "working",
+  "starting",
+  "failed",
+  "stopped",
+  "done",
+  "idle",
+];
+
+/** One agent's rows: who and what with its status and timer, then what it found or asks. */
+function agentRow(row: AgentRow, lead: string, hang: string, context: RenderContext): string[] {
+  const time = formatElapsed((row.endedAt ?? context.now) - row.startedAt);
+  // The title comes before the harness, so a narrow screen cuts the harness first.
+  const left = `${lead}${style.text(row.threadId)} ${style.strong(row.title)}  ${style.soft(row.label)}`;
+  const right = `${paintStatus(row.status)} ${style.muted(time)}`;
+  const detail = row.status === "needs you" ? style.attention(row.detail) : style.muted(row.detail);
+  const rows = [spread(left, right, context.width)];
+  if (row.detail) rows.push(truncate(hang + detail, context.width));
+  return rows;
+}
+
+function agentRows(block: Extract<Block, { kind: "agents" }>, context: RenderContext): string[] {
+  const live = block.rows.some((row) => isLive(row.status));
+  const [only] = block.rows;
+  if (only && block.rows.length === 1) {
+    const marker = live && !context.blink ? "  " : `${statusDot(only.status)} `;
+    return agentRow(only, marker, "  ", context);
+  }
+  const counts = STATUS_ORDER.flatMap((status) => {
+    const count = block.rows.filter((row) => row.status === status).length;
+    return count > 0 ? [`${count} ${status}`] : [];
+  });
+  const marker = live && !context.blink ? " " : style.strong("●");
+  const rows = [
+    truncate(
+      `${marker} ${style.muted([`${block.rows.length} agents`, ...counts].join(" · "))}`,
+      context.width,
+    ),
+  ];
+  block.rows.forEach((row, index) => {
+    const last = index === block.rows.length - 1;
+    rows.push(
+      ...agentRow(row, style.muted(last ? "└ " : "├ "), style.muted(last ? "  " : "│ "), context),
+    );
+  });
+  return rows;
 }
