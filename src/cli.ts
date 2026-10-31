@@ -46,8 +46,9 @@ Options:
   -v, --version          show the version
 
 Environment:
-  ONEHARNESS_CLAUDE_PATH  claude executable (default: claude on PATH, else the SDK's copy)
-  ONEHARNESS_CODEX_PATH   codex executable (default: codex on PATH)
+  ONEHARNESS_CLAUDE_PATH    claude executable (default: claude on PATH, else the SDK's copy)
+  ONEHARNESS_CODEX_PATH     codex executable (default: codex on PATH)
+  ONEHARNESS_OPENCODE_PATH  opencode executable (default: opencode on PATH)
 `;
 
 function choice<T extends string>(

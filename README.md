@@ -6,8 +6,8 @@ The intended product combines a terminal agent view, persistent local and remote
 sessions, cross-harness orchestration over MCP, and a programmable interface for
 custom clients and shared tools.
 
-Implemented so far: one terminal UI for Claude Code, Codex, and agents that speak
-the Agent Client Protocol (such as fx), with shared MCP servers and a layered
+Implemented so far: one terminal UI for Claude Code, Codex, OpenCode, and agents
+that speak the Agent Client Protocol (such as fx), with shared MCP servers and a layered
 extension system. It runs in a single process on the local
 machine. The persistent host, remote connections, and a public programming
 interface are not implemented yet.
@@ -17,6 +17,8 @@ interface are not implemented yet.
 `1harness` drives the harnesses you already have installed, with your own logins,
 settings, MCP servers, hooks, and project instructions. Codex needs `codex` on
 `PATH`. Claude uses `claude` on `PATH`, or the copy the Claude Agent SDK bundles.
+OpenCode needs OpenCode 2's `opencode` on `PATH`; each thread runs its own
+`opencode serve`, and models go by `provider/model`, such as `openai/gpt-6.1-terra`.
 fx runs through `fx acp`. Any other ACP agent can be added in
 `~/.config/1harness/agents.json`:
 `{ "agents": { "gemini": { "label": "Gemini CLI", "command": "gemini", "args": ["--experimental-acp"] } } }`.
@@ -30,7 +32,7 @@ From a checkout, run `pnpm dev` or `node dist/cli.js` after `pnpm build`.
 1harness -p "summarize README.md" # one turn without the UI
 ```
 
-Both harnesses get the same chat: streamed replies and reasoning, commands with
+Every harness gets the same chat: streamed replies and reasoning, commands with
 their output, diffs, tool calls, todo lists, proposed plans, and agents.
 Approvals and questions offer each harness's own choices. While a turn runs, Enter
 adds a message to it and Tab queues one as the next turn. Esc stops the turn and
@@ -41,7 +43,8 @@ Slash commands switch the model, effort, permission mode, plan mode, and
 harness, and start, resume, or compact threads. Every harness has the same four
 permission modes and carries each out with its own sandbox and approval rules,
 so details differ: in `auto-edit`, Codex runs commands inside its workspace
-sandbox without asking, where Claude Code asks first.
+sandbox without asking, where Claude Code asks first. OpenCode carries modes out
+with its permission rules and has no `auto`, so `auto` runs as `auto-edit` there.
 
 - `supervised`: read freely; ask before edits and commands;
 - `auto-edit`: edit files without asking; ask before riskier actions;
@@ -132,6 +135,8 @@ harness's agent shares.
   ACP driver serves fx and any other ACP agent.
 - `src/drivers/codex` speaks the `codex app-server` JSON-RPC protocol over stdio.
 - `src/drivers/claude` uses the Claude Agent SDK in streaming-input mode.
+- `src/drivers/opencode` runs `opencode serve` and uses its HTTP API and event
+  stream.
 - `src/commands` holds the command registry and 1harness's own commands, which
   any client can run.
 - `src/extensions` loads extensions, connects them to threads, and serves their

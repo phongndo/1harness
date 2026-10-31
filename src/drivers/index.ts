@@ -5,6 +5,7 @@ import { errorMessage } from "../core/thread.ts";
 import { AcpSession, type AcpAgentSpec } from "./acp/session.ts";
 import { ClaudeSession } from "./claude/session.ts";
 import { CodexSession } from "./codex/session.ts";
+import { OpenCodeSession } from "./opencode/session.ts";
 
 /** Finds an executable on PATH, as a shell would. */
 export function findExecutable(name: string, path = process.env["PATH"] ?? ""): string | null {
@@ -156,6 +157,24 @@ registerDriver({
     if (!command)
       throw new Error("Codex is not installed: no `codex` on PATH (set ONEHARNESS_CODEX_PATH)");
     return new CodexSession({ ...options, command, version: environment.version });
+  },
+});
+
+registerDriver({
+  id: "opencode",
+  label: "OpenCode",
+  unavailable: (env) =>
+    (env["ONEHARNESS_OPENCODE_PATH"] ?? findExecutable("opencode", env["PATH"]))
+      ? null
+      : "OpenCode is not installed: no `opencode` on PATH (set ONEHARNESS_OPENCODE_PATH)",
+  create: (options, environment) => {
+    const env = environment.env ?? process.env;
+    const command = env["ONEHARNESS_OPENCODE_PATH"] ?? findExecutable("opencode", env["PATH"]);
+    if (!command)
+      throw new Error(
+        "OpenCode is not installed: no `opencode` on PATH (set ONEHARNESS_OPENCODE_PATH)",
+      );
+    return new OpenCodeSession({ ...options, command });
   },
 });
 

@@ -1,0 +1,779 @@
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { basename, extname } from "node:path";
+import { AsyncQueue } from "../../core/async-queue.ts";
+import {
+  fitRuntimeMode,
+  type Capabilities,
+  type HarnessEvent,
+  type HarnessSession,
+  type InteractionMode,
+  type McpServer,
+  type McpServerState,
+  type ModelOption,
+  type NativeCommand,
+  type RequestResponse,
+  type RuntimeMode,
+  type SessionInfo,
+  type SessionOptions,
+  type ThreadSummary,
+  type TurnStatus,
+  type UserInput,
+} from "../../core/events.ts";
+import { errorMessage } from "../../core/thread.ts";
+import { OpenCodeServer } from "./server.ts";
+import {
+  OpenCodeTranslator,
+  RUNTIME_MODES,
+  findModel,
+  formAnswer,
+  formRequest,
+  mergeRules,
+  modelName,
+  modelOptions,
+  permissionRequest,
+  sessionRules,
+  type OcAgent,
+  type OcEvent,
+  type OcForm,
+  type OcMessage,
+  type OcModel,
+  type OcPermission,
+  type OcRule,
+} from "./translate.ts";
+
+export interface OpenCodeSessionConfig extends SessionOptions {
+  command: string;
+}
+
+interface ModelRef {
+  providerID: string;
+  id: string;
+  variant?: string;
+}
+
+interface OcSession {
+  id: string;
+  title?: string;
+  agent?: string;
+  model?: ModelRef;
+  permissions?: OcRule[];
+  time: { updated: number };
+}
+
+/** A message sent and not yet delivered, until its inbox entry is known. */
+interface Sent {
+  input: UserInput;
+  /** What its inbox entry holds; a command's entry holds the command's expansion. */
+  text: string | null;
+  inboxId: string | null;
+}
+
+type Pending =
+  | { kind: "permission"; sessionId: string }
+  | { kind: "form"; sessionId: string; form: OcForm };
+
+const PLAN_AGENT = "plan";
+const LABEL = "OpenCode";
+const MCP_STATES: Record<string, McpServerState> = {
+  connected: "connected",
+  pending: "starting",
+  disabled: "disabled",
+  failed: "failed",
+  needs_auth: "needs-login",
+};
+const IMAGE_TYPES: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+};
+
+/**
+ * Drives OpenCode 2 through its server API: a private `opencode serve` per
+ * session, one OpenCode session in it, and the server's event stream.
+ */
+export class OpenCodeSession implements HarnessSession {
+  readonly capabilities: Capabilities = {
+    steer: true,
+    planMode: false,
+    runtimeModes: RUNTIME_MODES,
+    images: false,
+    toolChecks: false,
+    nativeSlashCommands: true,
+    mcpActions: [],
+  };
+  readonly info: SessionInfo;
+  #config: OpenCodeSessionConfig;
+  #server: OpenCodeServer | null = null;
+  #events = new AsyncQueue<HarnessEvent>();
+  #translator: OpenCodeTranslator;
+  #models: OcModel[] = [];
+  #defaultModel: string | null = null;
+  #agents: OcAgent[] = [];
+  /** The agent the session runs outside plan mode. */
+  #mainAgent = "build";
+  #agent = "build";
+  #commands: (NativeCommand & { skill?: string })[] = [];
+  /** The session and the sessions its subagents run in. */
+  #family = new Set<string>();
+  #sent: Sent[] = [];
+  /** What each inbox entry holds, until it is delivered. */
+  #inbox = new Map<string, string>();
+  #pending = new Map<string, Pending>();
+  #turnId: string | null = null;
+  /** Esc came before the turn's execution started, so it stops once it does. */
+  #interruptWanted = false;
+  #closing = false;
+  #finished = false;
+
+  constructor(config: OpenCodeSessionConfig) {
+    this.#config = config;
+    this.#translator = new OpenCodeTranslator(config.cwd);
+    this.info = {
+      harness: "opencode",
+      threadId: config.resume,
+      cwd: config.cwd,
+      model: config.model,
+      effort: config.effort,
+      runtimeMode: config.runtimeMode,
+      interactionMode: "default",
+      version: null,
+    };
+  }
+
+  get events(): AsyncIterable<HarnessEvent> {
+    return this.#events;
+  }
+
+  async start(): Promise<void> {
+    const server = new OpenCodeServer(this.#config.command, this.info.cwd, process.env);
+    this.#server = server;
+    void server.exited.then((reason) => this.#finish(reason));
+    await server.ready();
+    try {
+      this.info.version = (await server.request<{ version: string }>("GET", "/api/info")).version;
+    } catch (error) {
+      throw new Error(
+        `1harness needs OpenCode 2, whose server this is not: ${errorMessage(error)}`,
+        { cause: error },
+      );
+    }
+    // Events are not kept for late subscribers, so the stream opens before any work.
+    const { done } = await server.subscribe((event) => {
+      try {
+        this.#receive(event);
+      } catch (error) {
+        // An event read wrong should not end the session, so it is reported instead.
+        this.#emit(
+          this.#translator.notice(
+            "warning",
+            `Could not follow OpenCode's ${event.type}: ${errorMessage(error)}`,
+          ),
+        );
+      }
+    });
+    done.then(
+      () => this.#finish("OpenCode's event stream ended"),
+      (error: unknown) => this.#finish(errorMessage(error)),
+    );
+    const [agents, models, fallback] = await Promise.all([
+      this.#data<OcAgent[]>("/api/agent"),
+      this.#data<OcModel[]>("/api/model"),
+      this.#data<OcModel | null>("/api/model/default"),
+      this.#loadCommands(),
+    ]);
+    this.#agents = agents;
+    this.#models = models;
+    this.#defaultModel = fallback ? modelName(fallback) : null;
+    const main = agents.find((agent) => agent.id === "build" && agent.mode !== "subagent");
+    this.#mainAgent =
+      main?.id ?? agents.find((agent) => agent.mode === "primary" && !agent.hidden)?.id ?? "build";
+    this.capabilities.planMode = agents.some(
+      (agent) => agent.id === PLAN_AGENT && agent.mode !== "subagent",
+    );
+    await this.#addMcpServers();
+
+    const requested = this.#config.runtimeMode;
+    const mode = fitRuntimeMode(requested, RUNTIME_MODES) ?? "supervised";
+    if (mode !== requested)
+      this.#emit(
+        this.#translator.notice(
+          "warning",
+          `${LABEL} has no ${requested} mode, so this thread runs in ${mode}`,
+        ),
+      );
+    const plan = this.#config.interactionMode === "plan" && this.capabilities.planMode;
+    this.#agent = plan ? PLAN_AGENT : this.#mainAgent;
+    const { model: name, effort } = this.#config;
+    const model = name ? findModel(models, name) : undefined;
+    if (name && !model)
+      this.#emit(this.#translator.notice("warning", `${this.#noModel(name)}; using its default`));
+
+    let session: OcSession;
+    const resume = this.#config.resume;
+    if (resume) {
+      session = await this.#data<OcSession>(`/api/session/${resume}`);
+      this.info.threadId = session.id;
+      await this.#applyRules(mode, plan);
+      if ((session.agent ?? this.#mainAgent) !== this.#agent)
+        await this.#post(`/api/session/${session.id}/agent`, { agent: this.#agent });
+      const ref = this.#requestedModel(
+        model ?? (session.model && findModel(models, modelName(session.model))),
+        effort,
+      );
+      if (ref) {
+        await this.#post(`/api/session/${session.id}/model`, { model: ref });
+        session.model = ref;
+      }
+      this.#emitAll(this.#translator.history(await this.#history(session.id)));
+    } else {
+      const ref = this.#requestedModel(model, effort);
+      session = await this.#data<OcSession>("/api/session", "POST", {
+        location: { directory: this.info.cwd },
+        ...(plan ? { agent: PLAN_AGENT } : {}),
+        ...(ref ? { model: ref } : {}),
+        permissions: sessionRules(mode, this.#agentInfo(), plan),
+      });
+    }
+    this.#family.add(session.id);
+    this.info.threadId = session.id;
+    this.info.runtimeMode = mode;
+    this.info.interactionMode = plan ? "plan" : "default";
+    this.#applyModel(session.model ?? this.#fallbackRef());
+    this.#emitInfo();
+  }
+
+  async startTurn(input: UserInput): Promise<void> {
+    await this.#send(input, "queue");
+  }
+
+  async steer(input: UserInput): Promise<void> {
+    if (this.#turnId === null) throw new Error("No turn is running");
+    await this.#send(input, "steer");
+  }
+
+  async interrupt(): Promise<void> {
+    if (!this.info.threadId) return;
+    if (this.#turnId === null) this.#interruptWanted = this.#sent.length > 0;
+    await this.#post(`/api/session/${this.info.threadId}/interrupt`);
+  }
+
+  async respond(requestId: string, response: RequestResponse): Promise<void> {
+    const pending = this.#pending.get(requestId);
+    if (!pending) return;
+    // It stays open until OpenCode has the answer, so a failed reply can be tried again.
+    const path = `/api/session/${pending.sessionId}`;
+    if (pending.kind === "permission") {
+      // Rejecting stops the turn; a reason lets the agent carry on without the action.
+      const body =
+        response.kind === "approval"
+          ? { decision: response.optionId }
+          : response.kind === "decline"
+            ? { decision: "reject", message: response.reason }
+            : { decision: "reject" };
+      await this.#post(`${path}/permission/${requestId}/reply`, body);
+    } else if (response.kind === "question") {
+      await this.#post(`${path}/form/${requestId}/reply`, {
+        answer: formAnswer(pending.form, response.answers),
+      });
+    } else {
+      const reason =
+        response.kind === "decline" ? `?message=${encodeURIComponent(response.reason)}` : "";
+      await this.#request("DELETE", `${path}/form/${requestId}${reason}`);
+    }
+    this.#resolve(requestId);
+  }
+
+  async setRuntimeMode(mode: RuntimeMode): Promise<void> {
+    if (!RUNTIME_MODES.includes(mode)) throw new Error(`${LABEL} has no ${mode} mode`);
+    await this.#applyRules(mode, this.info.interactionMode === "plan");
+    this.info.runtimeMode = mode;
+    this.#emitInfo();
+  }
+
+  async setInteractionMode(mode: InteractionMode): Promise<void> {
+    if (mode === "plan" && !this.capabilities.planMode)
+      throw new Error(`${LABEL} has no plan mode`);
+    const sessionId = this.#sessionId();
+    const previous = this.#agent;
+    // Set first, so OpenCode's word of the switch is known as this one.
+    this.#agent = mode === "plan" ? PLAN_AGENT : this.#mainAgent;
+    try {
+      await this.#post(`/api/session/${sessionId}/agent`, { agent: this.#agent });
+    } catch (error) {
+      this.#agent = previous;
+      throw error;
+    }
+    await this.#applyRules(this.info.runtimeMode, mode === "plan");
+    this.info.interactionMode = mode;
+    this.#emitInfo();
+  }
+
+  async setModel(model: string | null): Promise<void> {
+    const target = model ? findModel(this.#models, model) : undefined;
+    if (model && !target) throw new Error(this.#noModel(model));
+    const ref = target ? this.#modelRef(target, this.info.effort) : this.#fallbackRef();
+    if (!ref) return;
+    await this.#post(`/api/session/${this.#sessionId()}/model`, { model: ref });
+    this.#applyModel(ref);
+    this.#emitInfo();
+  }
+
+  async setEffort(effort: string | null): Promise<void> {
+    const current = this.info.model ? findModel(this.#models, this.info.model) : undefined;
+    if (!current) return;
+    const ref = this.#modelRef(current, effort);
+    if (effort && ref.variant !== effort)
+      throw new Error(`${modelName(current)} has no effort ${effort}`);
+    await this.#post(`/api/session/${this.#sessionId()}/model`, { model: ref });
+    this.#applyModel(ref);
+    this.#emitInfo();
+  }
+
+  async compact(): Promise<void> {
+    await this.#post(`/api/session/${this.#sessionId()}/compact`, {});
+  }
+
+  async listModels(): Promise<ModelOption[]> {
+    return modelOptions(this.#models, this.#defaultModel);
+  }
+
+  async listCommands(): Promise<NativeCommand[]> {
+    await this.#loadCommands();
+    return this.#commands.map(({ skill: _skill, ...command }) => command);
+  }
+
+  async listThreads(): Promise<ThreadSummary[]> {
+    const query = new URLSearchParams({
+      directory: this.info.cwd,
+      parentID: "null",
+      order: "desc",
+      limit: "50",
+    });
+    const sessions = await this.#data<OcSession[]>(`/api/session?${query}`);
+    // The session this thread runs is not one to resume.
+    return sessions
+      .filter((session) => session.id !== this.info.threadId)
+      .map((session) => ({
+        id: session.id,
+        title: session.title ?? session.id,
+        updatedAt: session.time.updated,
+      }));
+  }
+
+  async listMcpServers(): Promise<McpServer[]> {
+    const servers =
+      await this.#data<{ name: string; status: { status: string; error?: string } }[]>("/api/mcp");
+    return servers.map((server) => ({
+      name: server.name,
+      state: MCP_STATES[server.status.status] ?? "failed",
+      source: null,
+      transport: null,
+      target: null,
+      auth: null,
+      error: server.status.error ?? null,
+      tools: [],
+    }));
+  }
+
+  mcpCallId(meta: Record<string, unknown>, tool: string): string | null {
+    // OpenCode says only which session calls, so the call is the one of that tool running in it.
+    if (meta["ai.opencode/sessionID"] !== this.info.threadId) return null;
+    const [only, ...others] = this.#translator.running(tool);
+    return only && others.length === 0 ? only : null;
+  }
+
+  async close(): Promise<void> {
+    this.#closing = true;
+    await this.#server?.close();
+    this.#finish(null);
+  }
+
+  /** Sends a message, or the command or skill it names, and notes it to match its echo. */
+  async #send(input: UserInput, delivery: "queue" | "steer"): Promise<void> {
+    const sessionId = this.#sessionId();
+    const named = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(input.text);
+    const command = named ? this.#commands.find((entry) => entry.name === named[1]) : undefined;
+    const args = named?.[2]?.trim() ?? "";
+    const prompt = command?.skill ? args : input.text;
+    const sent: Sent = { input, text: command && !command.skill ? null : prompt, inboxId: null };
+    this.#sent.push(sent);
+    try {
+      if (command && !command.skill) {
+        await this.#post(`/api/session/${sessionId}/command`, {
+          name: command.name,
+          text: args,
+          delivery,
+        });
+        return;
+      }
+      const response = await this.#data<{ id: string }>(
+        `/api/session/${sessionId}/prompt`,
+        "POST",
+        {
+          text: prompt,
+          ...(command?.skill ? { skills: [{ id: command.skill }] } : {}),
+          ...(input.images?.length ? { files: input.images.map(imageFile) } : {}),
+          delivery,
+        },
+      );
+      // Its inbox entry may have arrived first, matched by its text.
+      if (!this.#sent.some((entry) => entry.inboxId === response.id)) sent.inboxId = response.id;
+    } catch (error) {
+      this.#sent = this.#sent.filter((entry) => entry !== sent);
+      if (this.#sent.length === 0) this.#interruptWanted = false;
+      throw error;
+    }
+  }
+
+  #receive(event: OcEvent): void {
+    const data = event.data ?? {};
+    if (event.type === "form.created") {
+      const form = data["form"] as OcForm;
+      if (!this.#family.has(form.sessionID)) return;
+      this.#pending.set(form.id, { kind: "form", sessionId: form.sessionID, form });
+      this.#emit({ type: "request.opened", request: formRequest(form) });
+      return;
+    }
+    const sessionId = typeof data["sessionID"] === "string" ? data["sessionID"] : "";
+    if (event.type === "session.created" && this.#family.has(String(data["parentID"]))) {
+      this.#family.add(sessionId);
+      return;
+    }
+    if (!this.#family.has(sessionId)) return;
+    const own = sessionId === this.info.threadId;
+    switch (event.type) {
+      case "permission.asked": {
+        const permission = data as unknown as OcPermission;
+        if (own) this.#emitAll(this.#translator.translate(event));
+        const call =
+          own && permission.source ? this.#translator.tool(permission.source.id) : undefined;
+        this.#pending.set(permission.id, { kind: "permission", sessionId });
+        this.#emit({
+          type: "request.opened",
+          request: permissionRequest(permission, call, this.info.cwd),
+        });
+        return;
+      }
+      case "permission.replied":
+        this.#resolve(String(data["requestID"]));
+        return;
+      case "form.replied":
+      case "form.cancelled":
+        this.#resolve(String(data["id"]));
+        return;
+    }
+    // A subagent's own work shows in the call that started it.
+    if (!own) return;
+    switch (event.type) {
+      case "session.execution.started":
+        if (this.#turnId !== null) return;
+        this.#turnId = randomUUID();
+        this.#emit({ type: "turn.started", turnId: this.#turnId });
+        if (this.#interruptWanted) {
+          this.#interruptWanted = false;
+          void this.interrupt().catch(() => {});
+        }
+        return;
+      case "session.execution.succeeded":
+        this.#endTurn("completed", null);
+        return;
+      case "session.execution.failed":
+        this.#endTurn(
+          "failed",
+          String((data["error"] as { message?: string })?.message ?? "OpenCode failed"),
+        );
+        return;
+      case "session.execution.interrupted":
+        if (data["reason"] === "inactivity")
+          this.#endTurn("failed", `${LABEL} stopped a turn that went quiet`);
+        else this.#endTurn("interrupted", null);
+        return;
+      case "session.inbox.enqueued": {
+        const item = data["item"] as { type: string; payload?: { text?: string } };
+        if (item.type !== "user") return;
+        const id = String(data["inboxID"]);
+        const text = item.payload?.text ?? "";
+        this.#inbox.set(id, text);
+        if (this.#sent.some((entry) => entry.inboxId === id)) return;
+        const sent =
+          this.#sent.find((entry) => entry.inboxId === null && entry.text === text) ??
+          this.#sent.find((entry) => entry.inboxId === null && entry.text === null);
+        if (sent) sent.inboxId = id;
+        return;
+      }
+      case "session.inbox.delivered":
+        this.#delivered(String(data["inboxID"]));
+        return;
+      case "session.inbox.cancelled": {
+        const id = String(data["inboxID"]);
+        this.#inbox.delete(id);
+        this.#sent = this.#sent.filter((entry) => entry.inboxId !== id);
+        return;
+      }
+      case "session.model.selected":
+        this.#applyModel(data["model"] as ModelRef);
+        this.#emitInfo();
+        return;
+      case "session.agent.selected": {
+        const agent = String(data["agent"]);
+        if (agent === this.#agent) return;
+        // OpenCode switched by itself, as for a command that names an agent; the rules follow.
+        this.#agent = agent;
+        const plan = agent === PLAN_AGENT;
+        this.info.interactionMode = plan ? "plan" : "default";
+        this.#emitInfo();
+        this.#applyRules(this.info.runtimeMode, plan).catch((error: unknown) =>
+          this.#emit(
+            this.#translator.notice(
+              "warning",
+              `Could not apply ${this.info.runtimeMode} to agent ${agent}: ${errorMessage(error)}`,
+            ),
+          ),
+        );
+        return;
+      }
+      default:
+        this.#emitAll(this.#translator.translate(event));
+    }
+  }
+
+  /** Shows a message as it reaches the agent, with the input it came from where known. */
+  #delivered(inboxId: string): void {
+    const sent = this.#sent.find((entry) => entry.inboxId === inboxId);
+    const text = sent?.input.text ?? this.#inbox.get(inboxId) ?? "";
+    this.#inbox.delete(inboxId);
+    if (sent) this.#sent = this.#sent.filter((entry) => entry !== sent);
+    if (!text) return;
+    this.#emit({
+      type: "item.completed",
+      item: {
+        kind: "user_message",
+        id: inboxId,
+        text,
+        ...(sent?.input.id ? { inputId: sent.input.id } : {}),
+      },
+    });
+  }
+
+  #endTurn(status: TurnStatus, error: string | null): void {
+    const turnId = this.#turnId;
+    if (turnId === null) return;
+    this.#turnId = null;
+    this.#interruptWanted = false;
+    this.#emitAll(this.#translator.flush());
+    // A request of the session's own still open will not be answered; a
+    // subagent's may be, since subagents can work on in the background.
+    for (const [id, pending] of this.#pending)
+      if (pending.sessionId === this.info.threadId) this.#resolve(id);
+    // A command whose entry never came adds nothing to the inbox, so it waits for nothing.
+    this.#sent = this.#sent.filter((entry) => entry.text !== null || entry.inboxId !== null);
+    this.#emit({ type: "turn.ended", turnId, status, error });
+  }
+
+  #resolve(requestId: string): void {
+    if (this.#pending.delete(requestId)) this.#emit({ type: "request.resolved", requestId });
+  }
+
+  #finish(reason: string | null): void {
+    if (this.#finished) return;
+    this.#finished = true;
+    const error = this.#closing ? null : reason;
+    if (this.#turnId !== null) {
+      this.#emitAll(this.#translator.flush());
+      this.#emit({
+        type: "turn.ended",
+        turnId: this.#turnId,
+        status: error ? "failed" : "interrupted",
+        error,
+      });
+      this.#turnId = null;
+    }
+    this.#pending.clear();
+    this.#emit({ type: "session.closed", error });
+    this.#events.end();
+    void this.#server?.close();
+  }
+
+  async #addMcpServers(): Promise<void> {
+    // Each connects as it is added, so they are added together.
+    const added = Object.entries(this.#config.mcpServers ?? {}).map(async ([name, server]) => {
+      // Its tools are called directly, not from code, so they show as calls of their own.
+      const config =
+        server.type === "http"
+          ? {
+              type: "remote",
+              url: server.url,
+              headers: server.headers,
+              oauth: false,
+              codemode: false,
+              ...(server.timeoutSec ? { timeout: { execution: server.timeoutSec * 1000 } } : {}),
+            }
+          : {
+              type: "local",
+              command: [server.command, ...server.args],
+              environment: server.env,
+              codemode: false,
+            };
+      await this.#request("PUT", `/api/experimental/mcp/${encodeURIComponent(name)}`, {
+        config,
+      }).catch((error: unknown) =>
+        this.#emit(
+          this.#translator.notice(
+            "warning",
+            `Could not add MCP server ${name}: ${errorMessage(error)}`,
+          ),
+        ),
+      );
+    });
+    await Promise.all(added);
+    const servers = await this.#data<{ name: string }[]>("/api/mcp").catch(() => []);
+    this.#translator.mcpServers = servers.map((server) => server.name);
+  }
+
+  async #loadCommands(): Promise<void> {
+    const [commands, skills] = await Promise.all([
+      this.#data<{ name: string; description?: string }[]>("/api/command").catch(() => []),
+      this.#data<{ id: string; name: string; description?: string }[]>("/api/skill").catch(
+        () => [],
+      ),
+    ]);
+    this.#commands = [
+      ...commands.map((command) => ({
+        name: command.name,
+        aliases: [],
+        description: command.description ?? "",
+        argumentHint: "",
+        kind: "command" as const,
+        startsTurn: true,
+      })),
+      ...skills.map((skill) => ({
+        name: skill.id,
+        aliases: [],
+        description: skill.description ?? skill.name,
+        argumentHint: "",
+        kind: "skill" as const,
+        startsTurn: true,
+        skill: skill.id,
+      })),
+    ];
+  }
+
+  async #history(sessionId: string): Promise<OcMessage[]> {
+    const messages: OcMessage[] = [];
+    let cursor: string | null | undefined;
+    do {
+      const query = new URLSearchParams(
+        cursor ? { cursor, limit: "200" } : { order: "asc", limit: "200" },
+      );
+      const page = await this.#request<{ data: OcMessage[]; cursor: { next?: string | null } }>(
+        "GET",
+        `/api/session/${sessionId}/message?${query}`,
+      );
+      messages.push(...page.data);
+      cursor = page.data.length > 0 ? page.cursor.next : null;
+    } while (cursor);
+    return messages;
+  }
+
+  #modelRef(model: OcModel, effort: string | null): ModelRef {
+    const variant =
+      effort && model.variants.some((entry) => entry.id === effort) ? effort : undefined;
+    return { providerID: model.providerID, id: model.id, ...(variant ? { variant } : {}) };
+  }
+
+  /**
+   * The model a thread asks for, with its effort: the named model or the one it
+   * runs, or nothing when it asks for neither, so OpenCode keeps its own choice.
+   */
+  #requestedModel(model: OcModel | undefined, effort: string | null): ModelRef | undefined {
+    if (!model && !effort) return undefined;
+    const base =
+      model ?? (this.#defaultModel ? findModel(this.#models, this.#defaultModel) : undefined);
+    if (!base) return undefined;
+    const ref = this.#modelRef(base, effort);
+    if (effort && ref.variant !== effort)
+      this.#emit(this.#translator.notice("warning", `${modelName(base)} has no effort ${effort}`));
+    return model || ref.variant ? ref : undefined;
+  }
+
+  /** Why a model name finds nothing: no such model, or several providers with it. */
+  #noModel(name: string): string {
+    const providers = this.#models.filter((model) => model.enabled && model.id === name);
+    return providers.length > 1
+      ? `Several providers offer ${name}; name one as provider/model`
+      : `${LABEL} has no model ${name}`;
+  }
+
+  /** Puts the rules for a mode on the session, keeping the ones OpenCode added. */
+  async #applyRules(mode: RuntimeMode, plan: boolean): Promise<void> {
+    const sessionId = this.#sessionId();
+    const current = (await this.#data<OcSession>(`/api/session/${sessionId}`)).permissions ?? [];
+    const permissions = mergeRules(
+      current,
+      sessionRules(mode, this.#agentInfo(), plan),
+      this.#agents,
+    );
+    await this.#request("PATCH", `/api/session/${sessionId}`, { permissions });
+  }
+
+  #fallbackRef(): ModelRef | undefined {
+    const model = this.#defaultModel ? findModel(this.#models, this.#defaultModel) : undefined;
+    return model ? this.#modelRef(model, null) : undefined;
+  }
+
+  #applyModel(ref: ModelRef | undefined): void {
+    if (!ref) return;
+    this.info.model = modelName(ref);
+    this.info.effort = ref.variant && ref.variant !== "default" ? ref.variant : null;
+    const model = findModel(this.#models, this.info.model);
+    this.#translator.contextWindow = model?.limit.context ?? null;
+    this.capabilities.images = model?.capabilities.input.includes("image") ?? false;
+  }
+
+  #agentInfo(): OcAgent | undefined {
+    return this.#agents.find((agent) => agent.id === this.#agent);
+  }
+
+  #sessionId(): string {
+    if (!this.info.threadId) throw new Error("The session has not started");
+    return this.info.threadId;
+  }
+
+  /** A request's `data`, which every read answers with. */
+  async #data<T>(path: string, method = "GET", body?: unknown): Promise<T> {
+    return (await this.#request<{ data: T }>(method, path, body)).data;
+  }
+
+  #post<T = unknown>(path: string, body?: unknown): Promise<T> {
+    return this.#request<T>("POST", path, body);
+  }
+
+  #request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    if (!this.#server) return Promise.reject(new Error("The session has not started"));
+    return this.#server.request<T>(method, path, body);
+  }
+
+  #emit(event: HarnessEvent): void {
+    this.#events.push(event);
+  }
+
+  #emitAll(events: HarnessEvent[]): void {
+    for (const event of events) this.#emit(event);
+  }
+
+  #emitInfo(): void {
+    this.#emit({ type: "session.updated", info: { ...this.info } });
+  }
+}
+
+/** An image as a prompt attachment, inline. */
+function imageFile(path: string): { uri: string; name: string } {
+  const type = IMAGE_TYPES[extname(path).toLowerCase()] ?? "image/png";
+  return {
+    uri: `data:${type};base64,${readFileSync(path).toString("base64")}`,
+    name: basename(path),
+  };
+}
