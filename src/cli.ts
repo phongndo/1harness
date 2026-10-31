@@ -9,11 +9,13 @@ import {
   type RuntimeMode,
   type SessionOptions,
 } from "./core/events.ts";
-import { Thread } from "./core/thread.ts";
 import { mentionedImages } from "./core/files.ts";
 import { configDir, stateDir } from "./core/paths.ts";
-import { createSession, drivers, registerConfiguredAgents } from "./drivers/index.ts";
+import { drivers, registerConfiguredAgents } from "./drivers/index.ts";
+import type { ToolDefinition } from "./extensions/api.ts";
 import { ExtensionHost } from "./extensions/host.ts";
+import { ThreadManager } from "./host/manager.ts";
+import { Orchestrator } from "./host/orchestrator.ts";
 import { ToolServer } from "./extensions/tool-server.ts";
 import { App } from "./tui/app.ts";
 
@@ -81,24 +83,32 @@ async function print(
     ui: null,
   });
   await host.loadAll(extensions);
-  const tools = new ToolServer(() => host.tools, version);
-  const mcp = await host.sessionServers(tools);
-  for (const warning of mcp.warnings) process.stderr.write(`1harness: MCP config: ${warning}\n`);
-  let created: Thread | null = null;
-  const toolPolicy = host.toolPolicy(() => created);
-  const options = {
-    ...session,
-    ...(Object.keys(mcp.servers).length > 0 ? { mcpServers: mcp.servers } : {}),
-    ...(toolPolicy ? { toolPolicy } : {}),
-  };
-  const thread = new Thread(createSession(harness, options, { version }));
-  created = thread;
-  mcp.grant?.bind(thread);
-  host.attach(thread);
+  let orchestratorTools: ReadonlyMap<string, { tool: ToolDefinition }> = new Map();
+  const tools = new ToolServer(() => new Map([...host.tools, ...orchestratorTools]), version);
+  const manager = new ThreadManager({
+    version,
+    extensions: host,
+    tools,
+    onWarning: (text) => process.stderr.write(`1harness: ${text}\n`),
+  });
+  // Agents can delegate here too; their tasks run in the background of this one prompt.
+  const orchestrator = new Orchestrator(manager);
+  orchestratorTools = new Map(orchestrator.tools.map((tool) => [tool.name, { tool }]));
+  let rootId: string | null = null;
   let status = 1;
   let wrote = false;
   const finished = new Promise<void>((done) => {
-    thread.subscribe((event) => {
+    manager.subscribe((update) => {
+      if (update.type === "thread.created" && update.thread.origin === "user")
+        rootId = update.thread.id;
+      if (update.type !== "thread.event") return;
+      const event = update.event;
+      if (event.type === "request.opened") {
+        // Nobody can answer, so the action is declined, whichever thread asked.
+        void manager.get(update.threadId)?.thread.respond(event.request.id, { kind: "cancel" });
+        return;
+      }
+      if (update.threadId !== rootId) return;
       switch (event.type) {
         case "item.completed":
           if (event.item.kind === "assistant_message" && event.item.text.trim() !== "") {
@@ -107,10 +117,6 @@ async function print(
           } else if (event.item.kind === "notice" && event.item.level !== "info") {
             process.stderr.write(`1harness: ${event.item.text}\n`);
           }
-          break;
-        case "request.opened":
-          // Nobody can answer, so the action is declined.
-          void thread.respond(event.request.id, { kind: "cancel" });
           break;
         case "turn.ended":
           status = event.status === "completed" ? 0 : 1;
@@ -128,11 +134,12 @@ async function print(
       }
     });
   });
-  await thread.start();
+  const root = await manager.create({ harness, settings: session });
+  const thread = root.thread;
   const images = thread.session.capabilities.images ? mentionedImages(prompt, session.cwd) : [];
   thread.send(images.length > 0 ? { text: prompt, images } : { text: prompt });
   await finished;
-  await thread.close();
+  await manager.closeAll();
   await tools.close();
   await host.close();
   return status;
