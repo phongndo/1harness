@@ -148,15 +148,6 @@ const compact: CommandDefinition = {
   },
 };
 
-const stop: CommandDefinition = {
-  name: "stop",
-  description: "interrupt the running turn (also esc)",
-  group: "Session",
-  run: async (context) => {
-    await context.thread?.interrupt();
-  },
-};
-
 const unqueue: CommandDefinition = {
   name: "unqueue",
   description: "move the last queued message back into the editor",
@@ -380,7 +371,6 @@ export const BUILTIN_COMMANDS: readonly CommandDefinition[] = [
   resume,
   harness,
   compact,
-  stop,
   unqueue,
   model,
   effort,

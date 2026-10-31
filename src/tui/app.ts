@@ -55,7 +55,7 @@ const KEYS: [string, string][] = [
   ["ctrl+j, ctrl+k", "move in any list, completions included"],
   ["j k, g G, ctrl+d ctrl+u", "move in lists that take no typing"],
   ["h l, q", "switch tabs and close in those lists"],
-  ["esc", "interrupt the running turn"],
+  ["esc", "stop the running turn and the agents under it"],
   ["pgup, pgdn, wheel", "scroll the conversation"],
   ["ctrl+c", "clear input, interrupt, or exit"],
   ["ctrl+z", "suspend"],
@@ -300,6 +300,12 @@ export class App {
           })),
         }),
         run: (_context, args) => this.#switchThread(args),
+      },
+      {
+        name: "stop",
+        description: "stop the running turn and the agents under it (also esc)",
+        group: "Session",
+        run: () => this.#stop(),
       },
       {
         name: "close",
@@ -1148,7 +1154,7 @@ export class App {
   #composerKey(key: Key): void {
     if (key.ctrl && key.name === "c") {
       if (!this.#editor.empty) this.#editor.clear();
-      else if (this.#thread?.busy) void this.#interrupt();
+      else if (this.#thread?.busy) void this.#stop();
       else if (this.#exitArmed) void this.#exit();
       else {
         this.#exitArmed = true;
@@ -1181,7 +1187,7 @@ export class App {
         }
         return;
       case "escape":
-        if (this.#thread?.busy) void this.#interrupt();
+        if (this.#thread?.busy) void this.#stop();
         else this.#view.scroll = 0;
         return;
       case "up":
@@ -1236,11 +1242,14 @@ export class App {
     else thread.send(input);
   }
 
-  async #interrupt(): Promise<void> {
+  /** Stops the turn on screen and every agent under it. */
+  async #stop(): Promise<void> {
+    const id = this.#currentId;
+    if (!id) return;
     try {
-      await this.#thread?.interrupt();
+      await this.#orchestrator.stop(id);
     } catch (error) {
-      this.#notice("error", `Interrupt failed: ${errorMessage(error)}`);
+      this.#notice("error", `Could not stop ${id}: ${errorMessage(error)}`);
     }
   }
 
@@ -1473,8 +1482,8 @@ export class App {
     const dot = this.#blinkOn ? style.text("•") : " ";
     const tokens = `(↑${formatTokens(Math.ceil(turn.up))} ↓${formatTokens(Math.ceil(turn.down))})`;
     const hint = this.#thread?.session.capabilities.steer
-      ? "esc interrupt · enter adds to turn · tab queues"
-      : "esc interrupt · enter queues";
+      ? "esc stop · enter adds to turn · tab queues"
+      : "esc stop · enter queues";
     return spread(
       `${dot} ${style.text(`${phase} (${seconds}s)`)} ${style.muted(tokens)}`,
       style.muted(hint),

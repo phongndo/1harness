@@ -207,6 +207,34 @@ describe("ThreadView", () => {
     ]);
   });
 
+  it("settles calls a stopped turn cut off, but not commands still running", () => {
+    const view = new ThreadView("t1");
+    view.startTurn();
+    view.item(delegate("d1"), false, true);
+    view.item({ kind: "assistant_message", id: "a1", text: "Starting the server" }, true, true);
+    view.item(
+      {
+        kind: "command",
+        id: "c1",
+        command: "npm run dev",
+        output: "",
+        exitCode: null,
+        status: "running",
+      },
+      false,
+      true,
+    );
+    view.endTurn("interrupted", null);
+    assert.equal(view.transcript.running, true);
+    assert.deepEqual(plain(view.transcript.view(context, 10, 0).rows).slice(0, 5), [
+      "● Stopped 1harness/delegate_task",
+      "",
+      "  Starting the server",
+      "",
+      "● Running npm run dev",
+    ]);
+  });
+
   it("counts the files an edit changed", () => {
     const view = new ThreadView("t1");
     view.item(

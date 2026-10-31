@@ -129,6 +129,11 @@ export class Transcript {
     return this.#entries.some((entry) => isRunningGroup(entry.block));
   }
 
+  /** Blocks added after the first `count`, for what a turn added. */
+  since(count: number): Block[] {
+    return this.#entries.slice(count).map((entry) => entry.block);
+  }
+
   /**
    * Rows for a viewport of `height` rows that ends `scroll` rows above the
    * bottom. `total` counts every row, for clamping the scroll position.

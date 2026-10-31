@@ -43,6 +43,8 @@ export class ThreadView {
   total = 0;
   /** The agents this thread started, by thread ID, and the blocks that show them. */
   #agents = new Map<string, Extract<Block, { kind: "agents" }>>();
+  /** How many blocks the transcript had when the turn started. */
+  #turnStart = 0;
 
   constructor(id: string) {
     this.id = id;
@@ -91,7 +93,9 @@ export class ThreadView {
   }
 
   startTurn(): void {
-    this.turn ??= { startedAt: Date.now(), up: 0, down: 0, phase: "Thinking", heading: null };
+    if (this.turn) return;
+    this.turn = { startedAt: Date.now(), up: 0, down: 0, phase: "Thinking", heading: null };
+    this.#turnStart = this.transcript.size;
   }
 
   /**
@@ -127,6 +131,14 @@ export class ThreadView {
     const turn = this.turn;
     this.turn = null;
     if (!turn || status === null) return;
+    // Only commands outlive their turn, so other calls still running were cut off.
+    for (const block of this.transcript.since(this.#turnStart)) {
+      if (block.kind !== "tools" || block.settled) continue;
+      if (block.items.some((item) => item.kind === "command" && item.status === "running"))
+        continue;
+      block.settled = true;
+      this.transcript.touch(block);
+    }
     const seconds = Math.round((Date.now() - turn.startedAt) / 1000);
     const tokens = `(↑${formatTokens(Math.ceil(turn.up))} ↓${formatTokens(Math.ceil(turn.down))})`;
     const label =
