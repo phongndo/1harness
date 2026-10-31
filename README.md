@@ -56,6 +56,27 @@ touching the harnesses' own config. Both use the common
 `{ "mcpServers": { "name": { "command": …, "args": […] } | { "url": … } } }` shape;
 `${VAR}` in a value is read from the environment.
 
+### Threads and orchestration
+
+1harness runs many threads at once, on any mix of harnesses. Agents start and
+manage them through tools on the `1harness` MCP server every session has:
+`delegate_task` hands a task to a new thread on any available harness and
+waits for its result, or returns at once and sends the result back as a message
+when it finishes; `task_status` and `task_cancel` follow it up; `thread_list`,
+`thread_read`, `thread_send`, `thread_wait`, and `thread_interrupt` work on any
+thread; `orchestrator_capabilities` lists the harnesses and limits. A task never
+gets a broader permission mode than the thread that started it, or leaves plan
+mode, and a harness that cannot run it that narrowly is refused. A retried
+`requestId` returns the same task. Delegation stops at three levels deep, eight
+threads working, and sixteen open; `task_cancel` on a finished task closes its
+thread.
+
+A thread an agent starts appears as a row in its parent's conversation. Its
+approvals and questions come to you wherever you are, labelled with the thread.
+`/threads` (or ctrl+t) switches between threads, and `/close` ends one along
+with the threads it started. A thread you leave keeps running in the background
+while it or a thread it started has work, and closes once they are done.
+
 ### Extensions
 
 An extension is a TypeScript or JavaScript module whose default export receives
@@ -92,6 +113,8 @@ harness's agent shares.
   any client can run.
 - `src/extensions` loads extensions, connects them to threads, and serves their
   tools over MCP.
+- `src/host` owns every live thread and the orchestrator tools agents use to
+  start and manage other threads; clients reach threads only through it.
 - `src/tui` is a full-screen terminal UI on the alternate screen, styled after
   [fx](https://github.com/vercel-labs/fx). Each block's rows are cached by width,
   and each frame rewrites only the rows that changed.
