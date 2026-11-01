@@ -25,6 +25,10 @@ export interface MenuConfig {
   action: string;
   /** fx's argument list: rows only, between rules, lined up under the word being completed. */
   bare: boolean;
+  /** Shows the selected entry's whole detail under the list, for details cut short in their row. */
+  describe: boolean;
+  /** Counts the entries after the title; a question with a few answers leaves it out. */
+  count: boolean;
 }
 
 export type MenuResult = { kind: "choose"; index: number } | { kind: "close" } | null;
@@ -32,7 +36,53 @@ export type MenuResult = { kind: "choose"; index: number } | { kind: "close" } |
 const HINT_GAP = "     ";
 /** Ctrl keys that move by pages, as in vim. */
 const PAGE_KEYS: Record<string, number> = { d: 0.5, u: -0.5, f: 1, b: -1 };
+/** Labels get at least this many columns before details take the rest. */
 const LABEL_LIMIT = 28;
+/** Nor more than this share of the row, so details stay readable. */
+const LABEL_SHARE = 0.6;
+/** Details wider than this share of the row, for most entries, leave labels at LABEL_LIMIT. */
+const DETAIL_SHARE = 0.4;
+
+/**
+ * The size most of these sorted sizes are within: their 90th percentile,
+ * which is the largest for a short list, so only a long one leaves any out.
+ */
+function most(sizes: readonly number[]): number {
+  return sizes[Math.ceil((sizes.length - 1) * 0.9)] ?? 0;
+}
+
+/**
+ * The category tabs after the title: all of them when they fit, otherwise a
+ * run around the selected one, with `‹` and `›` where more are.
+ */
+function tabRow(tabs: readonly string[], current: number, room: number): string {
+  const paint = (index: number) =>
+    index === current
+      ? style.bold(style.strong(`[${tabs[index]}]`))
+      : style.muted(tabs[index] ?? "");
+  const size = (index: number) => visibleWidth(tabs[index] ?? "") + (index === current ? 4 : 2);
+  let first = current;
+  let last = current;
+  // Room for the selected tab, and for `  ‹` and `  ›` should either be needed.
+  let used = size(current) + 6;
+  // Grow outward from the selected tab, right first, while the run fits.
+  for (let grew = true; grew;) {
+    grew = false;
+    if (last + 1 < tabs.length && used + size(last + 1) <= room) {
+      used += size(++last);
+      grew = true;
+    }
+    if (first > 0 && used + size(first - 1) <= room) {
+      used += size(--first);
+      grew = true;
+    }
+  }
+  let row = "";
+  if (first > 0) row += `  ${style.muted("‹")}`;
+  for (let index = first; index <= last; index++) row += `  ${paint(index)}`;
+  if (last < tabs.length - 1) row += `  ${style.muted("›")}`;
+  return row;
+}
 
 export function entry(label: string, detail = "", options: Partial<MenuEntry> = {}): MenuEntry {
   return { label, detail, tag: "", group: "", inert: false, ...options };
@@ -78,6 +128,8 @@ export class Menu {
       filter: false,
       action: "use",
       bare: false,
+      describe: false,
+      count: true,
       ...config,
     };
     this.#entries = this.config.entries;
@@ -91,11 +143,20 @@ export class Menu {
     this.#skipInert(1);
   }
 
-  /** Replaces the entries, keeping the selection on the same label when it remains. */
+  /**
+   * Replaces the entries, keeping the selection on the same entry when it
+   * remains: the same label and detail, as files of one name in two folders
+   * differ by theirs, or else the same label.
+   */
   setEntries(entries: MenuEntry[]): void {
-    const label = this.selected()?.label;
+    const chosen = this.selected();
     this.#entries = entries;
-    this.select(label ?? "");
+    const same = this.#visible().findIndex(
+      ({ entry: item }) => item.label === chosen?.label && item.detail === chosen.detail,
+    );
+    if (same !== -1) this.#index = same;
+    else this.select(chosen?.label ?? "");
+    this.#skipInert(1);
   }
 
   /** Selects the entry with this label, or the first when none has it. */
@@ -184,24 +245,58 @@ export class Menu {
     return null;
   }
 
+  /** Adds pasted text to the filter, for a menu that takes typing; returns whether it did. */
+  paste(text: string): boolean {
+    if (!this.config.filter) return false;
+    this.#query += text.replace(/\s+/g, " ");
+    this.#index = 0;
+    this.#skipInert(1);
+    return true;
+  }
+
   /** Rows for the panel, showing at most `maxRows` entries around the selection. */
   render(width: number, maxRows: number): string[] {
     if (this.config.bare) return this.#renderBare(width, maxRows);
     const visible = this.#visible();
     // Informational rows are not counted, unless they are all there is.
     const count = visible.filter(({ entry: item }) => !item.inert).length || visible.length;
-    let title = style.bold(style.strong(`${this.config.title} ${count}`));
-    for (const [index, name] of this.#tabs.entries()) {
-      title += `  ${index === this.#tab ? style.bold(style.strong(`[${name}]`)) : style.muted(name)}`;
-    }
-    if (this.#query) title += `  ${style.muted("filter")} ${this.#query}`;
+    let title = style.bold(
+      style.strong(this.config.count ? `${this.config.title} ${count}` : this.config.title),
+    );
+    const filter = this.#query ? `  ${style.muted("filter")} ${this.#query}` : "";
+    if (this.#tabs.length > 0)
+      title += tabRow(this.#tabs, this.#tab, width - visibleWidth(title) - visibleWidth(filter));
+    title += filter;
     const rows = [rule(width), truncate(title, width), ""];
-    const labelWidth =
-      Math.min(
-        LABEL_LIMIT,
-        Math.max(0, ...visible.map(({ entry: item }) => visibleWidth(item.label))),
-      ) + 3;
-    const shown = Math.max(1, maxRows);
+    // Labels are cut at LABEL_LIMIT, unless most details are short, as a list of
+    // threads' are: then labels take what the details and tags leave.
+    const widths = (pick: (item: MenuEntry) => string) =>
+      visible.map(({ entry: item }) => visibleWidth(pick(item))).toSorted((a, b) => a - b);
+    const details = most(widths((item) => item.detail));
+    const tags = Math.max(0, ...widths((item) => item.tag));
+    const spare = width - 2 - details - tags - 5;
+    // A narrow screen gives labels no more than half the row, so details still show.
+    const floor = Math.min(LABEL_LIMIT, Math.floor(width / 2) - 3);
+    const limit =
+      details > width * DETAIL_SHARE
+        ? floor
+        : Math.max(floor, Math.min(spare, Math.floor(width * LABEL_SHARE)));
+    // Sized for most labels; a rare long one is cut, and shows whole when selected.
+    const labelWidth = Math.min(limit, most(widths((item) => item.label))) + 3;
+    const cut = (item: MenuEntry) =>
+      (visibleWidth(item.label) > labelWidth - 3 &&
+        visibleWidth(item.label) + 3 >
+          width - 2 - visibleWidth(item.detail) - (item.tag ? visibleWidth(item.tag) + 2 : 0)) ||
+      2 + labelWidth + visibleWidth(item.detail) + (item.tag ? visibleWidth(item.tag) + 2 : 0) >
+        width;
+    // When rows are cut short, the selected one shows whole below them, in rows kept
+    // for it, so the panel does not jump as the selection moves.
+    // The rows that show a cut entry whole come out of the rows allowed.
+    const describing =
+      this.config.describe &&
+      maxRows > 3 &&
+      visible.some(({ entry: item }) => !item.inert && cut(item));
+    const shown = Math.max(1, maxRows - (describing ? 3 : 0));
     this.#shown = shown;
     const start = Math.max(
       0,
@@ -215,11 +310,26 @@ export class Menu {
           : item.inert
             ? style.text(text)
             : style.muted(text);
-      const label = pad(truncate(item.label, labelWidth - 3), labelWidth);
+      // A label longer than its column still shows whole where its row has room.
+      const room =
+        width - 2 - visibleWidth(item.detail) - (item.tag ? visibleWidth(item.tag) + 2 : 0);
+      const own = visibleWidth(item.label) + 3;
+      const label =
+        own > labelWidth && own <= room
+          ? pad(item.label, own)
+          : pad(truncate(item.label, labelWidth - 3), labelWidth);
       const detail = item.inert ? style.muted(item.detail) : paint(item.detail);
       rows.push(spread(`  ${paint(label)}${detail}`, style.muted(item.tag), width));
     }
-    if (visible.length === 0) rows.push(style.muted("  No matches"));
+    if (visible.length === 0) rows.push(truncate(style.muted("  No matches"), width));
+    const chosen = this.selected();
+    if (describing) {
+      const text = chosen && !chosen.inert ? `${chosen.label}  ${chosen.detail}` : "";
+      const lines = text ? wrap(`  ${style.soft(text)}`, width, "  ") : [];
+      // A third row's worth is cut, with an ellipsis.
+      const second = lines.length > 2 ? truncate(`${lines[1]} ${lines[2]}`, width) : lines[1];
+      rows.push("", lines[0] ?? "", second ?? "");
+    }
     const keys = ["↑↓ navigate"];
     if (this.#tabs.length > 0) keys.push("tab category");
     if (visible.some(({ entry: item }) => !item.inert)) keys.push(`enter ${this.config.action}`);
@@ -261,7 +371,7 @@ export class Menu {
     // Past an informational row, look back from the end and on from elsewhere.
     const direction = target === count - 1 && target !== 0 ? -1 : target < this.#index ? -1 : 1;
     this.#index = target;
-    this.#skipInert(direction);
+    this.#skipInert(direction, false);
   }
 
   #switchTab(step: number): void {
@@ -283,12 +393,30 @@ export class Menu {
     return result;
   }
 
-  #skipInert(direction: number): void {
+  /**
+   * Moves off informational rows in `direction`. Moving a row at a time wraps
+   * around; a jump stops at the ends instead, turning back from one.
+   */
+  #skipInert(direction: number, wrapAround = true): void {
     const visible = this.#visible();
-    for (let step = 0; step < visible.length; step++) {
-      if (!visible[this.#index]?.entry.inert) return;
-      this.#index = (this.#index + direction + visible.length) % visible.length;
+    const chosen = (index: number) => visible[index] !== undefined && !visible[index].entry.inert;
+    if (chosen(this.#index)) return;
+    if (wrapAround) {
+      for (let step = 1; step < visible.length; step++) {
+        const index = (this.#index + direction * step + visible.length * step) % visible.length;
+        if (chosen(index)) {
+          this.#index = index;
+          return;
+        }
+      }
+      return;
     }
+    for (const way of [direction, -direction])
+      for (let index = this.#index + way; index >= 0 && index < visible.length; index += way)
+        if (chosen(index)) {
+          this.#index = index;
+          return;
+        }
   }
 }
 
@@ -299,12 +427,13 @@ export function infoPanel(
   width: number,
 ): string[] {
   const labelWidth = Math.max(...rows.map(([label]) => visibleWidth(label))) + 6;
-  const lines = [rule(width), style.bold(style.strong(title))];
+  const lines = [rule(width), truncate(style.bold(style.strong(title)), width)];
   for (const [label, value] of rows) {
     const indent = " ".repeat(labelWidth);
     const wrapped = value
       .split("\n")
-      .flatMap((line) => wrap(line, Math.max(10, width - labelWidth), "", true));
+      // Values break at spaces where they can, and a path anywhere.
+      .flatMap((line) => wrap(line, Math.max(10, width - labelWidth)));
     wrapped.forEach((line, index) => {
       const head = index === 0 ? style.bold(style.text(pad(`  ${label}`, labelWidth))) : indent;
       lines.push(truncate(head + style.muted(line), width));

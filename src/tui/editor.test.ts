@@ -82,3 +82,36 @@ describe("Editor", () => {
     assert.equal(editor.down(), false);
   });
 });
+
+describe("Editor history after clearing", () => {
+  it("starts again from the newest entry", () => {
+    const editor = new Editor();
+    for (const text of ["a", "b", "c"]) {
+      editor.set(text);
+      editor.take();
+    }
+    editor.historyUp();
+    editor.historyUp();
+    editor.clear();
+    editor.historyUp();
+    assert.equal(editor.text, "c");
+  });
+});
+
+describe("Editor history with entries of several lines", () => {
+  it("walks past one, and back to the draft", () => {
+    const editor = new Editor();
+    for (const text of ["first single line", "line one\nline two", "newest"]) {
+      editor.set(text);
+      editor.take();
+    }
+    editor.set("my draft");
+    for (let step = 0; step < 5; step++) editor.historyUp();
+    assert.equal(editor.text, "first single line");
+    for (let step = 0; step < 4; step++) editor.historyDown();
+    assert.equal(editor.text, "my draft");
+    // A draft of several lines is the user's own, which the keys move within.
+    editor.set("draft one\ndraft two");
+    assert.equal(editor.historyUp(), false);
+  });
+});

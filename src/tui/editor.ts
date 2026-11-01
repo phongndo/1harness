@@ -23,8 +23,11 @@ export class Editor {
     this.#cursor = this.#chars.length;
   }
 
+  /** Empties the composer; history starts again from its newest entry. */
   clear(): void {
     this.set("");
+    this.#historyIndex = this.#history.length;
+    this.#draft = "";
   }
 
   /** Clears the buffer and records its text in history. */
@@ -136,16 +139,25 @@ export class Editor {
     this.#cursor = start + chars.length;
   }
 
-  /** Moves through history when the buffer is a single line; returns false otherwise. */
+  /** Whether the text is the user's own draft of several lines, which ↑↓ move within. */
+  get #multilineDraft(): boolean {
+    return this.#historyIndex === this.#history.length && this.#chars.includes("\n");
+  }
+
+  /**
+   * Moves back through history, unless the text is a draft of several lines;
+   * returns false when it does not move.
+   */
   historyUp(): boolean {
-    if (this.#chars.includes("\n") || this.#historyIndex === 0) return false;
+    // A recalled entry of several lines is walked past like any other.
+    if (this.#multilineDraft || this.#historyIndex === 0) return false;
     if (this.#historyIndex === this.#history.length) this.#draft = this.text;
     this.set(this.#history[--this.#historyIndex] ?? "");
     return true;
   }
 
   historyDown(): boolean {
-    if (this.#chars.includes("\n") || this.#historyIndex >= this.#history.length) return false;
+    if (this.#multilineDraft || this.#historyIndex >= this.#history.length) return false;
     this.#historyIndex++;
     this.set(
       this.#historyIndex === this.#history.length
