@@ -18,7 +18,11 @@ export type InputEvent =
   /** The terminal's reply to a background color query. */
   | { type: "background"; light: boolean }
   /** The terminal's reply to a device attributes query, which every terminal answers. */
-  | { type: "attributes" };
+  | { type: "attributes" }
+  /** The terminal supports the Program Status Protocol (OSC 7501). */
+  | { type: "programStatus" }
+  /** The terminal gained or lost focus, reported once focus reporting is on. */
+  | { type: "focus"; focused: boolean };
 
 const PASTE_END = "\x1b[201~";
 
@@ -171,6 +175,9 @@ export class InputDecoder {
         const light = isLightBackground(body);
         if (light !== null) events.push({ type: "background", light });
       }
+      const compact = body.replace(/\s/g, "");
+      if (compact === "7501;?" || compact.startsWith("7501;?:"))
+        events.push({ type: "programStatus" });
       return end - index + (end === bell ? 1 : 2);
     }
     if (next === "O") {
@@ -223,6 +230,10 @@ export class InputDecoder {
     }
     if (raw.startsWith("?") && final === "c") {
       events.push({ type: "attributes" });
+      return length;
+    }
+    if (raw === "" && (final === "I" || final === "O")) {
+      events.push({ type: "focus", focused: final === "I" });
       return length;
     }
     const params = raw.split(";").map((part) => Number.parseInt(part, 10) || 0);

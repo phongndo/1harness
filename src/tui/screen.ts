@@ -38,13 +38,16 @@ export class Screen {
     if (this.#active) return;
     this.#active = true;
     this.invalidate();
-    this.#out.write("\x1b[?1049h\x1b[?7l\x1b[?2004h\x1b[?1000h\x1b[?1006h");
+    // Focus reports tell the program status whether the user can see the screen.
+    this.#out.write("\x1b[?1049h\x1b[?7l\x1b[?2004h\x1b[?1000h\x1b[?1006h\x1b[?1004h");
   }
 
   leave(): void {
     if (!this.#active) return;
     this.#active = false;
-    this.#out.write("\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?7h\x1b[0m\x1b[?25h\x1b[?1049l");
+    this.#out.write(
+      "\x1b[?1004l\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?7h\x1b[0m\x1b[?25h\x1b[?1049l",
+    );
   }
 
   /** Forgets what is on screen so the next frame repaints every row, as after a resize. */

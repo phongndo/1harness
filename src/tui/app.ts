@@ -35,6 +35,12 @@ import { InputDecoder, type InputEvent, type Key } from "./input.ts";
 import { Menu, entry, infoPanel, lineStep, type MenuEntry } from "./menu.ts";
 import { ChoicePrompt, type ChoiceConfig, type ChoiceResult } from "./prompt.ts";
 import { Screen, type CursorPosition } from "./screen.ts";
+import {
+  STATUS_QUERY,
+  StatusReporter,
+  statusRecords,
+  type ThreadStatusInput,
+} from "./program-status.ts";
 import { setLightTheme, style } from "./theme.ts";
 import { spread, truncate, visibleWidth } from "./text.ts";
 import { formatTokens, type Block } from "./transcript.ts";
@@ -75,6 +81,8 @@ const MENTION_LIMIT = 50;
 const BLINK_MS = 500;
 const WHEEL_ROWS = 3;
 const THEME_TIMEOUT_MS = 150;
+// Program status reports go out at most this often, coalescing bursts of events.
+const STATUS_INTERVAL_MS = 250;
 // Input held for the rest of a split escape sequence is released after this.
 const SEQUENCE_TIMEOUT_MS = 40;
 // The SDK warns that full access skips canUseTool, which 1harness keeps for later mode changes.
@@ -147,6 +155,21 @@ function describeSwitch(result: SwitchResult): { level: "info" | "warning"; text
   return { level: heavy ? "warning" : "info", text: lines.join("\n") };
 }
 
+/** What an approval asks to do, in one line, such as `Run: pnpm test`. */
+function approvalLine(request: Extract<HarnessRequest, { kind: "approval" }>): string {
+  const action = request.action;
+  switch (action.type) {
+    case "command":
+      return `Run: ${action.command}`;
+    case "file_change":
+      return `Edit ${action.paths.join(", ")}`;
+    case "tool":
+      return `Use ${action.tool}${request.title ? `: ${request.title}` : ""}`;
+    case "other":
+      return request.title;
+  }
+}
+
 function describeLimit(limit: RateLimit): string {
   const used = limit.usedPercent === null ? limit.status : `${Math.round(limit.usedPercent)}% used`;
   const resets =
@@ -214,6 +237,17 @@ export class App {
   #frame: NodeJS.Timeout | null = null;
   #sequenceTimer: NodeJS.Timeout | null = null;
   #themeReply: (() => void) | null = null;
+  /** Reports each thread's state to a terminal that supports it, such as Rex. */
+  #programStatus: StatusReporter | null = null;
+  #statusTimer: NodeJS.Timeout | null = null;
+  /**
+   * Whether the user is looking: the terminal's focus reports say so, and so
+   * does typing. Terminals report only changes, so until either arrives it is
+   * taken as no, which errs toward telling the user about finished work.
+   */
+  #focused = false;
+  /** How many of each thread's runs the user has seen, for which finished runs are news. */
+  #seenRuns = new Map<string, number>();
   #stderrWrite: typeof process.stderr.write | null = null;
   #exited!: () => void;
   #done = new Promise<void>((resolve) => {
@@ -394,7 +428,7 @@ export class App {
     this.#guard();
     this.#captureStderr();
     this.#screen.enter();
-    await this.#detectTheme();
+    await this.#detectTerminal();
 
     this.#home.transcript.add({
       kind: "banner",
@@ -418,27 +452,90 @@ export class App {
     await this.#done;
   }
 
-  /** Asks the terminal for its background; the device attributes reply bounds the wait. */
-  async #detectTheme(): Promise<void> {
-    const forced = process.env["ONEHARNESS_THEME"];
-    if (forced === "light" || forced === "dark") {
-      setLightTheme(forced === "light");
-      return;
-    }
+  /**
+   * Asks the terminal for its background and whether it takes program status
+   * reports; the device attributes reply, which every terminal sends, bounds
+   * the wait. Either can be set instead with ONEHARNESS_THEME and
+   * ONEHARNESS_PROGRAM_STATUS.
+   */
+  async #detectTerminal(): Promise<void> {
+    const theme = process.env["ONEHARNESS_THEME"];
+    const themeSet = theme === "light" || theme === "dark";
+    if (themeSet) setLightTheme(theme === "light");
+    const status = process.env["ONEHARNESS_PROGRAM_STATUS"];
+    if (status === "1") this.#enableStatus();
+    const query = `${themeSet ? "" : "\x1b]11;?\x1b\\"}${status === "0" || status === "1" ? "" : STATUS_QUERY}`;
+    if (query === "") return;
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, THEME_TIMEOUT_MS);
       this.#themeReply = () => {
         clearTimeout(timer);
         resolve();
       };
-      process.stdout.write("\x1b]11;?\x1b\\\x1b[c");
+      process.stdout.write(`${query}\x1b[c`);
     });
     this.#themeReply = null;
+  }
+
+  #enableStatus(): void {
+    this.#programStatus ??= new StatusReporter((data) => process.stdout.write(data));
+    this.#statusChanged();
+  }
+
+  /** Reports the threads' states soon, coalescing the events that changed them. */
+  #statusChanged(): void {
+    if (!this.#programStatus || this.#statusTimer || this.#exiting) return;
+    this.#statusTimer = setTimeout(() => {
+      this.#statusTimer = null;
+      this.#reportStatus();
+    }, STATUS_INTERVAL_MS);
+  }
+
+  #reportStatus(): void {
+    if (!this.#programStatus || this.#exiting) return;
+    // What finishes on screen while the user can see it is not news.
+    if (this.#currentId && this.#focused) this.#markSeen(this.#currentId);
+    const threads = this.#manager.list().map((thread) => this.#statusInput(thread));
+    this.#programStatus.update(statusRecords(threads, (id) => this.#seenRuns.get(id) ?? 0));
+  }
+
+  /** Marks the thread's finished runs seen; one still running is news when it ends. */
+  #markSeen(id: string): void {
+    const runs = this.#manager.get(id)?.runs ?? [];
+    const running = runs.at(-1)?.status === "running";
+    this.#seenRuns.set(id, runs.length - (running ? 1 : 0));
+  }
+
+  #statusInput(managed: ManagedThread): ThreadStatusInput {
+    const request = managed.thread.requests[0];
+    const run = managed.runs.at(-1);
+    return {
+      id: managed.id,
+      parentId: managed.parentId,
+      title: managed.title,
+      status: managed.status,
+      request: request
+        ? {
+            kind: request.kind,
+            title:
+              request.kind === "approval"
+                ? approvalLine(request)
+                : (request.questions[0]?.question ?? "A question"),
+          }
+        : null,
+      lastRun: run
+        ? { index: run.index, status: run.status, result: run.result, error: run.error }
+        : null,
+      error: managed.error,
+      activity: this.#views.get(managed.id)?.turn?.heading ?? null,
+      notify: managed.origin === "user",
+    };
   }
 
   /** Restores the terminal however the process ends. */
   #guard(): void {
     const restore = () => {
+      this.#programStatus?.clear();
       this.#screen.leave();
       if (this.#stderrWrite) process.stderr.write = this.#stderrWrite;
       if (this.#in.isTTY) this.#in.setRawMode(false);
@@ -597,6 +694,8 @@ export class App {
 
   #show(thread: ManagedThread): void {
     this.#currentId = thread.id;
+    // Opening a thread shows what it finished.
+    this.#statusChanged();
     this.#retired.delete(thread.id);
     // A prompt belongs to the thread it asks for; it comes back with that thread.
     if (this.#prompt && this.#prompt.asking.threadId !== thread.id) this.#prompt = null;
@@ -662,9 +761,10 @@ export class App {
     this.#files?.close();
     await this.#tools.close();
     await this.#extensions.close();
-    for (const timer of [this.#blinkTimer, this.#frame, this.#sequenceTimer]) {
+    for (const timer of [this.#blinkTimer, this.#frame, this.#sequenceTimer, this.#statusTimer]) {
       if (timer) clearTimeout(timer);
     }
+    this.#programStatus?.clear();
     this.#screen.leave();
     if (this.#stderrWrite) process.stderr.write = this.#stderrWrite;
     this.#in.setRawMode(false);
@@ -678,12 +778,15 @@ export class App {
   }
 
   #suspend(): void {
+    // A suspended 1harness reports nothing; its records come back when it resumes.
+    this.#programStatus?.clear();
     this.#screen.leave();
     this.#in.setRawMode(false);
     process.once("SIGCONT", () => {
       this.#in.setRawMode(true);
       this.#screen.enter();
       this.#renderNow();
+      this.#statusChanged();
     });
     process.kill(process.pid, "SIGTSTP");
   }
@@ -691,6 +794,7 @@ export class App {
   // Thread events
 
   #managerEvent(event: ManagerEvent): void {
+    this.#statusChanged();
     switch (event.type) {
       case "thread.created": {
         const thread = event.thread;
@@ -921,9 +1025,23 @@ export class App {
   }
 
   #handle(event: InputEvent): void {
+    if (
+      (event.type === "key" || event.type === "paste" || event.type === "wheel") &&
+      !this.#focused
+    ) {
+      this.#focused = true;
+      this.#statusChanged();
+    }
     switch (event.type) {
       case "attributes":
         this.#themeReply?.();
+        return;
+      case "programStatus":
+        if (process.env["ONEHARNESS_PROGRAM_STATUS"] !== "0") this.#enableStatus();
+        return;
+      case "focus":
+        this.#focused = event.focused;
+        this.#statusChanged();
         return;
       case "background":
         setLightTheme(event.light);

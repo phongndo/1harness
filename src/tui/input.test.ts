@@ -92,6 +92,18 @@ describe("InputDecoder", () => {
     ]);
   });
 
+  it("reads program status support and focus reports", () => {
+    const decoder = new InputDecoder();
+    assert.deepEqual(decoder.feed("\x1b]7501;?\x1b\\"), [{ type: "programStatus" }]);
+    assert.deepEqual(decoder.feed("\x1b]7501;? : states=idle,working,done,blocked,error\x07"), [
+      { type: "programStatus" },
+    ]);
+    assert.deepEqual(decoder.feed("\x1b[O\x1b[I"), [
+      { type: "focus", focused: false },
+      { type: "focus", focused: true },
+    ]);
+  });
+
   it("holds a split sequence until the rest arrives or it is flushed", () => {
     const decoder = new InputDecoder();
     assert.deepEqual(decoder.feed("\x1b[1;"), []);
