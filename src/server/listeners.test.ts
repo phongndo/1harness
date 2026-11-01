@@ -1,0 +1,139 @@
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { request } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, afterEach, before, describe, it } from "node:test";
+import { resolveServer } from "../client/hosts.ts";
+import { serverHello } from "../client/socket.ts";
+import { Host } from "../host/host.ts";
+import { HostServer } from "./http.ts";
+import { listen } from "./listeners.ts";
+import type { TailscaleRunner } from "./tailscale.ts";
+
+let root: string;
+let host: Host;
+let server: HostServer;
+
+before(() => {
+  root = mkdtempSync(join(tmpdir(), "1harness-listen-"));
+});
+
+after(() => rmSync(root, { recursive: true, force: true }));
+
+afterEach(async () => {
+  await server.close();
+  await host.shutdown();
+});
+
+function start(): void {
+  host = new Host({
+    version: "test",
+    cwd: root,
+    configDir: join(root, "config"),
+    stateDir: join(root, "state"),
+    idleCloseMs: 0,
+  });
+  server = new HostServer(host, { version: "test", autostarted: false });
+}
+
+/** A tailscale that owns this node as me@example.com and knows who is at each address. */
+function tailscale(callers: Record<string, string>): TailscaleRunner {
+  return async (args) => {
+    if (args[0] === "status")
+      return JSON.stringify({
+        Self: { UserID: 1, DNSName: "box.tailnet.ts.net.", TailscaleIPs: ["127.0.0.1"] },
+        User: { "1": { LoginName: "me@example.com" } },
+      });
+    if (args[0] === "whois") {
+      const login = callers[args[2] ?? ""];
+      if (!login) throw new Error("no such peer");
+      return JSON.stringify({ Node: { Name: "laptop." }, UserProfile: { LoginName: login } });
+    }
+    throw new Error(`unexpected tailscale ${args.join(" ")}`);
+  };
+}
+
+describe("listeners", () => {
+  it("lets the node's owner in on the tailnet, and names them", async () => {
+    start();
+    const { ports, message } = await listen(server, "tailnet://127.0.0.1:0", {
+      tailscale: tailscale({ "127.0.0.1": "me@example.com" }),
+    });
+    assert.match(message, /for me@example\.com/);
+    const hello = await serverHello({ url: `http://127.0.0.1:${ports[0]}` });
+    assert.equal(hello.identity, "me@example.com");
+  });
+
+  it("turns away other tailnet users unless told to let identified ones in", async () => {
+    start();
+    const strict = await listen(server, "tailnet://127.0.0.1:0", {
+      tailscale: tailscale({ "127.0.0.1": "friend@example.com" }),
+    });
+    await assert.rejects(
+      serverHello({ url: `http://127.0.0.1:${strict.ports[0]}` }),
+      /only me@example\.com may use this 1harness/,
+    );
+    const open = await listen(server, "tailnet://127.0.0.1:0", {
+      tailscale: tailscale({ "127.0.0.1": "friend@example.com" }),
+      allowIdentified: true,
+    });
+    assert.equal(
+      (await serverHello({ url: `http://127.0.0.1:${open.ports[0]}` })).identity,
+      "friend@example.com",
+    );
+  });
+
+  it("takes the caller from Tailscale Serve's headers on its socket", async () => {
+    start();
+    const path = join(root, "serve.sock");
+    await listen(server, `tailnet-serve://${path}`, { tailscale: tailscale({}) });
+    const hello = (login: string) =>
+      new Promise<number>((resolve, reject) => {
+        const outgoing = request({
+          socketPath: path,
+          path: "/v1/hello",
+          headers: { "Tailscale-User-Login": login },
+        });
+        outgoing.on("error", reject);
+        outgoing.on("response", (response) => {
+          response.resume();
+          resolve(response.statusCode ?? 0);
+        });
+        outgoing.end();
+      });
+    assert.equal(await hello("me@example.com"), 200);
+    assert.equal(await hello("someone@else.com"), 403);
+  });
+
+  it("refuses plain TCP unless anonymous callers are allowed", async () => {
+    start();
+    await assert.rejects(listen(server, "tcp://127.0.0.1:0"), /--allow-anonymous/);
+    const { ports } = await listen(server, "tcp://127.0.0.1:0", { allowAnonymous: true });
+    assert.equal((await serverHello({ url: `http://127.0.0.1:${ports[0]}` })).identity, null);
+    await assert.rejects(listen(server, "ftp://x:1"), /Cannot listen on/);
+  });
+});
+
+describe("resolveServer", () => {
+  it("reads names, addresses, and sockets", () => {
+    const config = join(root, "hosts");
+    const env = { XDG_CONFIG_HOME: config, XDG_RUNTIME_DIR: "/run/user/9" };
+    assert.deepEqual(resolveServer(undefined, env), {
+      target: { socket: "/run/user/9/1harness/server.sock" },
+      label: "local",
+      local: true,
+    });
+    assert.deepEqual(resolveServer("z:7330", env).target, { url: "http://z:7330" });
+    assert.deepEqual(resolveServer("unix:/tmp/a.sock", env).target, { socket: "/tmp/a.sock" });
+    assert.throws(() => resolveServer("z", env), /No server named z/);
+    const dir = join(config, "1harness");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "hosts.json"), JSON.stringify({ hosts: { z: "z.tailnet:7330" } }));
+    assert.deepEqual(resolveServer("z", env), {
+      target: { url: "http://z.tailnet:7330" },
+      label: "z",
+      local: false,
+    });
+  });
+});

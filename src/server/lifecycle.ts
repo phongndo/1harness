@@ -21,7 +21,7 @@ import { Host } from "../host/host.ts";
 import type { ServerHello } from "../protocol.ts";
 import { Store, StoreLocked } from "../store/store.ts";
 import { HostServer } from "./http.ts";
-import { listen } from "./listeners.ts";
+import { listen, type ListenerOptions } from "./listeners.ts";
 
 /** How long an autostarted server stays once nobody is connected and nothing is working. */
 export const IDLE_EXIT_MS = 10_000;
@@ -44,6 +44,8 @@ export interface RunOptions {
    * may call. Set up by `listeners` in the server's own module.
    */
   extraListen?: string[];
+  /** Who the extra listeners let in. */
+  listeners?: ListenerOptions;
   log?: (line: string) => void;
 }
 
@@ -133,7 +135,8 @@ export async function runServer(options: RunOptions): Promise<RunningServer | nu
     chmodSync(socket, 0o600);
     ownSocket = true;
   }
-  for (const listener of options.extraListen ?? []) log(await listen(server, listener));
+  for (const listener of options.extraListen ?? [])
+    log((await listen(server, listener, options.listeners ?? {})).message);
 
   let stopping: Promise<void> | null = null;
   let finished!: () => void;

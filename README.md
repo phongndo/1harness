@@ -174,6 +174,29 @@ The NixOS and home-manager modules start the server from its socket; the
 nix-darwin one runs a LaunchAgent. Each reads `~/.config/1harness/server.env`
 too, for harnesses installed outside Nix.
 
+### From another machine
+
+A server can listen on more than its socket. On the machine with your folders
+and harness logins:
+
+```sh
+1harness server run --extra-listen tailnet://:7330   # or put it in the service's arguments
+```
+
+`tailnet://:PORT` listens on the machine's Tailscale addresses and asks
+tailscaled who each caller is; only the machine's owner gets in, unless
+`--tailnet-allow-identified` lets in anyone tailscaled identifies.
+`tailnet-serve:///path/to/socket` makes a socket for `tailscale serve` to proxy
+to, which names the caller. A plain `tcp://HOST:PORT` lets in anyone who can
+reach it, so it needs `--allow-anonymous`.
+
+From another machine, `1harness -S host:7330` connects to it, or name it once
+with `1harness hosts add z z.example.ts.net:7330` and use `-S z`, or set
+`ONEHARNESS_SERVER`. Threads, files, and logins stay on the server's machine;
+a thread starts in its home folder unless `-C` names one there. `1harness
+threads`, `watch`, and `whoami` take `-S` too, and `1harness hosts check` says
+which servers answer and who each takes you to be.
+
 ### Threads that last
 
 1harness keeps every thread in `~/.local/state/1harness/1harness.db` (SQLite,
@@ -272,9 +295,10 @@ harness's agent shares.
   thread's transcript is a log that a client replays to show it.
 - `src/client` is a client's side of that: a connection, in-process or over the
   server's socket, and every thread's state kept current from the feed.
-- `src/server` serves the host over HTTP/1.1 on a Unix socket: `GET /v1/hello`,
-  `POST /v1/rpc`, and `GET /v1/events?after=<seq>`, the feed as lines of JSON.
-  It starts, stops when idle, and hands over to the next server.
+- `src/server` serves the host over HTTP/1.1 on a Unix socket, and on tailnet
+  listeners: `GET /v1/hello`, `POST /v1/rpc`, and `GET /v1/events?after=<seq>`,
+  the feed as lines of JSON. It starts, stops when idle, and hands over to the
+  next server.
 - `src/store` keeps threads in SQLite.
 - `src/tui` is a full-screen terminal UI on the alternate screen, styled after
   [fx](https://github.com/vercel-labs/fx). Each block's rows are cached by width,

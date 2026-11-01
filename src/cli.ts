@@ -20,6 +20,8 @@ import { Host } from "./host/host.ts";
 import { PROTOCOL_VERSION } from "./protocol.ts";
 import { serverCommand } from "./server/cli.ts";
 import { ensureServer } from "./server/lifecycle.ts";
+import { hostsCommand, whoami } from "./client/hosts-cli.ts";
+import { resolveServer } from "./client/hosts.ts";
 import { threadsCommand } from "./client/threads-cli.ts";
 import { watch } from "./client/watch.ts";
 import { Store, StoreLocked } from "./store/store.ts";
@@ -33,6 +35,8 @@ Usage: 1harness [options] [prompt]
        1harness server <command>   run, start, stop, or check the server
        1harness threads [words]    list this folder's threads, or search them; show <id> prints one
        1harness watch              report every thread's status to the terminal (OSC 7501)
+       1harness hosts <command>    name servers on other machines, for -S
+       1harness whoami             who the server takes you to be
 
 Threads run in the 1harness server, which keeps them working after the
 terminal quits; it starts in the background when none is running.
@@ -46,7 +50,10 @@ Options:
       --mode <mode>      supervised, auto-edit, auto, or full-access (default: "mode"
                          in ~/.config/1harness/settings.json, else ${DEFAULT_RUNTIME_MODE})
       --plan             start in plan mode
-  -C, --cwd <dir>        working folder (default: current folder)
+  -C, --cwd <dir>        working folder (default: current folder; on another
+                         machine's server, its home)
+  -S, --server <name>    use another server: a name from \`1harness hosts\`, host:port,
+                         or a socket path (default: ONEHARNESS_SERVER, else this machine's)
   -r, --resume <id>      reopen a thread: 1harness's, such as t42, or a harness's own
   -x, --extension <path> load an extension module (repeatable); others load from
                          ~/.config/1harness/extensions and a trusted .1harness/extensions
@@ -58,6 +65,7 @@ Options:
 Environment:
   ONEHARNESS_AUTOSTART=0    run in this one process, with no server
   ONEHARNESS_SOCKET         the server's socket (default: $XDG_RUNTIME_DIR/1harness/server.sock)
+  ONEHARNESS_SERVER         the server to use, as -S names one
   ONEHARNESS_CLAUDE_PATH    claude executable (default: claude on PATH, else the SDK's copy)
   ONEHARNESS_CODEX_PATH     codex executable (default: codex on PATH)
   ONEHARNESS_OPENCODE_PATH  opencode executable (default: opencode on PATH)
@@ -160,17 +168,34 @@ async function print(
 }
 
 /** A client of the server, which starts one in the background when none answers. */
-async function connectClient(version: string, extensions: string[]): Promise<HostClient> {
-  const socket = socketFile();
-  const hello = await ensureServer({ target: { socket }, autostart: true });
+/**
+ * Finds the server `spec` names, the local one when it names none, starting
+ * a local one in the background when none answers.
+ */
+async function reach(version: string, spec: string | undefined) {
+  const { target, label, local } = resolveServer(spec);
+  // Only the local socket's server is started on demand; another machine's runs there.
+  const autostart = local && "socket" in target && target.socket === socketFile();
+  const hello = await ensureServer({ target, autostart });
   if (hello.minProtocol > PROTOCOL_VERSION || hello.protocol < PROTOCOL_VERSION)
     throw new Error(
-      `the running server is 1harness ${hello.version}, which this one cannot talk to; stop it with \`1harness server stop\``,
+      `${label} runs 1harness ${hello.version}, which this one cannot talk to${local ? "; stop it with `1harness server stop`" : ""}`,
     );
+  return { target, label, local, hello };
+}
+
+/** A client of the server `spec` names; it says hello when connected. */
+async function connectClient(
+  version: string,
+  extensions: string[],
+  spec: string | undefined,
+): Promise<HostClient> {
+  const { target, local } = await reach(version, spec);
   const id = newClientId();
   return new HostClient(
-    new SocketConnection({ socket }, id),
-    { cwd: process.cwd(), version, extensions },
+    new SocketConnection(target, id),
+    // On another machine, this folder is not there; threads start in its home.
+    { cwd: local ? process.cwd() : "~", version, extensions: local ? extensions : [] },
     id,
   );
 }
@@ -187,12 +212,17 @@ async function interactive(options: {
   version: string;
   extensions: string[];
   warnings: string[];
+  /** The server to use, as `-S` named it. */
+  server: string | undefined;
+  /** Whether `-C` named the folder, which on another machine is that machine's. */
+  cwdGiven: string | undefined;
 }): Promise<void> {
   const { session, version } = options;
   const extensions = options.extensions.map((path) => resolve(path));
   const id = newClientId();
   let client: HostClient;
   const warnings: string[] = [];
+  const notes: string[] = [];
   if (process.env["ONEHARNESS_AUTOSTART"] === "0") {
     let store: Store | null = null;
     try {
@@ -217,20 +247,26 @@ async function interactive(options: {
       id,
     );
   } else {
-    const socket = socketFile();
-    const hello = await ensureServer({ target: { socket }, autostart: true });
-    if (hello.minProtocol > PROTOCOL_VERSION || hello.protocol < PROTOCOL_VERSION)
-      throw new Error(
-        `the running server is 1harness ${hello.version}, which this one cannot talk to; stop it with \`1harness server stop\``,
-      );
+    const { target, label, local, hello } = await reach(version, options.server);
     // The server reports problems with the config it read itself.
     if (hello.version !== version)
       warnings.push(
-        `The running server is 1harness ${hello.version}; \`1harness server stop\` lets the next one start as ${version}.`,
+        local
+          ? `The running server is 1harness ${hello.version}; \`1harness server stop\` lets the next one start as ${version}.`
+          : `${label} runs 1harness ${hello.version}; this is ${version}.`,
       );
+    if (!local) {
+      // Folders and extension modules are the other machine's.
+      session.cwd = options.cwdGiven ?? "~";
+      if (extensions.length > 0)
+        warnings.push(
+          `Extensions named with -x load on this machine only; ${label} does not load them.`,
+        );
+      notes.push(`Connected to ${label}${hello.identity ? ` as ${hello.identity}` : ""}.`);
+    }
     client = new HostClient(
-      new SocketConnection({ socket }, id),
-      { cwd: session.cwd, version, extensions },
+      new SocketConnection(target, id),
+      { cwd: session.cwd, version, extensions: local ? extensions : [] },
       id,
     );
   }
@@ -241,6 +277,7 @@ async function interactive(options: {
     version,
     prompt: options.prompt,
     warnings,
+    notes,
   }).run();
 }
 
@@ -250,15 +287,20 @@ try {
       version: string;
     }
   ).version;
-  const [command, ...rest] = process.argv.slice(2);
+  const { args, server } = serverFlag(process.argv.slice(2));
+  const [command, ...rest] = args;
   if (command === "server") {
     process.exitCode = await serverCommand(rest, manifestVersion);
   } else if (command === "threads") {
-    process.exitCode = await threadsCommand(rest, () => connectClient(manifestVersion, []));
+    process.exitCode = await threadsCommand(rest, () => connectClient(manifestVersion, [], server));
   } else if (command === "watch") {
-    await watch(await connectClient(manifestVersion, []), process.stdout);
+    await watch(await connectClient(manifestVersion, [], server), process.stdout);
+  } else if (command === "hosts") {
+    process.exitCode = await hostsCommand(rest);
+  } else if (command === "whoami") {
+    process.exitCode = await whoami(server);
   } else {
-    await main();
+    await main(args, server);
   }
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
@@ -266,8 +308,31 @@ try {
   process.exitCode = 2;
 }
 
-async function main(): Promise<void> {
+/**
+ * Takes `-S`/`--server` out of the arguments, wherever it is, since every
+ * command that talks to a server takes it; `ONEHARNESS_SERVER` is the default.
+ */
+function serverFlag(argv: string[]): { args: string[]; server: string | undefined } {
+  const args: string[] = [];
+  let server = process.env["ONEHARNESS_SERVER"] || undefined;
+  for (let index = 0; index < argv.length; index++) {
+    const arg = argv[index] ?? "";
+    if (arg === "--") {
+      args.push(...argv.slice(index));
+      break;
+    }
+    if (arg === "-S" || arg === "--server") {
+      server = argv[++index];
+      if (!server) throw new Error(`${arg} names a server`);
+    } else if (arg.startsWith("--server=")) server = arg.slice("--server=".length);
+    else args.push(arg);
+  }
+  return { args, server };
+}
+
+async function main(argv: string[], server: string | undefined): Promise<void> {
   const { values, positionals } = parseArgs({
+    args: argv,
     allowPositionals: true,
     options: {
       harness: { type: "string", short: "H" },
@@ -331,6 +396,8 @@ async function main(): Promise<void> {
         version: manifest.version,
         extensions,
         warnings,
+        server,
+        cwdGiven: values.cwd,
       });
     }
   }

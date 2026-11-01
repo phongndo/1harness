@@ -9,7 +9,8 @@ import {
 import type { HarnessId, SessionOptions, UserInput } from "../core/events.ts";
 import { FileIndex, mentionedImages } from "../core/files.ts";
 import { realpathSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
+import { homedir } from "node:os";
+import { join as joinPath, resolve as resolvePath } from "node:path";
 import { configDir, stateDir } from "../core/paths.ts";
 import { errorMessage, type Thread, type ThreadEvent } from "../core/thread.ts";
 import { formatTokens } from "../core/wording.ts";
@@ -105,6 +106,12 @@ export interface HostOptions {
   store?: Store | null;
   /** Closed threads last used longer ago than this are deleted when the host starts; pinned ones stay. */
   retainClosedDays?: number | null;
+}
+
+/** A folder a client named, with `~` as the home of the user the host runs as. */
+function expandHome(path: string): string {
+  if (path === "~") return homedir();
+  return path.startsWith("~/") ? joinPath(homedir(), path.slice(2)) : path;
 }
 
 /** A harness's name as people know it, such as `Claude Code`. */
@@ -1013,8 +1020,10 @@ export class Host {
     const managed = this.manager.get(threadId);
     if (!managed || managed.status === "closed" || managed.openedBy !== client.id) return;
     const thread = managed.thread;
+    // A fork has the turns it came from, though it has run none of its own.
     const empty =
       managed.origin === "user" &&
+      managed.forkedFrom === null &&
       managed.runs.length === 0 &&
       thread.queue.length === 0 &&
       thread.idle &&
@@ -1131,8 +1140,8 @@ export class Host {
   #methods(): { [M in Method]: (client: Client, params: Params<M>) => Promise<Result<M>> } {
     return {
       "client.hello": async (client, params) => {
-        client.cwd = params.cwd;
-        client.extensions = params.extensions.map((path) => resolvePath(params.cwd, path));
+        client.cwd = expandHome(params.cwd);
+        client.extensions = params.extensions.map((path) => resolvePath(client.cwd, path));
         client.connected = true;
         const warnings = [...(this.#options.warnings ?? [])];
         const set = this.#set(client.cwd, client.extensions);
@@ -1187,7 +1196,9 @@ export class Host {
           .toSorted((a, b) => b.updatedAt - a.updatedAt)
           .slice(0, limit ?? 200);
       },
-      "thread.open": async (client, { harness, settings, title }) => {
+      "thread.open": async (client, { harness, settings: asked, title }) => {
+        // A client on another machine names folders as they are here.
+        const settings = { ...asked, cwd: expandHome(asked.cwd) };
         let created: ManagedThread | null = null;
         const unsubscribe = this.manager.subscribe((event) => {
           if (event.type === "thread.created" && event.thread.openedBy === client.id)

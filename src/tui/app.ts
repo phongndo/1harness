@@ -59,6 +59,8 @@ export interface AppOptions {
   prompt: string | null;
   /** Problems the terminal found itself, shown once the screen is up. */
   warnings: string[];
+  /** Things worth saying once the screen is up, such as which server it reached. */
+  notes?: string[];
 }
 
 const KEYS: [string, string][] = [
@@ -180,6 +182,7 @@ export class App {
   #completions = new Map<string, Completions | null | Promise<void>>();
   #context: CommandContext;
   #warnings: string[];
+  #notes: string[];
   /** Commands the harness runs itself, shown beside 1harness's own. */
   #nativeCommands: NativeCommand[] = [];
   /** Whether the host keeps threads, so one can be resumed by its 1harness ID. */
@@ -246,6 +249,7 @@ export class App {
     for (const command of [...BUILTIN_COMMANDS, ...this.#clientCommands()])
       this.#commands.register(command);
     this.#warnings = options.warnings;
+    this.#notes = options.notes ?? [];
     this.#client.on((event) => this.#hostEvent(event));
   }
 
@@ -548,6 +552,7 @@ export class App {
       subtitle: `v${this.#version} · Run /help for commands`,
     });
     for (const warning of this.#warnings) this.#notice("warning", warning);
+    for (const note of this.#notes) this.#notice("info", note);
     const initial = this.#editor.text;
     this.#editor.clear();
     this.#renderNow();

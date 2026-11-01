@@ -14,7 +14,11 @@ started with \`server start\` or by a service manager keeps running.
 Commands:
   run                 run in the foreground, as a service manager or container does
     --autostarted       stop once idle, as one a client started does
-    --extra-listen <a>  also listen on <a>, such as tailnet://:7330 (repeatable)
+    --extra-listen <a>  also listen on <a> (repeatable): tailnet://:PORT on this node's
+                        tailnet addresses, for its owner only; tailnet-serve:///PATH, a
+                        socket for \`tailscale serve\`; or tcp://HOST:PORT
+    --tailnet-allow-identified  let in anyone tailscale identifies, not only the owner
+    --allow-anonymous   allow tcp://, which lets in anyone who can reach it
   start               start in the background, unless one is running
   status              say whether one is running, and where
   logs [--follow]     show what a background server wrote
@@ -60,6 +64,8 @@ export async function serverCommand(args: string[], version: string): Promise<nu
           autostarted: { type: "boolean" },
           "idle-exit": { type: "string" },
           "extra-listen": { type: "string", multiple: true },
+          "tailnet-allow-identified": { type: "boolean" },
+          "allow-anonymous": { type: "boolean" },
         },
       });
       const idle =
@@ -70,6 +76,10 @@ export async function serverCommand(args: string[], version: string): Promise<nu
         autostarted: values.autostarted === true,
         ...(idle !== undefined && Number.isFinite(idle) ? { idleExitMs: idle } : {}),
         extraListen: values["extra-listen"] ?? [],
+        listeners: {
+          allowIdentified: values["tailnet-allow-identified"] === true,
+          allowAnonymous: values["allow-anonymous"] === true,
+        },
         log: (text) => process.stderr.write(`${new Date().toISOString()} ${text}\n`),
       });
       if (running) await running.stopped;
