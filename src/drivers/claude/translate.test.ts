@@ -227,6 +227,37 @@ describe("ClaudeTranslator", () => {
     });
   });
 
+  it("tracks background tasks until Claude reports their end", () => {
+    const translator = new ClaudeTranslator();
+    const system = (fields: Record<string, unknown>) =>
+      translator.translate(message({ type: "system", session_id: "s", uuid: "u", ...fields }));
+    system({
+      subtype: "task_started",
+      task_id: "a",
+      description: "Explore the parser",
+      is_backgrounded: true,
+    });
+    system({
+      subtype: "task_started",
+      task_id: "b",
+      description: "Run the tests",
+      is_backgrounded: false,
+    });
+    // A foreground task blocks its own turn, so only background ones outlast it.
+    assert.deepEqual(translator.backgroundWork, ["Explore the parser"]);
+    system({ subtype: "task_updated", task_id: "b", patch: { is_backgrounded: true } });
+    assert.deepEqual(translator.backgroundWork, ["Explore the parser", "Run the tests"]);
+    system({ subtype: "task_updated", task_id: "b", patch: { status: "killed" } });
+    system({
+      subtype: "task_notification",
+      task_id: "a",
+      status: "completed",
+      output_file: "",
+      summary: "done",
+    });
+    assert.deepEqual(translator.backgroundWork, []);
+  });
+
   it("builds one task list from Claude's task tools", () => {
     const translator = new ClaudeTranslator();
     const call = (id: string, name: string, input: object, result: object) => {

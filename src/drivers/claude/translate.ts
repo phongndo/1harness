@@ -306,6 +306,12 @@ export class ClaudeTranslator {
   #streamed = new Map<string, StreamedBlock[]>();
   #tools = new Map<string, Item>();
   #taskTools = new Map<string, string>();
+  /**
+   * Tasks Claude has started and not reported the end of, by task ID. Only
+   * background ones count as running past a turn: Claude always reports their
+   * end, since that is what wakes it, where a stopped foreground task may not.
+   */
+  #work = new Map<string, { description: string; background: boolean }>();
   /** Task list tool calls awaiting results, and the task list they build. */
   #taskCalls = new Map<string, { name: string; input: Record<string, unknown> }>();
   #tasks = new Map<string, TodoStep>();
@@ -340,6 +346,13 @@ export class ClaudeTranslator {
     const saw = this.#sawText;
     this.#sawText = false;
     return saw;
+  }
+
+  /** What each task Claude is still running does, such as a background agent. */
+  get backgroundWork(): string[] {
+    return [...this.#work.values()]
+      .filter((task) => task.background)
+      .map((task) => task.description);
   }
 
   /** Clears the transient retry line once a turn ends. */
@@ -738,8 +751,24 @@ export class ClaudeTranslator {
       case "permission_denied":
         return [this.notice("warning", `${message.tool_name} was denied: ${message.message}`)];
       case "task_started": {
+        this.#work.set(message.task_id, {
+          description: message.description,
+          background: message.is_backgrounded === true,
+        });
         if (message.tool_use_id === undefined) return [];
         this.#taskTools.set(message.task_id, message.tool_use_id);
+        return [];
+      }
+      case "task_updated": {
+        const task = this.#work.get(message.task_id);
+        const { status, description, is_backgrounded: background } = message.patch;
+        if (status === "completed" || status === "failed" || status === "killed")
+          this.#work.delete(message.task_id);
+        else if (task)
+          this.#work.set(message.task_id, {
+            description: description ?? task.description,
+            background: background ?? task.background,
+          });
         return [];
       }
       case "task_progress": {
@@ -753,6 +782,7 @@ export class ClaudeTranslator {
         return [{ type: "item.updated", item: updated }];
       }
       case "task_notification": {
+        this.#work.delete(message.task_id);
         const toolUseId = message.tool_use_id ?? this.#taskTools.get(message.task_id);
         const item = toolUseId === undefined ? undefined : this.#tools.get(toolUseId);
         if (item?.kind === "agent") return [];

@@ -260,6 +260,11 @@ export class ClaudeSession implements HarnessSession {
       }));
   }
 
+  /** Tasks still running between turns, such as background agents and shells. */
+  backgroundTasks(): string[] {
+    return this.#turn ? [] : this.#translator.backgroundWork;
+  }
+
   async runCommand(name: string): Promise<void> {
     throw new Error(`/${name} runs as a turn`);
   }
