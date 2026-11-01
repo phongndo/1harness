@@ -7,6 +7,9 @@
   pnpmConfigHook,
   makeWrapper,
   autoPatchelfHook,
+  # html2term draws images and pages for terminals; without it, PNGs show as
+  # they are and pages as their text.
+  html2term ? null,
 }:
 
 let
@@ -63,7 +66,10 @@ stdenv.mkDerivation (finalAttrs: {
     rm -rf $out/lib/1harness/src/testing
     find $out/lib/1harness/src -name '*.test.ts' -delete
     makeWrapper ${lib.getExe nodejs_24} $out/bin/1harness \
-      --add-flags $out/lib/1harness/src/cli.ts
+      --add-flags $out/lib/1harness/src/cli.ts${
+        lib.optionalString (html2term != null)
+          " --set-default HTML2TERM_BIN ${lib.getExe html2term}"
+      }
     runHook postInstall
   '';
 
