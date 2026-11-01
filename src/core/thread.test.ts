@@ -497,4 +497,71 @@ describe("Thread", () => {
     assert.equal(thread.parked, false);
     assert.equal(thread.closed, true);
   });
+
+  it("wakes for messages a dead session left queued, and holds new ones while it parks", async () => {
+    const { session, thread } = await setup();
+    let woke = 0;
+    const next = new FakeSession();
+    thread.setWaker(async () => {
+      woke++;
+      await thread.replaceSession([attempt(next)]);
+    });
+    thread.send({ text: "running" });
+    thread.send({ text: "waiting" });
+    // The harness dies with a message still queued.
+    session.events.push({ type: "session.closed", error: "crashed" });
+    await settle();
+    await settle();
+    assert.equal(woke, 1);
+    assert.deepEqual(next.turns, ["waiting"]);
+    next.events.push({ type: "turn.started", turnId: "n" });
+    next.events.push({ type: "turn.ended", turnId: "n", status: "completed", error: null });
+    await settle();
+
+    // A message sent while the idle session closes waits for the one that wakes it.
+    let finish!: () => void;
+    const slow = Object.assign(next, {
+      close: () =>
+        new Promise<void>((resolve) => {
+          finish = () => {
+            next.events.end();
+            resolve();
+          };
+        }),
+    });
+    const after = new FakeSession();
+    thread.setWaker(async () => {
+      woke++;
+      await thread.replaceSession([attempt(after)]);
+    });
+    const parking = thread.park();
+    thread.send({ text: "meanwhile" });
+    await settle();
+    assert.deepEqual(slow.turns, ["waiting"]);
+    finish();
+    await parking;
+    await settle();
+    await settle();
+    assert.equal(woke, 2);
+    assert.deepEqual(after.turns, ["meanwhile"]);
+    await thread.close();
+  });
+
+  it("drops its queue when it closes, and keeps a steered message's request ID", async () => {
+    const { session, thread } = await setup();
+    const dropped: string[] = [];
+    const recorded: (string | undefined)[] = [];
+    thread.subscribe((event) => {
+      if (event.type === "message.dropped") dropped.push(event.messageId);
+      if (event.type === "message.recorded") recorded.push(event.message.requestId);
+    });
+    thread.send({ text: "first" });
+    session.events.push({ type: "turn.started", turnId: "a" });
+    await settle();
+    await thread.steer({ text: "join in" }, undefined, { requestId: "r-steer" });
+    const queued = thread.send({ text: "later" });
+    assert.ok(recorded.includes("r-steer"));
+    await thread.close();
+    assert.deepEqual(dropped, [queued.id]);
+  });
 });
