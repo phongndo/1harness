@@ -708,6 +708,7 @@ export class Host {
       background: thread.session?.backgroundTasks?.() ?? [],
       commandsVersion: this.#commandsVersion.get(managed.id) ?? 0,
       openedBy: managed.openedBy,
+      seenRuns: this.#seenRuns.get(managed.id) ?? 0,
       pinned: this.#flags.get(managed.id)?.pinned ?? false,
       archived: this.#flags.get(managed.id)?.archived ?? false,
     };
@@ -1098,6 +1099,7 @@ export class Host {
       background: [],
       commandsVersion: 0,
       openedBy: null,
+      seenRuns: row.seenRuns,
       pinned: row.pinned,
       archived: row.archived,
     };
@@ -1111,6 +1113,7 @@ export class Host {
     this.#seenRuns.set(id, managed.runs.length - (running ? 1 : 0));
     this.#dirty.add(id);
     this.#scheduleFlush();
+    this.#announce(managed);
   }
 
   #methods(): { [M in Method]: (client: Client, params: Params<M>) => Promise<Result<M>> } {
@@ -1275,6 +1278,16 @@ export class Host {
       },
       "thread.respond": async (_client, { threadId, requestId, response }) => {
         await this.#open(threadId).thread.respond(requestId, response);
+        return null;
+      },
+      "thread.seen": async (_client, { threadId, runs }) => {
+        const managed = this.manager.get(threadId);
+        if (managed && runs > (this.#seenRuns.get(threadId) ?? 0)) {
+          this.#seenRuns.set(threadId, Math.min(runs, managed.runs.length));
+          this.#dirty.add(threadId);
+          this.#scheduleFlush();
+          this.#announce(managed);
+        }
         return null;
       },
       "thread.stop": async (_client, { threadId }) => {

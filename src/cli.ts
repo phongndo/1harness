@@ -20,6 +20,7 @@ import { Host } from "./host/host.ts";
 import { PROTOCOL_VERSION } from "./protocol.ts";
 import { serverCommand } from "./server/cli.ts";
 import { ensureServer } from "./server/lifecycle.ts";
+import { watch } from "./client/watch.ts";
 import { Store, StoreLocked } from "./store/store.ts";
 import { App } from "./tui/app.ts";
 
@@ -29,6 +30,7 @@ One terminal UI for ${labels.length > 1 ? `${labels.slice(0, -1).join(", ")}, an
 
 Usage: 1harness [options] [prompt]
        1harness server <command>   run, start, stop, or check the server
+       1harness watch              report every thread's status to the terminal (OSC 7501)
 
 Threads run in the 1harness server, which keeps them working after the
 terminal quits; it starts in the background when none is running.
@@ -155,6 +157,22 @@ async function print(
   return status;
 }
 
+/** A client of the server, which starts one in the background when none answers. */
+async function connectClient(version: string, extensions: string[]): Promise<HostClient> {
+  const socket = socketFile();
+  const hello = await ensureServer({ target: { socket }, autostart: true });
+  if (hello.minProtocol > PROTOCOL_VERSION || hello.protocol < PROTOCOL_VERSION)
+    throw new Error(
+      `the running server is 1harness ${hello.version}, which this one cannot talk to; stop it with \`1harness server stop\``,
+    );
+  const id = newClientId();
+  return new HostClient(
+    new SocketConnection({ socket }, id),
+    { cwd: process.cwd(), version, extensions },
+    id,
+  );
+}
+
 /**
  * Runs the terminal UI: through the 1harness server, started in the
  * background when none is running, so threads keep working after it quits;
@@ -233,6 +251,8 @@ try {
   const [command, ...rest] = process.argv.slice(2);
   if (command === "server") {
     process.exitCode = await serverCommand(rest, manifestVersion);
+  } else if (command === "watch") {
+    await watch(await connectClient(manifestVersion, []), process.stdout);
   } else {
     await main();
   }

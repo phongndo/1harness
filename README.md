@@ -150,6 +150,30 @@ delegation count per tree.
 `ONEHARNESS_AUTOSTART=0` runs everything in the terminal's own process, with no
 server, as `--print` always does.
 
+To keep a server running from login, `1harness server install` sets up a user
+service: systemd units on Linux, `1harness.service` with a `1harness.socket`
+that starts it on the first connection, and a LaunchAgent on macOS. Services
+start with almost no environment, so it writes the `PATH` of the shell you run
+it in, where your harnesses are, to `~/.config/1harness/server.env`; run it again
+after installing a harness somewhere new. On Linux, `loginctl enable-linger`
+keeps the server running while you are logged out. `--print` shows the units
+instead, and `server uninstall` removes them.
+
+With Nix, `nix run github:phongndo/1harness` runs it, and the flake exports
+`nixosModules.default`, `darwinModules.default`, and `homeManagerModules.default`
+for `services.oneharness`:
+
+```nix
+services.oneharness = {
+  enable = true;
+  path = [ pkgs.codex ];  # harnesses the server should find
+};
+```
+
+The NixOS and home-manager modules start the server from its socket; the
+nix-darwin one runs a LaunchAgent. Each reads `~/.config/1harness/server.env`
+too, for harnesses installed outside Nix.
+
 ### Threads that last
 
 1harness keeps every thread in `~/.local/state/1harness/1harness.db` (SQLite,
@@ -182,7 +206,13 @@ finishes while you are looking counts as seen; 1harness knows you are looking
 from the terminal's focus reports and from your typing. An agent's thread
 reports its work and requests, not its results, which go to that agent.
 1harness asks the terminal whether it supports the protocol; set
-`ONEHARNESS_PROGRAM_STATUS=1` or `0` to decide yourself.
+`ONEHARNESS_PROGRAM_STATUS=1` or `0` to decide yourself. Each terminal reports
+the threads it opened, and the agents they started.
+
+`1harness watch` reports every thread on the server the same way, and lists
+them, for when no 1harness terminal is open. In Rex, keep one in a background
+tab: `rex run --label 1harness --focus=false -- 1harness watch`. A run you
+finished looking at in any terminal counts as seen there too.
 
 ### Extensions
 

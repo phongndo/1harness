@@ -238,7 +238,8 @@ export async function ensureServer(options: {
 }): Promise<ServerHello> {
   const target = options.target;
   try {
-    return await serverHello(target, 2_000);
+    // A service manager may start the server on this first connection.
+    return await serverHello(target, 5_000);
   } catch (error) {
     if (!options.autostart || !("socket" in target)) throw error;
   }

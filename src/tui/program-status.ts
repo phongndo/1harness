@@ -1,3 +1,6 @@
+import type { HarnessRequest } from "../core/events.ts";
+import type { ThreadState } from "../protocol.ts";
+
 // The Program Status Protocol (OSC 7501), which lets a program tell its
 // terminal what it is doing: idle, working, blocked on the user, done, or
 // failed. Rex shows it in its session picker and tab headers. 1harness reports
@@ -106,6 +109,48 @@ export function encodeStatus(record: StatusRecord | { id: string | null; state: 
     if (msg) pairs.push(`msg=${base64(msg)}`);
   }
   return `\x1b]7501;${pairs.join(":")}\x1b\\`;
+}
+
+/** What an approval asks to do, in one line, such as `Run: pnpm test`. */
+export function approvalLine(request: Extract<HarnessRequest, { kind: "approval" }>): string {
+  const action = request.action;
+  switch (action.type) {
+    case "command":
+      return `Run: ${action.command}`;
+    case "file_change":
+      return `Edit ${action.paths.join(", ")}`;
+    case "tool":
+      return `Use ${action.tool}${request.title ? `: ${request.title}` : ""}`;
+    case "other":
+      return request.title;
+  }
+}
+
+/** A thread's state as the status reports it; `activity` is what it is doing, when known. */
+export function threadStatusInput(thread: ThreadState, activity: string | null): ThreadStatusInput {
+  const request = thread.requests[0];
+  const run = thread.lastRun;
+  return {
+    id: thread.id,
+    parentId: thread.parentId,
+    title: thread.title,
+    status: thread.status,
+    request: request
+      ? {
+          kind: request.kind,
+          title:
+            request.kind === "approval"
+              ? approvalLine(request)
+              : (request.questions[0]?.question ?? "A question"),
+        }
+      : null,
+    lastRun: run
+      ? { index: run.index, status: run.status, result: run.result, error: run.error }
+      : null,
+    error: thread.error,
+    activity,
+    notify: thread.origin === "user",
+  };
 }
 
 /** The first line of text, for a message about it. */

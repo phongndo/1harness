@@ -41,6 +41,7 @@ import {
   STATUS_QUERY,
   StatusReporter,
   statusRecords,
+  threadStatusInput,
   type ThreadStatusInput,
 } from "./program-status.ts";
 import { setLightTheme, style } from "./theme.ts";
@@ -130,21 +131,6 @@ function mentionText(path: string): string {
 const FILES_RETRY_MS = 300;
 /** How many log entries a thread's view loads at a time. */
 const PAGE_ENTRIES = 400;
-
-/** What an approval asks to do, in one line, such as `Run: pnpm test`. */
-function approvalLine(request: Extract<HarnessRequest, { kind: "approval" }>): string {
-  const action = request.action;
-  switch (action.type) {
-    case "command":
-      return `Run: ${action.command}`;
-    case "file_change":
-      return `Edit ${action.paths.join(", ")}`;
-    case "tool":
-      return `Use ${action.tool}${request.title ? `: ${request.title}` : ""}`;
-    case "other":
-      return request.title;
-  }
-}
 
 function describeLimit(limit: RateLimit): string {
   const used = limit.usedPercent === null ? limit.status : `${Math.round(limit.usedPercent)}% used`;
@@ -539,7 +525,11 @@ export class App {
     // What finishes on screen while the user can see it is not news.
     if (this.#currentId && this.#focused) this.#markSeen(this.#currentId);
     const threads = this.#ownThreads().map((thread) => this.#statusInput(thread));
-    this.#programStatus.update(statusRecords(threads, (id) => this.#seenRuns.get(id) ?? 0));
+    this.#programStatus.update(
+      statusRecords(threads, (id) =>
+        Math.max(this.#seenRuns.get(id) ?? 0, this.#client.threads.get(id)?.seenRuns ?? 0),
+      ),
+    );
   }
 
   /**
@@ -558,38 +548,22 @@ export class App {
     return all.filter(mine);
   }
 
-  /** Marks the thread's finished runs seen; one still running is news when it ends. */
+  /**
+   * Marks the thread's finished runs seen, here and on the host, which other
+   * clients go by; one still running is news when it ends.
+   */
   #markSeen(id: string): void {
     const thread = this.#client.threads.get(id);
     if (!thread) return;
     const running = thread.lastRun?.status === "running";
-    this.#seenRuns.set(id, thread.runCount - (running ? 1 : 0));
+    const seen = thread.runCount - (running ? 1 : 0);
+    if (seen > (this.#seenRuns.get(id) ?? 0) && seen > thread.seenRuns)
+      void this.#client.call("thread.seen", { threadId: id, runs: seen }).catch(() => {});
+    this.#seenRuns.set(id, seen);
   }
 
-  #statusInput(managed: ThreadState): ThreadStatusInput {
-    const request = managed.requests[0];
-    const run = managed.lastRun;
-    return {
-      id: managed.id,
-      parentId: managed.parentId,
-      title: managed.title,
-      status: managed.status,
-      request: request
-        ? {
-            kind: request.kind,
-            title:
-              request.kind === "approval"
-                ? approvalLine(request)
-                : (request.questions[0]?.question ?? "A question"),
-          }
-        : null,
-      lastRun: run
-        ? { index: run.index, status: run.status, result: run.result, error: run.error }
-        : null,
-      error: managed.error,
-      activity: this.#views.get(managed.id)?.turn?.heading ?? null,
-      notify: managed.origin === "user",
-    };
+  #statusInput(thread: ThreadState): ThreadStatusInput {
+    return threadStatusInput(thread, this.#views.get(thread.id)?.turn?.heading ?? null);
   }
 
   /** Restores the terminal however the process ends. */

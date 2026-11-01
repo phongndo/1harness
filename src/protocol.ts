@@ -62,6 +62,8 @@ export interface ThreadState {
   commandsVersion: number;
   /** The client that opened it, which shows it; null for agents' threads. */
   openedBy: string | null;
+  /** How many of its runs a client has shown; later finished ones are news. */
+  seenRuns: number;
   pinned: boolean;
   archived: boolean;
 }
@@ -291,6 +293,8 @@ export interface Methods {
     result: null;
   };
   "thread.stop": { params: { threadId: string }; result: null };
+  /** The user has seen the thread's first `runs` runs, so finished ones are no longer news. */
+  "thread.seen": { params: { threadId: string; runs: number }; result: null };
   "thread.close": { params: { threadId: string }; result: null };
   "thread.unqueue": { params: { threadId: string }; result: Message | null };
   "thread.switchHarness": {
