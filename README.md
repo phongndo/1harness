@@ -120,8 +120,12 @@ between threads, shown as a tree. Esc and `/stop` stop the thread on screen and
 every agent under it; what they would have reported is not sent back, but
 messages you queued still run.
 `/close` ends a thread along with the threads it started. A thread you leave
-keeps running in the background while it or a thread it started has work, and
-closes once they are done.
+stays open, working or idle, and `/threads` switches back to it; one you leave
+with nothing in it is dropped. A thread whose harness sits idle for 30 minutes,
+or ends on its own, keeps its place: the harness is closed to free it, and your
+next message resumes the harness's own thread, or starts a new one with a
+handoff when it cannot. A harness running background work, such as Claude
+Code's background agents, stays open.
 
 ### Status in your terminal
 
@@ -176,8 +180,12 @@ harness's agent shares.
   any client can run.
 - `src/extensions` loads extensions, connects them to threads, and serves their
   tools over MCP.
-- `src/host` owns every live thread and the orchestrator tools agents use to
-  start and manage other threads; clients reach threads only through it.
+- `src/host` owns every thread and the orchestrator tools agents use to start
+  and manage other threads. Clients reach it only through the requests and
+  event feed in `src/protocol.ts`, the same in-process as over a socket; each
+  thread's transcript is a log that a client replays to show it.
+- `src/client` is a client's side of that: a connection, and every thread's
+  state kept current from the feed.
 - `src/tui` is a full-screen terminal UI on the alternate screen, styled after
   [fx](https://github.com/vercel-labs/fx). Each block's rows are cached by width,
   and each frame rewrites only the rows that changed.

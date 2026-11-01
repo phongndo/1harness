@@ -10,15 +10,12 @@ import {
   type RuntimeMode,
   type SessionOptions,
 } from "./core/events.ts";
-import { mentionedImages } from "./core/files.ts";
-import { configDir, stateDir } from "./core/paths.ts";
+import { HostClient } from "./client/client.ts";
+import { LocalConnection, newClientId } from "./client/connection.ts";
+import { configDir } from "./core/paths.ts";
 import { loadSettings } from "./core/settings.ts";
 import { drivers, registerConfiguredAgents } from "./drivers/index.ts";
-import type { ToolDefinition } from "./extensions/api.ts";
-import { ExtensionHost } from "./extensions/host.ts";
-import { ThreadManager } from "./host/manager.ts";
-import { Orchestrator } from "./host/orchestrator.ts";
-import { ToolServer } from "./extensions/tool-server.ts";
+import { Host } from "./host/host.ts";
 import { App } from "./tui/app.ts";
 
 const labels = drivers().map((driver) => driver.label);
@@ -71,6 +68,11 @@ process.emitWarning = ((warning: string | Error, ...rest: unknown[]) => {
   (emitWarning as (...args: unknown[]) => void)(warning, ...rest);
 }) as typeof process.emitWarning;
 
+/**
+ * Runs one prompt without the UI and prints the reply. Agents can delegate
+ * here too; their tasks run in the background of this one prompt. Nobody can
+ * answer approvals, so they are declined, whichever thread asks.
+ */
 async function print(
   harness: HarnessId,
   session: SessionOptions,
@@ -78,74 +80,67 @@ async function print(
   version: string,
   extensions: string[],
 ): Promise<number> {
-  // Session extensions run here too, so their approval rules apply without the UI.
-  const host = new ExtensionHost({
-    cwd: session.cwd,
-    configDir: configDir(),
-    stateDir: stateDir(),
-    commands: null,
-    ui: null,
-  });
-  await host.loadAll(extensions);
-  let orchestratorTools: ReadonlyMap<string, { tool: ToolDefinition }> = new Map();
-  const tools = new ToolServer(() => new Map([...host.tools, ...orchestratorTools]), version);
-  const manager = new ThreadManager({
-    version,
-    extensions: host,
-    tools,
-    onWarning: (text) => process.stderr.write(`1harness: ${text}\n`),
-  });
-  // Agents can delegate here too; their tasks run in the background of this one prompt.
-  const orchestrator = new Orchestrator(manager);
-  orchestratorTools = new Map(orchestrator.tools.map((tool) => [tool.name, { tool }]));
+  const host = new Host({ version, cwd: session.cwd, extensions, idleCloseMs: 0 });
+  const client = "print";
   let rootId: string | null = null;
   let status = 1;
   let wrote = false;
+  const declined = new Set<string>();
   const finished = new Promise<void>((done) => {
-    manager.subscribe((update) => {
-      if (update.type === "thread.created" && update.thread.origin === "user")
-        rootId = update.thread.id;
-      if (update.type !== "thread.event") return;
-      const event = update.event;
-      if (event.type === "request.opened") {
-        // Nobody can answer, so the action is declined, whichever thread asked.
-        void manager.get(update.threadId)?.thread.respond(event.request.id, { kind: "cancel" });
+    host.subscribe((event) => {
+      if (event.type === "notice" && event.level !== "info")
+        process.stderr.write(`1harness: ${event.text}\n`);
+      if (event.type === "thread") {
+        for (const request of event.thread.requests) {
+          const key = `${event.thread.id}\0${request.id}`;
+          if (declined.has(key)) continue;
+          declined.add(key);
+          void host
+            .call(client, "thread.respond", {
+              threadId: event.thread.id,
+              requestId: request.id,
+              response: { kind: "cancel" },
+            })
+            .catch(() => {});
+        }
         return;
       }
-      if (update.threadId !== rootId) return;
-      switch (event.type) {
-        case "item.completed":
-          if (event.item.kind === "assistant_message" && event.item.text.trim() !== "") {
-            process.stdout.write(`${wrote ? "\n" : ""}${event.item.text.trim()}\n`);
+      if (event.type !== "entry" || event.threadId !== rootId) return;
+      const entry = event.entry;
+      switch (entry.type) {
+        case "item":
+          if (!entry.done) break;
+          if (entry.item.kind === "assistant_message" && entry.item.text.trim() !== "") {
+            process.stdout.write(`${wrote ? "\n" : ""}${entry.item.text.trim()}\n`);
             wrote = true;
-          } else if (event.item.kind === "notice" && event.item.level !== "info") {
-            process.stderr.write(`1harness: ${event.item.text}\n`);
+          } else if (entry.item.kind === "notice" && entry.item.level !== "info") {
+            process.stderr.write(`1harness: ${entry.item.text}\n`);
+            // A message that could not start its turn ends the run.
+            if (entry.item.level === "error" && entry.item.id.startsWith("error-")) done();
           }
           break;
         case "turn.ended":
-          status = event.status === "completed" ? 0 : 1;
-          if (event.error) process.stderr.write(`1harness: ${event.error}\n`);
+          status = entry.status === "completed" ? 0 : 1;
+          if (entry.error) process.stderr.write(`1harness: ${entry.error}\n`);
           done();
           break;
-        case "session.closed":
-          if (event.error) process.stderr.write(`1harness: ${event.error}\n`);
+        case "session.ended":
+          if (entry.error) process.stderr.write(`1harness: ${entry.error}\n`);
           done();
           break;
-        case "error":
-          process.stderr.write(`1harness: ${event.message}\n`);
-          done();
+        default:
           break;
       }
     });
   });
-  const root = await manager.create({ harness, settings: session });
-  const thread = root.thread;
-  const images = thread.capabilities.images ? mentionedImages(prompt, session.cwd) : [];
-  thread.send(images.length > 0 ? { text: prompt, images } : { text: prompt });
-  await finished;
-  await manager.closeAll();
-  await tools.close();
-  await host.close();
+  try {
+    const root = await host.call(client, "thread.open", { harness, settings: session });
+    rootId = root.id;
+    await host.call(client, "thread.send", { threadId: root.id, text: prompt });
+    await finished;
+  } finally {
+    await host.shutdown();
+  }
   return status;
 }
 
@@ -207,13 +202,25 @@ try {
         "the interactive UI needs a terminal; use --print to run a prompt without one",
       );
     } else {
+      const host = new Host({
+        version: manifest.version,
+        cwd: session.cwd,
+        extensions,
+        warnings,
+      });
+      const id = newClientId();
+      const client = new HostClient(
+        new LocalConnection(host, id, { owns: true }),
+        { cwd: session.cwd, version: manifest.version, extensions },
+        id,
+      );
       await new App({
+        client,
         harness,
         session,
         version: manifest.version,
         prompt,
-        extensions,
-        warnings,
+        warnings: [],
       }).run();
     }
   }

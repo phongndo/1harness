@@ -1,9 +1,18 @@
 import type { Report } from "../commands/registry.ts";
 import type { Item } from "../core/events.ts";
-import type { Message, Thread, ThreadEvent } from "../core/thread.ts";
+import type { Message } from "../core/thread.ts";
 import { stripHandoff } from "../host/handoff.ts";
+import type { LogEntry, TurnTokens } from "../protocol.ts";
 import { reportStatus, type AgentRow } from "./agents.ts";
 import { Transcript, formatTokens, isToolItem, type Block } from "./transcript.ts";
+
+/** What the view needs from the client to show an entry. */
+export interface ViewContext {
+  /** Whether the thread is working, so an item that arrives mid-turn starts its line. */
+  busy: boolean;
+  /** The row for a thread this one started, from what the client knows of it. */
+  agent(threadId: string): AgentRow | null;
+}
 
 export type Phase = "Thinking" | "Generating";
 
@@ -84,43 +93,41 @@ export class ThreadView {
   #agentCalls = new Set<string>();
   /** How many blocks the transcript had when the turn started. */
   #turnStart = 0;
+  /** The turn's reasoning so far, by item, for its latest heading. */
+  #reasoning = new Map<string, string>();
 
   constructor(id: string) {
     this.id = id;
   }
 
-  /** Shows a thread event; `thread` is the one it came from. */
-  apply(event: ThreadEvent, thread: Thread): void {
-    switch (event.type) {
+  /**
+   * Shows one entry of the thread's log, live or replayed; replaying a log
+   * shows what showing it live did.
+   */
+  apply(entry: LogEntry, context: ViewContext): void {
+    switch (entry.type) {
       case "turn.started":
-        this.startTurn();
+        this.startTurn(entry.at);
         break;
       case "turn.ended":
-        this.endTurn(event.status, event.error);
+        this.endTurn(entry.status, entry.error, entry);
         break;
-      case "item.started":
-      case "item.updated":
-      case "item.completed": {
-        const { item } = event;
-        // The message a user_message echoes, where the harness says which it is.
-        const sent =
-          item.kind === "user_message" && item.inputId ? thread.message(item.inputId) : undefined;
-        this.item(item, event.type === "item.completed", thread.busy, sent);
+      case "item":
+        this.item(entry.item, entry.done, context.busy, entry.message);
+        break;
+      case "delta":
+        this.delta(entry.itemId, entry.chunk);
+        break;
+      case "agent": {
+        const row = context.agent(entry.threadId);
+        if (row) this.agent(row);
         break;
       }
-      case "item.delta":
-        this.delta(event.itemId, event.chunk, thread);
-        break;
-      case "error":
-        this.notice("error", event.message);
-        break;
-      case "session.closed":
+      case "session.ended":
         this.endTurn(null, null);
         this.settle();
-        if (event.error)
-          this.notice("error", `Session ended: ${event.error}\nUse /new to start again.`);
-        break;
-      default:
+        if (entry.error)
+          this.notice("error", `Session ended: ${entry.error}\nYour next message starts it again.`);
         break;
     }
   }
@@ -134,10 +141,15 @@ export class ThreadView {
     this.scroll = 0;
   }
 
-  startTurn(): void {
+  startTurn(at: number = Date.now()): void {
     if (this.turn) return;
-    this.turn = { startedAt: Date.now(), up: 0, down: 0, phase: "Thinking", heading: null };
+    this.turn = { startedAt: at, up: 0, down: 0, phase: "Thinking", heading: null };
     this.#turnStart = this.transcript.size;
+  }
+
+  /** Whether the transcript shows a row for this agent. */
+  hasAgent(threadId: string): boolean {
+    return this.#agents.has(threadId);
   }
 
   /**
@@ -170,11 +182,16 @@ export class ThreadView {
    * Closes the turn with fx's duration line. Commands can outlive the turn, as
    * Codex's background terminals do, so their rows stay live until they finish.
    */
-  endTurn(status: "completed" | "interrupted" | "failed" | null, error: string | null): void {
+  endTurn(
+    status: "completed" | "interrupted" | "failed" | null,
+    error: string | null,
+    ended?: TurnTokens & { at: number },
+  ): void {
     for (const [id, block] of this.blocks) {
       // Todo lists keep one ID across turns, but each turn shows its own.
       if (block.kind === "todos") this.blocks.delete(id);
     }
+    this.#reasoning.clear();
     const turn = this.turn;
     this.turn = null;
     if (!turn || status === null) return;
@@ -186,8 +203,11 @@ export class ThreadView {
       block.settled = true;
       this.transcript.touch(block);
     }
-    const seconds = Math.round((Date.now() - turn.startedAt) / 1000);
-    const tokens = `(↑${formatTokens(Math.ceil(turn.up))} ↓${formatTokens(Math.ceil(turn.down))})`;
+    // The log's own counts, so a replayed turn reads as it did live.
+    const seconds = Math.round(((ended?.at ?? Date.now()) - turn.startedAt) / 1000);
+    const up = ended?.up ?? Math.ceil(turn.up);
+    const down = ended?.down ?? Math.ceil(turn.down);
+    const tokens = `(↑${formatTokens(up)} ↓${formatTokens(down)})`;
     const label =
       status === "interrupted" ? "Interrupted · " : status === "failed" ? "Failed · " : "";
     this.transcript.add({ kind: "summary", text: `${label}${seconds}s ${tokens}` });
@@ -245,6 +265,7 @@ export class ThreadView {
         return;
       }
       case "reasoning":
+        this.#reasoning.set(item.id, item.text);
         if (this.turn) {
           this.turn.phase = "Thinking";
           this.turn.heading = reasoningHeading(item.text) ?? this.turn.heading;
@@ -300,7 +321,7 @@ export class ThreadView {
     this.transcript.touch(block);
   }
 
-  delta(itemId: string, chunk: string, thread: Thread): void {
+  delta(itemId: string, chunk: string): void {
     if (this.turn) this.turn.down += estimateTokens(chunk);
     const block = this.blocks.get(itemId);
     if (block?.kind === "assistant" || block?.kind === "plan") {
@@ -309,10 +330,13 @@ export class ThreadView {
       if (this.turn) this.turn.phase = "Generating";
       return;
     }
-    const item = thread.item(itemId);
-    if (this.turn && item?.kind === "reasoning") {
+    const reasoning = this.#reasoning.get(itemId);
+    if (reasoning === undefined) return;
+    const text = reasoning + chunk;
+    this.#reasoning.set(itemId, text);
+    if (this.turn) {
       this.turn.phase = "Thinking";
-      this.turn.heading = reasoningHeading(item.text) ?? this.turn.heading;
+      this.turn.heading = reasoningHeading(text) ?? this.turn.heading;
     }
   }
 }

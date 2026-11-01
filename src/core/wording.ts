@@ -126,3 +126,10 @@ export function limitNotice(limit: RateLimit): string {
     ? `${limit.label} usage limit reached${resets}`
     : `${limit.label} usage limit:${used}${resets}`;
 }
+
+/** `950`, `12.5k`, `1.2M`. */
+export function formatTokens(count: number): string {
+  if (count < 1000) return String(count);
+  if (count < 1_000_000) return `${(count / 1000).toFixed(count < 10_000 ? 1 : 0)}k`;
+  return `${(count / 1_000_000).toFixed(1)}M`;
+}

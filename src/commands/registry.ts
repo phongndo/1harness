@@ -1,5 +1,17 @@
-import type { HarnessId, HarnessSession, SessionInfo } from "../core/events.ts";
-import type { Thread } from "../core/thread.ts";
+import type {
+  Capabilities,
+  HarnessId,
+  InteractionMode,
+  McpAction,
+  McpActionResult,
+  McpServer,
+  ModelOption,
+  RuntimeMode,
+  SessionInfo,
+  ThreadSummary,
+} from "../core/events.ts";
+import type { Message } from "../core/thread.ts";
+import type { HarnessInfo } from "../protocol.ts";
 
 /** Report text, styled by the client so it follows theme changes. */
 export interface ReportSpan {
@@ -40,15 +52,49 @@ export interface CommandUI {
   setInput(text: string): void;
 }
 
+/** The current thread as a command reaches it, wherever the thread runs. */
+export interface CommandThread {
+  /** 1harness's ID for it, such as `t3`. */
+  readonly id: string;
+  readonly closed: boolean;
+  readonly busy: boolean;
+  /** Its session closed, as an idle one is; a message or a session call wakes it. */
+  readonly parked: boolean;
+  /** Sends a message as the user, which queues while a turn runs. */
+  send(text: string): Promise<void>;
+  /** Takes back the message the user queued last. */
+  unqueue(): Promise<Message | undefined>;
+}
+
+/**
+ * What a command can ask of the thread's session. The optional methods are the
+ * ones its harness has; calling any wakes a parked thread first.
+ */
+export interface SessionHandle {
+  readonly capabilities: Capabilities;
+  readonly info: SessionInfo;
+  setRuntimeMode(mode: RuntimeMode): Promise<void>;
+  setInteractionMode(mode: InteractionMode): Promise<void>;
+  setModel?(model: string | null): Promise<void>;
+  listModels?(): Promise<ModelOption[]>;
+  setEffort?(effort: string | null): Promise<void>;
+  compact?(): Promise<void>;
+  listThreads?(): Promise<ThreadSummary[]>;
+  listMcpServers?(): Promise<McpServer[]>;
+  mcpAction?(action: McpAction, server: string): Promise<McpActionResult>;
+}
+
 /** What a command can reach: the client's UI and the current thread. */
 export interface CommandContext {
   readonly ui: CommandUI;
   readonly harness: HarnessId;
-  /** The current thread, or null when none is running. */
-  readonly thread: Thread | null;
+  /** The current thread, or null when there is none. */
+  readonly thread: CommandThread | null;
   readonly info: SessionInfo | null;
-  /** The running session; throws when there is none. */
-  session(): HarnessSession;
+  /** The thread's session; throws when there is no thread. */
+  session(): SessionHandle;
+  /** The harnesses threads can run on. */
+  harnesses(): HarnessInfo[];
   /**
    * A list kept for the current thread, such as models. The first call starts
    * fetching it and returns nothing; completion menus fill in when it arrives.
@@ -60,6 +106,7 @@ export interface CommandContext {
   /** Starts a thread: another harness, a resumed one, or a fresh one by default. */
   openThread(options?: {
     harness?: HarnessId;
+    /** A 1harness thread ID such as `t42`, or a harness's own thread ID. */
     resume?: string;
     defaultModel?: boolean;
   }): Promise<void>;
@@ -106,10 +153,10 @@ export function completion(value: string, detail = "", more = false): Completion
   return { value, detail, more };
 }
 
-/** The running session, or null, for `available` checks. */
-export function liveSession(context: CommandContext): HarnessSession | null {
+/** The thread's session, parked or running, or null, for `available` checks. */
+export function liveSession(context: CommandContext): SessionHandle | null {
   const thread = context.thread;
-  return thread && !thread.closed ? thread.session : null;
+  return thread && !thread.closed ? context.session() : null;
 }
 
 export class CommandRegistry {

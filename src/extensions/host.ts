@@ -163,7 +163,11 @@ export interface ExtensionHostOptions {
   stateDir: string;
   /** Where commands go; null without a client, as with `--print`. */
   commands: CommandRegistry | null;
-  ui: CommandUI | null;
+  /**
+   * The UI of the client that shows `thread`, or null when none does, as with
+   * `--print`; with a null thread, the UI for notices about extensions.
+   */
+  ui: CommandUI | null | ((thread: Thread | null) => CommandUI | null);
 }
 
 /**
@@ -244,7 +248,7 @@ export class ExtensionHost {
     return async (call) => {
       const current = thread();
       if (!current) return undefined;
-      const context: ExtensionContext = { thread: current, ui: this.#options.ui };
+      const context = this.#context(current);
       for (const entry of this.#toolChecks) {
         const reason = await this.#guard(entry.extension, () => entry.handler(call, context));
         if (reason) return reason;
@@ -329,7 +333,7 @@ export class ExtensionHost {
 
   /** Connects the extensions' handlers to a thread; returns a function that disconnects them. */
   attach(thread: Thread): () => void {
-    const context: ExtensionContext = { thread, ui: this.#options.ui };
+    const context = this.#context(thread);
     const unsubscribe = thread.subscribe((event) => {
       for (const entry of this.#events) {
         if (entry.type !== event.type) continue;
@@ -472,8 +476,25 @@ export class ExtensionHost {
     }
   }
 
+  /** A handler's context, whose UI is whichever client shows the thread when it asks. */
+  #context(thread: Thread): ExtensionContext {
+    const ui = () => this.#ui(thread);
+    return {
+      thread,
+      get ui() {
+        return ui();
+      },
+    };
+  }
+
+  #ui(thread: Thread | null): CommandUI | null {
+    const ui = this.#options.ui;
+    return typeof ui === "function" ? ui(thread) : ui;
+  }
+
   #notify(level: NoticeLevel, text: string): void {
-    if (this.#options.ui) this.#options.ui.notify(level, text);
+    const ui = this.#ui(null);
+    if (ui) ui.notify(level, text);
     else if (level !== "info") process.stderr.write(`1harness: ${text}\n`);
   }
 }

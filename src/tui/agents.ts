@@ -1,6 +1,6 @@
 import { stripVTControlCharacters } from "node:util";
 import type { MessageOrigin } from "../core/thread.ts";
-import type { ManagedThread } from "../host/manager.ts";
+import type { ThreadState } from "../protocol.ts";
 import { inline } from "./markdown.ts";
 import { style } from "./theme.ts";
 
@@ -16,7 +16,8 @@ export type AgentStatus =
   | "stopped"
   | "idle";
 
-export function agentStatus(thread: ManagedThread): AgentStatus {
+export function agentStatus(thread: ThreadState): AgentStatus {
+  const run = thread.lastRun;
   switch (thread.status) {
     case "starting":
       return "starting";
@@ -27,7 +28,6 @@ export function agentStatus(thread: ManagedThread): AgentStatus {
     case "idle":
     case "parked":
     case "closed": {
-      const run = thread.runs.at(-1);
       if (!run) return thread.error ? "failed" : thread.status === "closed" ? "stopped" : "idle";
       if (run.status === "completed") return "done";
       return run.status === "failed" ? "failed" : "stopped";
@@ -80,8 +80,8 @@ export function formatElapsed(ms: number): string {
 }
 
 /** When the thread's latest work started and ended; the end is null while it is live. */
-export function agentSpan(thread: ManagedThread): { startedAt: number; endedAt: number | null } {
-  const run = thread.runs.at(-1);
+export function agentSpan(thread: ThreadState): { startedAt: number; endedAt: number | null } {
+  const run = thread.lastRun;
   const live = isLive(agentStatus(thread));
   return {
     startedAt: run?.startedAt ?? thread.createdAt,
@@ -104,10 +104,10 @@ export interface AgentRow {
   detail: string;
 }
 
-export function agentRowOf(thread: ManagedThread): AgentRow {
+export function agentRowOf(thread: ThreadState): AgentRow {
   const status = agentStatus(thread);
-  const run = thread.runs.at(-1);
-  const asking = thread.thread.requests[0];
+  const run = thread.lastRun;
+  const asking = thread.requests[0];
   const detail =
     status === "needs you"
       ? `${asking?.kind === "question" ? "Has a question" : "Needs approval"} · ctrl+o to answer`
@@ -128,8 +128,8 @@ export function agentRowOf(thread: ManagedThread): AgentRow {
 }
 
 /** `claude · haiku`, or the harness alone when its model is its default. */
-export function harnessLabel(thread: ManagedThread): string {
-  const model = thread.thread.info.model;
+export function harnessLabel(thread: ThreadState): string {
+  const model = thread.info.model;
   return model ? `${thread.harness} · ${model}` : thread.harness;
 }
 
@@ -144,9 +144,9 @@ export function plainLine(text: string): string {
  * Tree branches for threads in tree order, each one's children after it:
  * `├ ` and `└ ` before a child, `│ ` under a parent's later siblings.
  */
-export function treePrefixes(threads: readonly ManagedThread[]): string[] {
+export function treePrefixes(threads: readonly ThreadState[]): string[] {
   const shown = new Set(threads.map((thread) => thread.id));
-  const parentOf = (thread: ManagedThread) =>
+  const parentOf = (thread: ThreadState) =>
     thread.parentId && shown.has(thread.parentId) ? thread.parentId : null;
   const isLast = (index: number): boolean => {
     const thread = threads[index];
@@ -156,7 +156,7 @@ export function treePrefixes(threads: readonly ManagedThread[]): string[] {
   };
   return threads.map((thread, index) => {
     const parts: string[] = [];
-    let current: ManagedThread | undefined = thread;
+    let current: ThreadState | undefined = thread;
     let position = index;
     while (current && parentOf(current)) {
       const last = isLast(position);

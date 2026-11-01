@@ -58,6 +58,8 @@ export interface ManagedThread {
   /** The tool call in the parent's thread that started this one, where its harness said which. */
   readonly parentCallId: string | null;
   readonly origin: "user" | "delegated";
+  /** The client that opened it, which shows it; null for agents' threads. */
+  openedBy: string | null;
   readonly thread: Thread;
   readonly createdAt: number;
   status: ThreadStatus;
@@ -70,7 +72,13 @@ export type ManagerEvent =
   | { type: "thread.created"; thread: ManagedThread }
   /** Status, title, or runs changed. */
   | { type: "thread.updated"; thread: ManagedThread }
-  | { type: "thread.event"; threadId: string; event: ThreadEvent };
+  | { type: "thread.event"; threadId: string; event: ThreadEvent }
+  /** A session took the thread over: on another harness, or to wake it. */
+  | { type: "thread.moved"; thread: ManagedThread; result: SwitchResult; waking: boolean }
+  /** Its idle session was closed. */
+  | { type: "thread.parked"; thread: ManagedThread }
+  /** A closed thread was dropped from memory. */
+  | { type: "thread.forgotten"; threadId: string };
 
 export type ManagerListener = (event: ManagerEvent) => void;
 
@@ -81,6 +89,7 @@ export interface CreateThreadOptions {
   parentId?: string | null;
   parentCallId?: string | null;
   origin?: "user" | "delegated";
+  openedBy?: string | null;
 }
 
 export interface ManagerOptions {
@@ -266,6 +275,7 @@ export class ThreadManager {
       parentId: options.parentId ?? null,
       parentCallId: options.parentCallId ?? null,
       origin: options.origin ?? "user",
+      openedBy: options.openedBy ?? null,
       thread,
       createdAt: Date.now(),
       status: "starting",
@@ -276,7 +286,9 @@ export class ThreadManager {
     this.#byThread.set(thread, managed);
     this.#servers.set(managed.id, mcp.servers);
     const unsubscribe = thread.subscribe((event) => this.#apply(managed, event));
-    thread.setWaker(() => this.wake(managed.id));
+    thread.setWaker(async () => {
+      await this.wake(managed.id);
+    });
     const detach = extensions.attach(thread);
     this.#cleanups.set(managed.id, () => {
       unsubscribe();
@@ -337,11 +349,11 @@ export class ThreadManager {
    * not seen, and a new thread with a handoff of every turn otherwise, as for
    * an agent that cannot resume.
    */
-  async wake(id: string): Promise<void> {
+  async wake(id: string): Promise<SwitchResult | null> {
     const managed = this.#threads.get(id);
     if (!managed || this.closing(id)) throw new Error(`No open thread ${id}`);
     const thread = managed.thread;
-    if (!thread.parked) return;
+    if (!thread.parked) return null;
     if (this.#switching.has(id)) throw new Error(`${id} is already starting`);
     const info = thread.info;
     const own: Visit = {
@@ -352,7 +364,7 @@ export class ThreadManager {
       contextTokens: null,
       leftAt: Date.now(),
     };
-    await this.#move(managed, managed.harness, own.native ? own : undefined, {}, true);
+    return this.#move(managed, managed.harness, own.native ? own : undefined, {}, true);
   }
 
   /**
@@ -367,7 +379,18 @@ export class ThreadManager {
     if (!thread.session || !thread.idle) return false;
     if ((thread.session.backgroundTasks?.() ?? []).length > 0) return false;
     await thread.park();
+    this.#emit({ type: "thread.parked", thread: managed });
     return true;
+  }
+
+  /** Drops a closed thread from memory, such as one with nothing in it. */
+  forget(id: string): void {
+    const managed = this.#threads.get(id);
+    if (!managed || managed.status !== "closed") return;
+    this.#threads.delete(id);
+    this.#byThread.delete(managed.thread);
+    this.#keys.delete(id);
+    this.#emit({ type: "thread.forgotten", threadId: id });
   }
 
   /** How many of the thread's runs its harness's own thread has seen. */
@@ -471,7 +494,7 @@ export class ThreadManager {
       if (plan.handoff) this.#seenWithoutHandoff.set(id, plan.seen);
       else this.#seenWithoutHandoff.delete(id);
       const resumed = plan.resume !== null && earlier !== undefined;
-      return {
+      const result: SwitchResult = {
         from,
         to: harness,
         resumed,
@@ -482,6 +505,8 @@ export class ThreadManager {
             ? { tokens: earlier.contextTokens, idleMs: now - earlier.leftAt }
             : null,
       };
+      this.#emit({ type: "thread.moved", thread: managed, result, waking });
+      return result;
     } finally {
       this.#switching.delete(id);
       this.#refresh(managed);
@@ -520,7 +545,9 @@ export class ThreadManager {
       // Any event of the thread's can settle it, such as a message that failed to start.
       const unsubscribe = this.subscribe((event) => {
         const mine =
-          event.type === "thread.event" ? event.threadId === managed.id : event.thread === managed;
+          event.type === "thread.event" || event.type === "thread.forgotten"
+            ? event.threadId === managed.id
+            : event.thread === managed;
         if (mine && settled()) done(false);
       });
     });

@@ -442,11 +442,11 @@ export class Thread {
     input: UserInput,
     origin: MessageOrigin = FROM_USER,
     options: { command?: boolean } = {},
-  ): void {
+  ): Message {
     const message = this.#record(input, origin, options.command === true);
     if (this.#inputHandlers.length === 0 && this.#pending.size === 0) {
       this.#enqueue(prepare(message, input));
-      return;
+      return message;
     }
     // Handlers may be slow; a message sent after this one still goes after it.
     this.#pending.add(message);
@@ -466,18 +466,16 @@ export class Thread {
       // A dropped message may leave the thread with nothing to do.
       else this.#emitQueue();
     });
+    return message;
   }
 
   /** Adds input to the running turn where the harness supports it; otherwise queues it. */
-  async steer(input: UserInput, origin: MessageOrigin = FROM_USER): Promise<void> {
+  async steer(input: UserInput, origin: MessageOrigin = FROM_USER): Promise<Message> {
     const session = this.#session;
-    if (!this.#busy || !session || !session.capabilities.steer) {
-      this.send(input, origin);
-      return;
-    }
+    if (!this.#busy || !session || !session.capabilities.steer) return this.send(input, origin);
     const message = this.#record(input, origin);
     const filtered = await this.#filterInput(input);
-    if (!filtered) return;
+    if (!filtered) return message;
     const prepared = prepare(message, filtered);
     try {
       if (session !== this.#session) throw new Error("The session changed");
@@ -486,6 +484,7 @@ export class Thread {
       // The turn ended between the check and the request, so it becomes a follow-up.
       this.#enqueue(prepared);
     }
+    return message;
   }
 
   /**

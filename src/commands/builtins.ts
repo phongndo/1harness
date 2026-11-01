@@ -1,7 +1,6 @@
 import type { McpAction, McpServer, ModelOption, ThreadSummary } from "../core/events.ts";
 import { errorMessage } from "../core/thread.ts";
 import { MODE_DESCRIPTIONS } from "../core/wording.ts";
-import { drivers } from "../drivers/index.ts";
 import {
   completion,
   liveSession,
@@ -66,15 +65,17 @@ const quit: CommandDefinition = {
 function harnessCompletions(context: CommandContext): Completions {
   return {
     start: 0,
-    items: drivers().map((driver) =>
-      completion(driver.id, driver.id === context.harness ? "current" : driver.label),
-    ),
+    items: context
+      .harnesses()
+      .map((driver) =>
+        completion(driver.id, driver.id === context.harness ? "current" : driver.label),
+      ),
   };
 }
 
 /** The harness with this ID, or an error listing the ones there are. */
-function namedHarness(name: string) {
-  const all = drivers();
+function namedHarness(context: CommandContext, name: string) {
+  const all = context.harnesses();
   const driver = all.find((candidate) => candidate.id === name);
   if (!driver)
     throw new Error(`No harness named ${name}; try ${all.map((entry) => entry.id).join(", ")}`);
@@ -89,7 +90,7 @@ const newThread: CommandDefinition = {
   complete: harnessCompletions,
   run(context, args) {
     if (!args) return context.openThread();
-    const driver = namedHarness(args);
+    const driver = namedHarness(context, args);
     // Models and efforts are harness-specific, so another harness starts with its defaults.
     return context.openThread({ harness: driver.id, defaultModel: driver.id !== context.harness });
   },
@@ -147,17 +148,17 @@ const harness: CommandDefinition = {
     };
   },
   async run(context, args) {
-    const all = drivers();
+    const all = context.harnesses();
     const [name = "", flag = ""] = args.split(/\s+/);
     if (flag && flag !== "fresh") throw new Error("Usage: /harness [name] [fresh]");
     const fresh = flag === "fresh";
-    let chosen = name ? namedHarness(name) : undefined;
+    let chosen = name ? namedHarness(context, name) : undefined;
     if (!chosen) {
       const index = await context.ui.pick(
         "Harnesses",
         all.map((driver) => ({
           label: driver.id,
-          detail: driver.unavailable(process.env) ?? driver.label,
+          detail: driver.unavailable ?? driver.label,
           tag: driver.id === context.harness ? "current" : "",
         })),
         {
@@ -195,8 +196,8 @@ const unqueue: CommandDefinition = {
   name: "unqueue",
   description: "move the last queued message back into the editor",
   group: "Session",
-  run(context) {
-    const message = context.thread?.unqueue();
+  async run(context) {
+    const message = await context.thread?.unqueue();
     if (message) context.ui.setInput(message.input.text);
   },
 };
