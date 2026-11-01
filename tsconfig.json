@@ -11,7 +11,8 @@
     "forceConsistentCasingInFileNames": true,
     "types": ["node"],
     "noEmit": true,
-    "rewriteRelativeImportExtensions": true
+    "rewriteRelativeImportExtensions": true,
+    "skipLibCheck": true
   },
   "include": ["src/**/*.ts", "examples/**/*.ts"]
 }

@@ -40,7 +40,7 @@ stdenv.mkDerivation (finalAttrs: {
       pnpmInstallFlags
       ;
     fetcherVersion = 4;
-    hash = "sha256-9fT76FXcFd06wUwN+7Zq3KwhIEZmVcMdzXR6pHZO5bs=";
+    hash = "sha256-7uqdbTLIrjECfSSl6VUm2lRsaZ/Eq2bYl0s+fPeqzQE=";
   };
 
   nativeBuildInputs = [
