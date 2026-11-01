@@ -628,7 +628,7 @@ describe("Switching harness", () => {
     await manager.wait(thread.id, 1000);
     const back = await manager.switchHarness(thread.id, "fake-forgetful");
     assert.equal(back.resumed, false);
-    assert.match(back.resumeError ?? "", /started a new thread instead of resuming it/);
+    assert.match(back.resumeError ?? "", /started a new session instead of resuming it/);
     assert.equal(back.handedOver, 2);
     thread.thread.send({ text: "three" });
     await manager.wait(thread.id, 1000);

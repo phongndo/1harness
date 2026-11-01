@@ -6,7 +6,7 @@ import {
   type CommandUI,
   type SessionHandle,
 } from "../commands/registry.ts";
-import type { HarnessId, SessionOptions, UserInput } from "../core/events.ts";
+import type { HarnessId, SessionOptions, Usage, UserInput } from "../core/events.ts";
 import { FileIndex, mentionedImages } from "../core/files.ts";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
@@ -35,7 +35,7 @@ import {
 } from "../protocol.ts";
 import type { Store, ThreadRow, ThreadSummaryRow } from "../store/store.ts";
 import { handoffText } from "./handoff.ts";
-import { ThreadLog } from "./log.ts";
+import { ThreadLog, decisions } from "./log.ts";
 import {
   ThreadManager,
   type ManagedThread,
@@ -68,6 +68,11 @@ interface Client {
   cwd: string;
   /** The thread it shows, whose extensions' UI it gets. */
   showing: string | null;
+  /**
+   * The empty thread it left for one still starting, dropped once that one
+   * starts, and kept to go back to should it fail.
+   */
+  left: string | null;
   connected: boolean;
   /** Picks waiting for its answer. */
   picks: Map<string, (index: number | null) => void>;
@@ -126,6 +131,14 @@ function idleFor(ms: number): string {
 }
 
 /**
+ * Usage saved before a restart: its context and cost still hold, but its
+ * subscription limits are old news, and the harness says them again.
+ */
+function restoredUsage(usage: Usage | null): Usage | null {
+  return usage ? { ...usage, limits: [] } : null;
+}
+
+/**
  * What a move to another harness did, in a sentence or two, and how loudly to
  * say it: a warning when the thread it resumed is large or long idle, since its
  * first message pays for all of that context again.
@@ -135,13 +148,13 @@ export function describeSwitch(result: SwitchResult): { level: "info" | "warning
   const lines: string[] = [];
   if (result.resumeError)
     lines.push(
-      `Could not resume ${to}'s earlier thread (${result.resumeError}); started a new one.`,
+      `Could not resume ${to}'s earlier session (${result.resumeError}); started a new one.`,
     );
   const context = result.resumedContext;
   const size = context?.tokens ? `about ${formatTokens(context.tokens)} tokens of context, ` : "";
   const where = context
-    ? `its earlier thread (${size}last used ${idleFor(context.idleMs)})`
-    : "a new thread";
+    ? `its earlier session (${size}last used ${idleFor(context.idleMs)})`
+    : "a new session";
   const turns = `${result.handedOver} ${result.handedOver === 1 ? "turn" : "turns"}`;
   lines.push(
     result.handedOver > 0
@@ -153,7 +166,7 @@ export function describeSwitch(result: SwitchResult): { level: "info" | "warning
     ((context.tokens ?? 0) >= HEAVY_RESUME_TOKENS || context.idleMs >= COLD_RESUME_MS);
   if (heavy)
     lines.push(
-      `Its whole earlier context is sent again with that message. /harness ${result.to} fresh starts a new ${to} thread with a handoff instead.`,
+      `Its whole earlier context is sent again with that message. /harness ${result.to} fresh starts a new ${to} session with a handoff instead.`,
     );
   return { level: heavy ? "warning" : "info", text: lines.join("\n") };
 }
@@ -226,6 +239,10 @@ export class Host {
   #seenRuns = new Map<string, number>();
   /** Threads being dropped for good, which the store deletes too. */
   #discarding = new Set<string>();
+  /** Each thread's open requests already answered, so a second answer is not recorded. */
+  #answered = new Map<string, Set<string>>();
+  /** Closed threads being taken out of memory only to come back parked. */
+  #reopening = new Set<string>();
   /** Each task as last written. */
   #savedTasks = new Map<string, string>();
   #stopped = false;
@@ -383,7 +400,9 @@ export class Host {
         this.#notice(
           managed.id,
           "info",
-          `${held} queued ${held === 1 ? "message was" : "messages were"} waiting when 1harness stopped. They run in order once you send this thread a message; /unqueue takes the last one back.`,
+          held === 1
+            ? "1 queued message was waiting when 1harness stopped. It runs once you send this thread a message; /unqueue takes it back."
+            : `${held} queued messages were waiting when 1harness stopped. They run in order once you send this thread a message; /unqueue takes the last one back.`,
         );
       this.#dirty.add(managed.id);
     }
@@ -417,6 +436,7 @@ export class Host {
         generation: row.generation,
         allowances: store.allowances(row.id),
         queue: store.queuedMessages(row.id).map(({ message, sent }) => ({ message, input: sent })),
+        usage: restoredUsage(row.usage),
       },
     };
   }
@@ -424,19 +444,25 @@ export class Host {
   /** Brings a stored thread back into memory, parked, such as a closed one reopened. */
   async #reopen(id: string): Promise<ManagedThread | null> {
     const store = this.#store;
-    const row = store?.thread(id);
-    if (!store || !row) return null;
+    const found = store?.thread(id);
+    if (!store || !found) return null;
+    // Its extensions first: from here on nothing waits, so the thread is never missing
+    // for a call that comes meanwhile, and a second reopen finds it back.
+    const extensions = await this.#extensionsFor(found.cwd, null);
     const existing = this.manager.get(id);
     if (existing) {
       if (existing.status !== "closed") return existing;
       this.#flush();
-      this.manager.forget(id);
+      this.#reopening.add(id);
+      try {
+        this.manager.forget(id);
+      } finally {
+        this.#reopening.delete(id);
+      }
     }
+    const row = store.thread(id) ?? found;
     const [managed] = this.manager.restore([
-      {
-        ...this.#restored({ ...row, state: "parked" }, store.runs(id)),
-        extensions: await this.#extensionsFor(row.cwd, null),
-      },
+      { ...this.#restored({ ...row, state: "parked" }, store.runs(id)), extensions },
     ]);
     if (!managed) return null;
     this.#dirty.add(id);
@@ -491,12 +517,15 @@ export class Host {
     client.picks.clear();
     client.pending.clear();
     const showing = client.showing;
+    const left = client.left;
     client.showing = null;
+    client.left = null;
     if (showing) {
       // What it showed up to the end was seen.
       this.#markSeen(showing);
       if (discard) await this.#discardIfEmpty(showing, client);
     }
+    if (left && discard) await this.#discardIfEmpty(left, client);
     if (discard) this.#clients.delete(clientId);
   }
 
@@ -636,6 +665,7 @@ export class Host {
       pinned: flags.pinned,
       archived: flags.archived,
       seenRuns: this.#seenRuns.get(managed.id) ?? 0,
+      usage: thread.usage,
       createdAt: managed.createdAt,
       updatedAt: last?.endedAt ?? last?.startedAt ?? managed.createdAt,
     };
@@ -699,6 +729,15 @@ export class Host {
       }
       case "thread.updated":
         this.#announce(event.thread);
+        // A thread a client went to has started, so the empty one it left can go;
+        // one that failed to start leaves it there to go back to.
+        if (event.thread.status !== "starting" && event.thread.status !== "closed")
+          for (const client of this.#clients.values())
+            if (client.left && client.showing === event.thread.id) {
+              const left = client.left;
+              client.left = null;
+              void this.#discardIfEmpty(left, client);
+            }
         this.#dirty.add(event.thread.id);
         this.#scheduleFlush();
         return;
@@ -726,7 +765,7 @@ export class Host {
           this.#notice(
             thread.id,
             "warning",
-            `Could not resume ${label(result.to)}'s own thread (${result.resumeError}); started a new one${result.handedOver > 0 ? `, which your message brings up to date on ${result.handedOver} ${result.handedOver === 1 ? "turn" : "turns"}` : ""}.`,
+            `Could not resume ${label(result.to)}'s own session (${result.resumeError}); started a new one${result.handedOver > 0 ? `, which your message brings up to date on ${result.handedOver} ${result.handedOver === 1 ? "turn" : "turns"}` : ""}.`,
           );
         return;
       }
@@ -739,11 +778,15 @@ export class Host {
         return;
       case "thread.forgotten":
         this.#logs.delete(event.threadId);
+        this.#answered.delete(event.threadId);
         this.#announced.delete(event.threadId);
         this.#commandsVersion.delete(event.threadId);
         this.#dirty.delete(event.threadId);
         if (this.#discarding.delete(event.threadId)) this.#store?.deleteThread(event.threadId);
-        this.#emit({ type: "removed", threadId: event.threadId });
+        // One being reopened comes straight back; telling clients it went could
+        // make one that already shows it, from the reply, drop it.
+        if (!this.#reopening.has(event.threadId))
+          this.#emit({ type: "removed", threadId: event.threadId });
         return;
     }
   }
@@ -829,6 +872,7 @@ export class Host {
         id,
         cwd: this.#options.cwd,
         showing: null,
+        left: null,
         connected: true,
         picks: new Map(),
         pending: new Map(),
@@ -1172,7 +1216,7 @@ export class Host {
       queue: [],
       held: false,
       requests: [],
-      usage: null,
+      usage: restoredUsage(row.usage),
       runCount: runs.length,
       lastRun: last
         ? { ...last, input: clipText(last.input) ?? "", result: clipText(last.result) }
@@ -1231,9 +1275,18 @@ export class Host {
       "client.show": async (client, { threadId }) => {
         const previous = client.showing;
         client.showing = threadId;
+        // A thread left earlier for one still starting: back to it, it stays; on to a
+        // third, it goes as an empty one would have.
+        const left = client.left;
+        client.left = null;
+        if (left && left !== threadId && left !== previous)
+          await this.#discardIfEmpty(left, client);
         if (previous && previous !== threadId) {
           this.#markSeen(previous);
-          await this.#discardIfEmpty(previous, client);
+          // Left for a thread still starting, it waits: that one may fail, and the client go back.
+          const starting = threadId ? this.manager.get(threadId)?.status === "starting" : false;
+          if (starting) client.left = previous;
+          else await this.#discardIfEmpty(previous, client);
         }
         if (threadId) this.#markSeen(threadId);
         return null;
@@ -1360,7 +1413,33 @@ export class Host {
         return { messageId: message.id };
       },
       "thread.respond": async (_client, { threadId, requestId, response }) => {
-        await this.#open(threadId).thread.respond(requestId, response);
+        const managed = this.#open(threadId);
+        const request = managed.thread.requests.find((open) => open.id === requestId);
+        // Answered once. Only requests still open are remembered, so the set stays small.
+        const open = new Set(managed.thread.requests.map((pending) => pending.id));
+        const answered = new Set(
+          [...(this.#answered.get(managed.id) ?? [])].filter((id) => open.has(id)),
+        );
+        this.#answered.set(managed.id, answered);
+        // A second answer, from another client, goes nowhere: not to the harness, and
+        // not into the thread's allowances, which an "always allow" would add to.
+        if (answered.has(requestId)) return null;
+        const first = request !== undefined;
+        if (first) answered.add(requestId);
+        try {
+          await managed.thread.respond(requestId, response);
+        } catch (error) {
+          // An answer that did not land leaves the request for another.
+          if (first) answered.delete(requestId);
+          throw error;
+        }
+        // The transcript keeps what was asked and the answer, for whoever reads it later.
+        if (request && first)
+          for (const decision of decisions(request, response)) {
+            const entry = this.#log(managed.id).decision(this.#seq + 1, decision);
+            this.#emit({ type: "entry", threadId: managed.id, entry });
+          }
+        this.#scheduleFlush();
         return null;
       },
       "thread.seen": async (_client, { threadId, runs }) => {

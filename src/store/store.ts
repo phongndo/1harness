@@ -6,6 +6,7 @@ import type {
   HarnessId,
   SessionInfo,
   SessionMethod,
+  Usage,
   UserInput,
 } from "../core/events.ts";
 import type { Message, MessageOrigin } from "../core/thread.ts";
@@ -40,6 +41,8 @@ export interface ThreadRow {
   archived: boolean;
   /** How many runs a client has shown. */
   seenRuns: number;
+  /** What the harness last said of its context and cost. */
+  usage: Usage | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -90,6 +93,7 @@ CREATE TABLE IF NOT EXISTS threads (
   native TEXT,
   forked_from TEXT,
   fork_context TEXT,
+  usage TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -232,6 +236,7 @@ export class Store {
       this.#db.exec("ALTER TABLE threads ADD COLUMN forked_from TEXT");
     if (!columns.has("fork_context"))
       this.#db.exec("ALTER TABLE threads ADD COLUMN fork_context TEXT");
+    if (!columns.has("usage")) this.#db.exec("ALTER TABLE threads ADD COLUMN usage TEXT");
     const version = this.#meta("schema");
     if (version === null) this.#setMeta("schema", String(SCHEMA_VERSION));
     else if (Number(version) > SCHEMA_VERSION)
@@ -308,15 +313,15 @@ export class Store {
     this.#run(
       `INSERT INTO threads (id, title, cwd, harness, parent_id, parent_call_id, origin, state, info,
          capabilities, methods, handoff, seen_without_handoff, generation, error, pinned, archived,
-         seen_runs, native, forked_from, fork_context, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         seen_runs, native, forked_from, fork_context, usage, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET title = excluded.title, cwd = excluded.cwd,
          harness = excluded.harness, state = excluded.state, info = excluded.info,
          capabilities = excluded.capabilities, methods = excluded.methods,
          handoff = excluded.handoff, seen_without_handoff = excluded.seen_without_handoff,
          generation = excluded.generation, error = excluded.error, pinned = excluded.pinned,
          archived = excluded.archived, seen_runs = excluded.seen_runs, native = excluded.native,
-         updated_at = excluded.updated_at`,
+         usage = excluded.usage, updated_at = excluded.updated_at`,
       row.id,
       row.title,
       row.cwd,
@@ -338,6 +343,7 @@ export class Store {
       row.info.threadId,
       row.forkedFrom,
       row.forkContext,
+      row.usage === null ? null : JSON.stringify(row.usage),
       row.createdAt,
       row.updatedAt,
     );
@@ -372,6 +378,7 @@ export class Store {
       pinned: Number(row["pinned"]) === 1,
       archived: Number(row["archived"]) === 1,
       seenRuns: Number(row["seen_runs"]),
+      usage: typeof row["usage"] === "string" ? json(row["usage"]) : null,
       createdAt: Number(row["created_at"]),
       updatedAt: Number(row["updated_at"]),
     };

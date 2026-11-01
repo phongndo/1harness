@@ -94,6 +94,15 @@ export type LogEntry =
   | { type: "delta"; itemId: string; chunk: string }
   /** A thread this one started, whose row goes here. */
   | { type: "agent"; threadId: string }
+  /** How the user answered a request: an approval's choice, or a question's answer. */
+  | {
+      type: "decision";
+      kind: "approval" | "question";
+      title: string;
+      answer: string;
+      outcome: "allowed" | "declined" | "answered" | "dismissed";
+      at: number;
+    }
   | { type: "session.ended"; error: string | null };
 
 export interface LoggedEntry {

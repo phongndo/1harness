@@ -16,7 +16,7 @@ function oneLine(text: string, width: number): string {
   return line.length > width ? `${line.slice(0, width - 1)}…` : line;
 }
 
-/** A transcript as plain text: messages, replies, commands, and notices. */
+/** A transcript as plain text: messages, replies, commands, answers, and notices. */
 export function transcriptText(entries: readonly LogEntry[]): string {
   const lines: string[] = [];
   for (const entry of entries) {
@@ -24,6 +24,10 @@ export function transcriptText(entries: readonly LogEntry[]): string {
       lines.push(`  (${entry.status}${entry.error ? `: ${entry.error}` : ""})`, "");
     if (entry.type === "session.ended" && entry.error)
       lines.push(`  (session ended: ${entry.error})`, "");
+    if (entry.type === "decision")
+      lines.push(
+        `  ${entry.title} → ${entry.outcome === "dismissed" ? "dismissed" : entry.answer}`,
+      );
     if (entry.type !== "item" || !entry.done) continue;
     const item = entry.item;
     switch (item.kind) {

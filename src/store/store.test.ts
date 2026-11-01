@@ -51,6 +51,7 @@ function row(id: string, overrides: Partial<ThreadRow> = {}): ThreadRow {
     pinned: false,
     archived: false,
     seenRuns: 0,
+    usage: null,
     createdAt: 1,
     updatedAt: 1,
     ...overrides,
@@ -69,6 +70,22 @@ describe("Store", () => {
     const second = Store.open(path);
     assert.equal(second.nextThreadId(), "t3");
     second.close();
+  });
+
+  it("keeps what the harness last said of context and cost", () => {
+    const store = Store.memory();
+    const usage = {
+      inputTokens: 10,
+      outputTokens: 20,
+      contextTokens: 30_000,
+      contextWindow: 1_000_000,
+      costUsd: 0.16,
+      limits: [],
+    };
+    store.saveThread(row("t1", { usage }));
+    assert.deepEqual(store.thread("t1")?.usage, usage);
+    store.saveThread(row("t2"));
+    assert.equal(store.thread("t2")?.usage, null);
   });
 
   it("lets one process write at a time", () => {

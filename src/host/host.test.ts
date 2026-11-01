@@ -12,6 +12,7 @@ import { agentRowOf } from "../tui/agents.ts";
 import { ThreadView } from "../tui/view.ts";
 import { Store } from "../store/store.ts";
 import { ScriptedSession, registerScripted } from "../testing/scripted.ts";
+import { registerDriver } from "../drivers/index.ts";
 import { Host } from "./host.ts";
 import { UNKNOWN_OUTCOME } from "./manager.ts";
 
@@ -146,6 +147,77 @@ describe("Host", () => {
     assert.equal(done.runCount, 1);
     assert.equal(done.lastRun?.result, "Done with go ASK");
     assert.equal(done.title, "go ASK");
+    // The transcript keeps what was asked and what the user chose.
+    const page = await client.call("thread.attach", { threadId: thread.id });
+    const decision = page.entries.find(({ entry }) => entry.type === "decision")?.entry;
+    assert.deepEqual(decision && { ...decision, at: 0 }, {
+      type: "decision",
+      kind: "approval",
+      title: asking.requests[0]?.kind === "approval" ? asking.requests[0].title : "",
+      answer: "Yes",
+      outcome: "allowed",
+      at: 0,
+    });
+  });
+
+  it("records an answer to a request once, however many clients answer it", async () => {
+    newHost();
+    const client = await connect("tui");
+    const other = await connect("other");
+    const thread = await client.call("thread.open", { harness: "scripted", settings });
+    await client.call("thread.send", { threadId: thread.id, text: "go ASK" });
+    await settle();
+    const answer = (who: typeof client, optionId: string) =>
+      who.call("thread.respond", {
+        threadId: thread.id,
+        requestId: "1-ask",
+        response: optionId ? { kind: "approval", optionId } : { kind: "cancel" },
+      });
+    await Promise.all([answer(client, "yes"), answer(other, "")]);
+    await idle(client, thread.id);
+    const page = await client.call("thread.attach", { threadId: thread.id });
+    const decisions = page.entries.filter(({ entry }) => entry.type === "decision");
+    assert.equal(decisions.length, 1);
+  });
+
+  it("keeps the empty thread a client left until the one it went to starts", async () => {
+    newHost();
+    // A harness whose session is made but cannot start.
+    const undo = registerDriver({
+      id: "broken",
+      label: "Broken",
+      unavailable: () => null,
+      create: (options) =>
+        Object.assign(new ScriptedSession(options), {
+          start: async () => {
+            await settle(10);
+            throw new Error("cannot start");
+          },
+        }),
+    });
+    try {
+      const client = await connect("tui");
+      const first = await client.call("thread.open", { harness: "scripted", settings });
+      await client.call("client.show", { threadId: first.id });
+      const opening = client.call("thread.open", { harness: "broken", settings }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      // The terminal shows the new thread as it starts, before the open settles.
+      await settle(0);
+      const started = [...client.threads.values()].find((thread) => thread.harness === "broken");
+      if (started) await client.call("client.show", { threadId: started.id });
+      assert.match(String(await opening), /cannot start/);
+      await settle();
+      assert.ok(client.threads.has(first.id), "the thread to go back to is still there");
+      // Back on it, it is the client's again: a later change does not discard it.
+      await client.call("client.show", { threadId: first.id });
+      await client.call("thread.rename", { threadId: first.id, title: "kept" });
+      await settle();
+      assert.ok(client.threads.has(first.id), "the thread gone back to stays");
+    } finally {
+      undo();
+    }
   });
 
   it("sends a retried message once", async () => {
@@ -238,7 +310,7 @@ describe("Host", () => {
       fresh: true,
     });
     assert.equal(result.resumed, false);
-    assert.match(notices.at(-1) ?? "", /Now on Scripted, in a new thread/);
+    assert.match(notices.at(-1) ?? "", /Now on Scripted, in a new session/);
   });
 
   it("runs a host command's pick through the client that ran it", async () => {
@@ -431,6 +503,29 @@ describe("Host with a store", () => {
       settings,
     });
     assert.equal(byId.id, thread.id);
+  });
+
+  it("reopens a closed thread still in memory without telling clients it went away", async () => {
+    newHost([], fresh());
+    const client = await connect("tui");
+    const thread = await client.call("thread.open", { harness: "scripted", settings });
+    await client.call("thread.send", { threadId: thread.id, text: "hello" });
+    await idle(client, thread.id);
+    await client.call("thread.close", { threadId: thread.id });
+    // A client whose reply comes before the events would lose the thread on a removal.
+    const removed: string[] = [];
+    client.on((event) => {
+      if (event.type === "removed") removed.push(event.threadId);
+    });
+    const reopened = await client.call("thread.resume", {
+      id: thread.id,
+      harness: "scripted",
+      settings,
+    });
+    assert.equal(reopened.status, "parked");
+    await settle();
+    assert.deepEqual(removed, []);
+    assert.equal(client.threads.get(thread.id)?.status, "parked");
   });
 
   it("does not report a task cut off by a crash to the thread that started it", async () => {

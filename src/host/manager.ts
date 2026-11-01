@@ -655,7 +655,7 @@ export class ThreadManager {
           prepare: async (next) => {
             // An agent that cannot resume may start a new thread instead, and say nothing.
             if (plan.resume !== null && next.info.threadId !== plan.resume)
-              throw new Error(`${label(harness)} started a new thread instead of resuming it`);
+              throw new Error(`${label(harness)} started a new session instead of resuming it`);
             await holdModes(next, harness, plan.asked);
           },
           // A narrower mode is no more available in a new thread than in a resumed one.

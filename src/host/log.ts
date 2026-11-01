@@ -1,4 +1,4 @@
-import type { Item } from "../core/events.ts";
+import type { HarnessRequest, Item, RequestResponse } from "../core/events.ts";
 import { appendDelta, type Message, type ThreadEvent } from "../core/thread.ts";
 import type { LogEntry, LoggedEntry, TurnTokens } from "../protocol.ts";
 
@@ -147,6 +147,11 @@ export class ThreadLog {
     return this.#add(seq, { type: "agent", threadId });
   }
 
+  /** Records how the user answered a request. */
+  decision(seq: number, entry: Extract<LogEntry, { type: "decision" }>): LogEntry {
+    return this.#add(seq, entry);
+  }
+
   /** Entries added or changed since the last call. */
   flush(): LoggedEntry[] {
     const dirty = [...this.#dirty];
@@ -165,4 +170,46 @@ export class ThreadLog {
     for (const [id, open] of this.#open)
       if (open.entry.type === "item" && open.entry.item.kind === "todo_list") this.#open.delete(id);
   }
+}
+
+type Decision = Extract<LogEntry, { type: "decision" }>;
+
+/**
+ * How a response answers a request, as the transcript records it: the choice
+ * made on an approval, or each question's answer. Secret answers stay out.
+ */
+export function decisions(
+  request: HarnessRequest,
+  response: RequestResponse,
+  at = Date.now(),
+): Decision[] {
+  if (request.kind === "approval") {
+    const base = { type: "decision", kind: "approval", title: request.title, at } as const;
+    switch (response.kind) {
+      case "approval": {
+        const option = request.options.find((candidate) => candidate.id === response.optionId);
+        const effect = option?.effect ?? "other";
+        const outcome =
+          effect === "deny" ? "declined" : effect === "other" ? "answered" : "allowed";
+        return [{ ...base, answer: option?.label ?? response.optionId, outcome }];
+      }
+      case "decline":
+        return [{ ...base, answer: response.reason, outcome: "declined" }];
+      case "cancel":
+        return [{ ...base, answer: "", outcome: "dismissed" }];
+      case "question":
+        return [];
+    }
+  }
+  const base = { type: "decision", kind: "question", at } as const;
+  if (response.kind !== "question") {
+    const [first] = request.questions;
+    return [{ ...base, title: first?.question ?? "Question", answer: "", outcome: "dismissed" }];
+  }
+  return request.questions.map((question) => ({
+    ...base,
+    title: question.question,
+    answer: question.secret ? "(hidden)" : (response.answers[question.id] ?? []).join(", "),
+    outcome: "answered",
+  }));
 }

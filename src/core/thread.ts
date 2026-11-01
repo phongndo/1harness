@@ -49,6 +49,8 @@ export interface SavedThread {
   allowances: string[];
   /** Messages that were queued, with the input their harness gets; they come back held. */
   queue: { message: Message; input: UserInput }[];
+  /** What the harness last said of its context and cost, shown until it says again. */
+  usage?: Usage | null;
 }
 
 /**
@@ -197,6 +199,7 @@ export class Thread {
     this.#methods = [...saved.methods];
     this.#handoff = saved.handoff;
     this.#generation = saved.generation;
+    this.#usage = saved.usage ?? null;
     for (const key of saved.allowances) this.#allowances.add(key);
     for (const { message, input } of saved.queue) {
       this.#messages.set(message.id, message);
