@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ASK, askFor, askForChanges, planOptions } from "./wording.ts";
+import { ASK, ago, askFor, askForChanges, planOptions } from "./wording.ts";
 
 const labels = (options: ReturnType<typeof planOptions>) =>
   options.map((option) => [option.id, option.label]);
@@ -30,5 +30,24 @@ describe("wording", () => {
       planOptions("supervised", ["supervised", "auto-edit"]).map((option) => option.id),
       ["supervised", "keep"],
     );
+  });
+});
+
+const now = new Date(2026, 9, 31, 22, 0).getTime();
+
+/** A time this many days, hours, and minutes before `now`. */
+function at(days: number, hours = 0, minutes = 0): number {
+  return new Date(2026, 9, 31 - days, 22 - hours, -minutes).getTime();
+}
+
+describe("ago", () => {
+  it("says how long ago, more coarsely the longer it was", () => {
+    assert.equal(ago(now - 20_000, now), "just now");
+    assert.equal(ago(at(0, 0, 5), now), "5m ago");
+    assert.equal(ago(at(0, 3), now), "3h ago");
+    assert.equal(ago(at(1), now), "yesterday");
+    assert.match(ago(at(3), now), /^[A-Z][a-z]+day$/);
+    assert.match(ago(at(20), now), /Oct/);
+    assert.match(ago(new Date(2025, 0, 2).getTime(), now), /2025/);
   });
 });

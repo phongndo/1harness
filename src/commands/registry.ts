@@ -52,6 +52,11 @@ export interface CommandUI {
   progress(text: string): (level: NoticeLevel, text: string) => void;
   /** Replaces the composer's text. */
   setInput(text: string): void;
+  /**
+   * Shows the client's list of threads, starting at the earlier ones for
+   * `recent`, and opens the one chosen; where the client has such a list.
+   */
+  threads?(focus: "open" | "recent"): Promise<void>;
 }
 
 /** The current thread as a command reaches it, wherever the thread runs. */

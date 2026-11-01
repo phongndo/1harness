@@ -21,11 +21,11 @@ import { PROTOCOL_VERSION } from "./protocol.ts";
 import { serverCommand } from "./server/cli.ts";
 import { ensureServer } from "./server/lifecycle.ts";
 import { hostsCommand, whoami } from "./client/hosts-cli.ts";
-import { resolveServer } from "./client/hosts.ts";
+import { loadHosts, resolveServer } from "./client/hosts.ts";
 import { threadsCommand } from "./client/threads-cli.ts";
 import { watch } from "./client/watch.ts";
 import { Store, StoreLocked } from "./store/store.ts";
-import { App } from "./tui/app.ts";
+import { App, type ServerInfo } from "./tui/app.ts";
 
 const labels = drivers().map((driver) => driver.label);
 const help = `1harness
@@ -225,10 +225,48 @@ async function interactive(options: {
   /** Whether `-C` named the folder, which on another machine is that machine's. */
   cwdGiven: string | undefined;
 }): Promise<void> {
-  const { session, version } = options;
   const extensions = options.extensions.map((path) => resolve(path));
+  const here = options.session.cwd;
+  let server = options.server;
+  let session = options.session;
+  let prompt = options.prompt;
+  let cwdGiven = options.cwdGiven;
+  let warnings = options.warnings;
+  // /connect ends one terminal session and starts the next on the server it chose.
+  for (;;) {
+    const next = await terminal({
+      ...options,
+      server,
+      session,
+      prompt,
+      cwdGiven,
+      warnings,
+      extensions,
+    });
+    if (next === undefined) return;
+    server = next || undefined;
+    session = { ...session, cwd: here, resume: null };
+    prompt = null;
+    cwdGiven = undefined;
+    warnings = [];
+  }
+}
+
+/** One terminal session on one server; resolves with the server /connect chose next. */
+async function terminal(options: {
+  harness: HarnessId;
+  session: SessionOptions;
+  prompt: string | null;
+  version: string;
+  extensions: string[];
+  warnings: string[];
+  server: string | undefined;
+  cwdGiven: string | undefined;
+}): Promise<string | undefined> {
+  const { session, version, extensions } = options;
   const id = newClientId();
   let client: HostClient;
+  let server: ServerInfo;
   const warnings: string[] = [];
   const notes: string[] = [];
   if (process.env["ONEHARNESS_AUTOSTART"] === "0") {
@@ -254,6 +292,14 @@ async function interactive(options: {
       { cwd: session.cwd, version, extensions },
       id,
     );
+    server = {
+      label: "local",
+      local: true,
+      inProcess: true,
+      identity: null,
+      address: "",
+      pid: process.pid,
+    };
   } else {
     const { target, label, local, hello, revive } = await reach(version, options.server);
     // The server reports problems with the config it read itself.
@@ -277,8 +323,16 @@ async function interactive(options: {
       { cwd: session.cwd, version, extensions: local ? extensions : [] },
       id,
     );
+    server = {
+      label,
+      local,
+      inProcess: false,
+      identity: hello.identity,
+      address: "socket" in target ? target.socket : target.url,
+      pid: hello.pid,
+    };
   }
-  await new App({
+  return new App({
     client,
     harness: options.harness,
     session,
@@ -286,6 +340,19 @@ async function interactive(options: {
     prompt: options.prompt,
     warnings,
     notes,
+    server,
+    // Without a server, there is nowhere to move to.
+    ...(server.inProcess
+      ? {}
+      : {
+          connect: {
+            hosts: () => loadHosts(),
+            // A server that does not answer keeps the terminal where it is.
+            check: async (spec: string) => {
+              await reach(version, spec || undefined);
+            },
+          },
+        }),
   }).run();
 }
 

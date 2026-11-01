@@ -1,7 +1,7 @@
 import type { McpAction, McpServer, ModelOption, ThreadSummary } from "../core/events.ts";
 import type { ThreadListing } from "../protocol.ts";
 import { errorMessage } from "../core/thread.ts";
-import { MODE_DESCRIPTIONS, shortTime } from "../core/wording.ts";
+import { EFFORT_DESCRIPTIONS, MODE_DESCRIPTIONS } from "../core/wording.ts";
 import {
   completion,
   liveSession,
@@ -120,7 +120,7 @@ const newThread: CommandDefinition = {
 const resume: CommandDefinition = {
   name: "resume",
   usage: "[id]",
-  description: "open an earlier thread: 1harness's, such as t42, or the harness's own",
+  description: "open an earlier thread: 1harness's, such as t42, or the harness's own session",
   group: "Session",
   complete: (context) => ({
     start: 0,
@@ -140,42 +140,9 @@ const resume: CommandDefinition = {
       await context.openThread({ resume: args });
       return;
     }
-    context.forget("stored");
-    const stored = await storedThreads(context);
-    const session = liveSession(context);
-    // A parked thread's harness is not started just to list its own threads.
-    const natives =
-      session?.listThreads && !context.thread?.parked
-        ? await session.listThreads().catch(() => [])
-        : [];
-    // A harness's thread a 1harness thread already runs is listed once, as 1harness's.
-    const known = new Set(stored.map((thread) => thread.native));
-    const own = natives.filter((thread) => !known.has(thread.id));
-    if (stored.length === 0 && own.length === 0) {
-      context.ui.notify("info", "No earlier threads in this folder.");
-      return;
-    }
-    const cwd = context.info?.cwd;
-    const harnessTab = context.harnesses().find((entry) => entry.id === context.harness)?.label;
-    const choices = [
-      ...stored.map((thread) => ({
-        id: thread.id,
-        label: oneLine(thread.title || thread.id).slice(0, 60),
-        detail: `${thread.id} · ${thread.harness} · ${thread.status}${thread.cwd === cwd ? "" : ` · ${thread.cwd}`}`,
-        tag: shortTime(thread.updatedAt),
-        group: "1harness",
-      })),
-      ...own.map((thread) => ({
-        id: thread.id,
-        label: oneLine(thread.title).slice(0, 60),
-        detail: "",
-        tag: shortTime(thread.updatedAt),
-        group: harnessTab ?? context.harness,
-      })),
-    ];
-    const index = await context.ui.pick("Threads", choices, { filter: true, tabs: true });
-    const id = index === null ? undefined : choices[index]?.id;
-    if (id) await context.openThread({ resume: id });
+    if (!context.ui.threads) throw new Error("Usage: /resume <id>");
+    // One list of threads: the open ones, earlier ones, and the harness's own.
+    await context.ui.threads("recent");
   },
 };
 
@@ -186,14 +153,11 @@ const harness: CommandDefinition = {
   group: "Session",
   complete(context, args) {
     const space = args.indexOf(" ");
-    if (space === -1)
-      return {
-        start: 0,
-        items: harnessCompletions(context).items.map((item) => ({ ...item, more: true })),
-      };
+    // `fresh` may follow a harness, but need not, so enter on one runs the switch.
+    if (space === -1) return harnessCompletions(context);
     return {
       start: space + 1,
-      items: [completion("fresh", "start it a new thread rather than resume its earlier one")],
+      items: [completion("fresh", "start a new session there rather than resume its earlier one")],
     };
   },
   async run(context, args) {
@@ -208,7 +172,8 @@ const harness: CommandDefinition = {
         all.map((driver) => ({
           label: driver.id,
           detail: driver.unavailable ?? driver.label,
-          tag: driver.id === context.harness ? "current" : "",
+          tag:
+            driver.id === context.harness ? "current" : driver.unavailable ? "not installed" : "",
         })),
         {
           initial: Math.max(
@@ -306,7 +271,12 @@ const effort: CommandDefinition = {
     return {
       start: 0,
       items: (option?.efforts ?? []).map((level) =>
-        completion(level, level === option?.defaultEffort ? "default" : ""),
+        completion(
+          level,
+          [EFFORT_DESCRIPTIONS[level], level === option?.defaultEffort ? "default" : ""]
+            .filter(Boolean)
+            .join(" · "),
+        ),
       ),
     };
   },
@@ -320,12 +290,15 @@ const effort: CommandDefinition = {
         context.ui.notify("info", "This model has no effort levels to choose from.");
         return;
       }
-      const current = efforts.indexOf(context.info?.effort ?? "");
+      // With none chosen, the model's default is the one in use.
+      const current = efforts.indexOf(context.info?.effort ?? option?.defaultEffort ?? "");
       const index = await context.ui.pick(
         "Efforts",
         efforts.map((level, position) => ({
           label: level,
-          detail: level === option?.defaultEffort ? "default" : "",
+          detail: [EFFORT_DESCRIPTIONS[level], level === option?.defaultEffort ? "default" : ""]
+            .filter(Boolean)
+            .join(" · "),
           tag: position === current ? "current" : "",
         })),
         { initial: Math.max(0, current) },
@@ -410,7 +383,7 @@ const mcp: CommandDefinition = {
       };
     }
     const action = args.slice(0, space);
-    if (action !== "show" && !(action in MCP_ACTIONS)) return null;
+    if (action !== "show" && !Object.hasOwn(MCP_ACTIONS, action)) return null;
     return {
       start: space + 1,
       items: listed(context, "mcp", () => mcpServers(context)).map((server: McpServer) =>
@@ -427,9 +400,20 @@ const mcp: CommandDefinition = {
       context.ui.report(mcpListReport(context.harness, servers, session.capabilities.mcpActions));
       return;
     }
-    const known = action === "show" || action in MCP_ACTIONS;
-    const name = known ? rest : args;
-    if (!name && known) throw new Error(`Usage: /mcp ${action} NAME`);
+    const known = action === "show" || Object.hasOwn(MCP_ACTIONS, action);
+    let name = known ? rest : args;
+    if (!name && known) {
+      // Without a name, the servers to choose from.
+      if (servers.length === 0) throw new Error("No MCP servers");
+      const index = await context.ui.pick(
+        `MCP servers to ${action === "show" ? "show" : MCP_ACTIONS[action as McpAction].description.replace(/ a server$/, "")}`,
+        servers.map((server) => ({ label: server.name, detail: describeMcpServer(server) })),
+        { filter: true },
+      );
+      const chosen = index === null ? undefined : servers[index];
+      if (!chosen) return;
+      name = chosen.name;
+    }
     const server =
       servers.find((candidate) => candidate.name === name) ??
       servers.find((candidate) => candidate.name.toLowerCase() === name.toLowerCase());

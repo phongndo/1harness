@@ -138,3 +138,39 @@ export function formatTokens(count: number): string {
 export function shortTime(time: number): string {
   return new Date(time).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
 }
+
+/**
+ * How long ago, as lists of threads say it: `just now`, `5m ago`, `3h ago`,
+ * `yesterday`, a weekday within the week, then a date.
+ */
+export function ago(time: number, now = Date.now()): string {
+  const minutes = Math.floor((now - time) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const then = new Date(time);
+  const today = new Date(now);
+  const days = Math.round(
+    (new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime() -
+      new Date(then.getFullYear(), then.getMonth(), then.getDate()).getTime()) /
+      86_400_000,
+  );
+  if (days === 0) return `${Math.floor(minutes / 60)}h ago`;
+  if (days === 1) return "yesterday";
+  if (days < 7) return then.toLocaleDateString(undefined, { weekday: "long" });
+  return then.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(then.getFullYear() === today.getFullYear() ? {} : { year: "numeric" }),
+  });
+}
+
+/** What each common reasoning effort means, as the effort picker says it. */
+export const EFFORT_DESCRIPTIONS: Record<string, string> = {
+  none: "no reasoning",
+  minimal: "the least reasoning, for the fastest replies",
+  low: "quick replies with light reasoning",
+  medium: "a balance of speed and reasoning",
+  high: "reasons longer before answering",
+  xhigh: "reasons much longer, for hard problems",
+  max: "the most reasoning the model allows",
+};
