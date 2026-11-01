@@ -16,13 +16,22 @@ after(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-/** A stand-in html2term that keeps what it was given and writes `output`, or fails with `error`. */
-function fake(output: string, error?: string): string {
+/**
+ * A stand-in html2term that keeps what it was given and writes `output`, or
+ * fails with `error`; asked what it can do, it says `capabilities`, or
+ * nothing it understands when that is null, as one too old to know.
+ */
+function fake(
+  output: string,
+  error?: string,
+  capabilities: string | null = '{"version":"0.1.0","features":["transparent"],"browser":null}',
+): string {
   const path = join(root, `html2term-${Math.random().toString(36).slice(2)}`);
   writeFileSync(join(root, "out"), output);
+  const asked = capabilities === null ? "exit 2" : `echo '${capabilities}'; exit 0`;
   writeFileSync(
     path,
-    `#!/bin/sh\necho "$@" > "${root}/args"\ncat > "${root}/stdin"\n${
+    `#!/bin/sh\nif [ "$1" = capabilities ]; then ${asked}; fi\necho "$@" > "${root}/args"\ncat > "${root}/stdin"\n${
       error ? `echo "${error}" >&2\nexit 3` : `cat "${root}/out"`
     }\n`,
   );
@@ -42,7 +51,7 @@ describe("Media", () => {
     assert.equal(readFileSync(join(root, "stdin"), "utf8"), "<p>hi</p>");
   });
 
-  it("asks for a transparent page, and an html2term that predates it for one on its canvas", async () => {
+  it("asks for a transparent page, only of an html2term that says it can draw one", async () => {
     const media = new Media(fake("PNG"));
     await media.html("<p>hi</p>", { width: 400, scale: 1, dark: true, transparent: true });
     assert.match(readFileSync(join(root, "args"), "utf8"), /--dark --transparent$/m);
@@ -51,14 +60,8 @@ describe("Media", () => {
       /^<p>hi<\/p>\n<style>html,body\{background:transparent!important\}<\/style>$/,
       "its own background is not drawn",
     );
-    // An older one says it knows no such flag; the page is drawn again without it.
-    const older = join(root, "html2term-older");
-    writeFileSync(
-      older,
-      `#!/bin/sh\ncase "$*" in *--transparent*) echo "error: unexpected argument '--transparent' found" >&2; exit 2;; esac\necho "$@" > "${root}/args"\ncat >/dev/null\nprintf PNG\n`,
-    );
-    chmodSync(older, 0o755);
-    const png = await new Media(older).html("<p>", {
+    // One too old to say what it can do draws the page on its canvas.
+    const png = await new Media(fake("PNG", undefined, null)).html("<p>", {
       width: 400,
       scale: 1,
       dark: true,
@@ -66,6 +69,27 @@ describe("Media", () => {
     });
     assert.equal(png.toString(), "PNG");
     assert.doesNotMatch(readFileSync(join(root, "args"), "utf8"), /--transparent/);
+  });
+
+  it("asks html2term once what it can do, and finds nothing in one too old to say", () => {
+    const media = new Media(
+      fake(
+        "PNG",
+        undefined,
+        '{"version":"9.9.9","features":["svg-image"],"browser":"/opt/chrome"}',
+      ),
+    );
+    assert.deepEqual(media.capabilities, {
+      version: "9.9.9",
+      features: ["svg-image"],
+      browser: "/opt/chrome",
+    });
+    assert.deepEqual(new Media(fake("PNG", undefined, null)).capabilities, {
+      version: null,
+      features: [],
+      browser: null,
+    });
+    assert.deepEqual(new Media(null).capabilities.features, []);
   });
 
   it("counts a handler such as onclick as a script, and not the word on in text", () => {

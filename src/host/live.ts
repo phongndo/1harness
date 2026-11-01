@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import type { LiveFrame, PageEvent } from "../protocol.ts";
-import { MAX_HTML_BYTES, browserAvailable, floatingPage } from "./media.ts";
+import { MAX_HTML_BYTES, floatingPage } from "./media.ts";
 
 // Pages that keep running: html2term's browser worker holds each one open in
 // Chromium, with its scripts, timers, and canvas alive, and draws a frame of
@@ -51,19 +51,21 @@ function digest(data: string): string {
 
 export class LivePages {
   #binary: () => string | null;
+  #browser: () => boolean;
   #worker: Worker | null = null;
   #next = 1;
   /** Open pages: who opened them, the last frame sent, and when they were last used. */
   #pages = new Map<string, { owner: string; shown: string; used: number }>();
 
-  /** `binary` finds html2term when it is needed. */
-  constructor(binary: () => string | null) {
+  /** `binary` finds html2term when it is needed; `browser` says whether it has a Chromium. */
+  constructor(binary: () => string | null, browser: () => boolean = () => true) {
     this.#binary = binary;
+    this.#browser = browser;
   }
 
   /** Whether pages can run here: html2term and a Chromium for it. */
   get available(): boolean {
-    return Boolean(this.#binary()) && browserAvailable();
+    return Boolean(this.#binary()) && this.#browser();
   }
 
   /** Opens a page for `owner`; its first frame comes with its ID. */

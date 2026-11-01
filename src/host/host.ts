@@ -253,7 +253,10 @@ export class Host {
   /** html2term, for images shrunk to their size on screen and pages drawn as pictures. */
   readonly media = new Media();
   /** Pages kept running for clients, through html2term's browser worker. */
-  readonly live = new LivePages(() => this.media.binary);
+  readonly live = new LivePages(
+    () => this.media.binary,
+    () => this.media.capabilities.browser !== null,
+  );
   /** The tools that show the user pages, which every session gets with the orchestrator's. */
   readonly pageTools: ToolDefinition[];
   #listeners = new Set<(event: HostEvent) => void>();
