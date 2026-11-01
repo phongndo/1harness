@@ -8,7 +8,7 @@ import type {
   SessionInfo,
   UserInput,
 } from "./events.ts";
-import { Thread, type ThreadEvent } from "./thread.ts";
+import { Thread, type SessionAttempt, type ThreadEvent } from "./thread.ts";
 
 class FakeSession {
   readonly capabilities = {
@@ -78,6 +78,21 @@ function approval(id: string, shell: string): HarnessEvent {
 /** Lets the thread consume the events pushed so far. */
 function settle(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
+}
+
+/** One way to move a thread onto `session`, for `replaceSession`. */
+function attempt(
+  session: FakeSession,
+  options: Omit<SessionAttempt, "create"> = {},
+): SessionAttempt {
+  return { create: () => session as unknown as HarnessSession, ...options };
+}
+
+/** A session whose start fails. */
+function broken(): FakeSession {
+  return Object.assign(new FakeSession(), {
+    start: () => Promise.reject(new Error("cannot start")),
+  });
 }
 
 async function setup() {
@@ -291,39 +306,41 @@ describe("Thread", () => {
     });
     const events: ThreadEvent[] = [];
     thread.subscribe((event) => events.push(event));
-    await thread.replaceSession(next as unknown as HarnessSession);
+    await thread.replaceSession([attempt(next)]);
     assert.equal(thread.session, next as unknown as HarnessSession);
     assert.equal(session.events.ended, true);
     const shown = events.flatMap((event) =>
       event.type === "session.replaced"
         ? [`replaced ${event.previous.harness}`]
         : event.type === "item.completed"
-          ? [event.item.kind]
+          ? [`${event.item.kind} ${event.item.id}`]
           : [],
     );
-    assert.deepEqual(shown, ["replaced codex", "notice"]);
+    // The new session's items are numbered apart from the old one's, which reused IDs.
+    assert.deepEqual(shown, ["replaced codex", "notice s1:n"]);
     await thread.close();
   });
 
   it("puts the handoff in front of the next message only, after any harness command", async () => {
     const { thread } = await setup();
     const next = new FakeSession();
-    await thread.replaceSession(next as unknown as HarnessSession, { handoff: "HANDOFF" });
+    await thread.replaceSession([attempt(next, { handoff: "HANDOFF" })]);
     const finish = async (turnId: string) => {
       next.events.push({ type: "turn.started", turnId });
       next.events.push({ type: "turn.ended", turnId, status: "completed", error: null });
       await settle();
     };
-    thread.send({ text: "/review" });
+    await thread.command(command("review", true), "");
     await finish("1");
-    thread.send({ text: "go on" });
+    // A message that only starts with a slash is still a message, and gets the handoff.
+    thread.send({ text: "/etc/hosts has a typo, fix it" });
     await finish("2");
     thread.send({ text: "again" });
-    assert.deepEqual(next.turns, ["/review", "HANDOFF\n\ngo on", "again"]);
+    assert.deepEqual(next.turns, ["/review", "HANDOFF\n\n/etc/hosts has a typo, fix it", "again"]);
     // The thread keeps the message as it was sent, for transcripts and records.
     const id = next.sent[1]?.id;
     assert.ok(id);
-    assert.equal(thread.message(id)?.input.text, "go on");
+    assert.equal(thread.message(id)?.input.text, "/etc/hosts has a typo, fix it");
     assert.equal(thread.handoff, null);
     await thread.close();
   });
@@ -331,17 +348,11 @@ describe("Thread", () => {
   it("refuses to move while working, and stays put when the new session fails", async () => {
     const { session, thread } = await setup();
     thread.send({ text: "work" });
-    await assert.rejects(
-      thread.replaceSession(new FakeSession() as unknown as HarnessSession),
-      /working/,
-    );
+    await assert.rejects(thread.replaceSession([attempt(new FakeSession())]), /working/);
     session.events.push({ type: "turn.started", turnId: "1" });
     session.events.push({ type: "turn.ended", turnId: "1", status: "completed", error: null });
     await settle();
-    const broken = Object.assign(new FakeSession(), {
-      start: () => Promise.reject(new Error("cannot start")),
-    });
-    const moving = thread.replaceSession(broken as unknown as HarnessSession, { handoff: "H" });
+    const moving = thread.replaceSession([attempt(broken(), { handoff: "H" })]);
     // A message sent meanwhile waits to see which session runs the thread.
     thread.send({ text: "meanwhile" });
     assert.equal(thread.switching, true);
@@ -352,5 +363,77 @@ describe("Thread", () => {
     assert.deepEqual(session.turns, ["work", "meanwhile"]);
     assert.equal(thread.handoff, null);
     await thread.close();
+  });
+
+  it("tries the next session when one fails, keeping messages sent meanwhile for it", async () => {
+    const { session, thread } = await setup();
+    const fresh = new FakeSession();
+    const moving = thread.replaceSession([
+      attempt(broken(), { handoff: "DELTA", fallThrough: () => true }),
+      attempt(fresh, { handoff: "FULL" }),
+    ]);
+    thread.send({ text: "go on" });
+    const { attempt: took, failures } = await moving;
+    assert.equal(took, 1);
+    assert.match(String(failures[0]), /cannot start/);
+    // Never the old session, and with the handoff of the session that took over.
+    assert.deepEqual(session.turns, []);
+    assert.deepEqual(fresh.turns, ["FULL\n\ngo on"]);
+    await thread.close();
+  });
+
+  it("gives up when the old session starts work, or the new one ends, before taking over", async () => {
+    const { session, thread } = await setup();
+    // The old session starts a turn of its own while the new one prepares.
+    const next = new FakeSession();
+    await assert.rejects(
+      thread.replaceSession([
+        attempt(next, {
+          prepare: async () => {
+            session.events.push({ type: "turn.started", turnId: "own" });
+            await settle();
+          },
+          fallThrough: () => true,
+        }),
+        attempt(new FakeSession()),
+      ]),
+      /started working during the switch/,
+    );
+    assert.equal(thread.session, session as unknown as HarnessSession);
+    assert.equal(next.events.ended, true);
+    // Its turn ends normally, since the old session kept the thread.
+    session.events.push({ type: "turn.ended", turnId: "own", status: "completed", error: null });
+    await settle();
+    assert.equal(thread.busy, false);
+
+    // A new session that dies after starting leaves the thread where it was.
+    const dying = new FakeSession();
+    await assert.rejects(
+      thread.replaceSession([
+        attempt(dying, {
+          prepare: async () => {
+            dying.events.push({ type: "session.closed", error: "crashed" });
+          },
+        }),
+      ]),
+      /ended as it started: crashed/,
+    );
+    assert.equal(thread.session, session as unknown as HarnessSession);
+    assert.equal(thread.closed, false);
+    await thread.close();
+  });
+
+  it("closes a session still starting when the thread closes", async () => {
+    const { thread } = await setup();
+    let release!: () => void;
+    const slow = Object.assign(new FakeSession(), {
+      start: () => new Promise<void>((resolve) => (release = resolve)),
+    });
+    const moving = thread.replaceSession([attempt(slow)]);
+    await settle();
+    await thread.close();
+    assert.equal(slow.events.ended, true);
+    release();
+    await assert.rejects(moving, /ended/);
   });
 });

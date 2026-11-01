@@ -21,9 +21,10 @@ describe("ToolServer", () => {
     const server = new ToolServer(() => new Map([["echo", { tool: echo }]]), "1.0.0");
     const grant = await server.grant();
     assert.ok(grant && grant.config.type === "http");
-    // The harness says which call this is in metadata only its driver reads.
+    // The harness says which call this is in metadata only its driver reads; the thread
+    // numbers it as its own items are numbered.
     const thread = {
-      session: { mcpCallId: (meta: Record<string, unknown>) => String(meta["call"] ?? "") || null },
+      callId: (meta: Record<string, unknown>) => String(meta["call"] ?? "") || null,
     } as unknown as Thread;
     grant.bind(thread);
     const post = async (

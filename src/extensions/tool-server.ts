@@ -176,7 +176,7 @@ export class ToolServer {
         try {
           const input = (params["arguments"] ?? {}) as Record<string, unknown>;
           const meta = (params["_meta"] ?? {}) as Record<string, unknown>;
-          const callId = grant.thread.session.mcpCallId?.(meta, name) ?? null;
+          const callId = grant.thread.callId(meta, name);
           const result = await entry.tool.execute(input, {
             thread: grant.thread,
             ...(callId ? { callId } : {}),

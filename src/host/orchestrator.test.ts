@@ -7,6 +7,7 @@ import { AsyncQueue } from "../core/async-queue.ts";
 import type {
   Capabilities,
   HarnessEvent,
+  HarnessSession,
   RequestResponse,
   RuntimeMode,
   SessionInfo,
@@ -254,6 +255,20 @@ before(async () => {
       label: "Fake B",
       unavailable: () => null,
       create: (options) => new FakeSession(options),
+    }),
+    // Starts slowly, to switch while it is still starting.
+    registerDriver({
+      id: "fake-slow",
+      label: "Fake slow",
+      unavailable: () => null,
+      create: (options) => Object.assign(new FakeSession(options), { start: () => settle(40) }),
+    }),
+    // Asked to resume, it starts a new thread instead, as ACP agents without loadSession do.
+    registerDriver({
+      id: "fake-forgetful",
+      label: "Fake forgetful",
+      unavailable: () => null,
+      create: (options) => new FakeSession({ ...options, resume: null }),
     }),
     // Only broad modes, and no plan mode.
     registerDriver({
@@ -517,6 +532,51 @@ describe("Switching harness", () => {
     sessionOf(thread).background = [];
     await manager.switchHarness(thread.id, "fake-b");
     assert.equal(thread.harness, "fake-b");
+  });
+
+  it("starts over with a full handoff when a harness starts a new thread instead of resuming", async () => {
+    const thread = await manager.create({ harness: "fake-forgetful", settings: settings() });
+    thread.thread.send({ text: "one" });
+    await manager.wait(thread.id, 1000);
+    await manager.switchHarness(thread.id, "fake");
+    thread.thread.send({ text: "two" });
+    await manager.wait(thread.id, 1000);
+    const back = await manager.switchHarness(thread.id, "fake-forgetful");
+    assert.equal(back.resumed, false);
+    assert.match(back.resumeError ?? "", /started a new thread instead of resuming it/);
+    assert.equal(back.handedOver, 2);
+    thread.thread.send({ text: "three" });
+    await manager.wait(thread.id, 1000);
+    const handed = sessionOf(thread).prompts[0] ?? "";
+    assert.match(handed, /has moved to you/);
+    assert.match(handed, /Turn 1 · Fake forgetful\nUser: one/);
+  });
+
+  it("does not move a thread that is still starting", async () => {
+    // The thread is listed as soon as it is created, before its session has started.
+    const created = new Promise<ManagedThread>((resolve) => {
+      const unsubscribe = manager.subscribe((event) => {
+        if (event.type !== "thread.created") return;
+        unsubscribe();
+        resolve(event.thread);
+      });
+    });
+    const creating = manager.create({ harness: "fake-slow", settings: settings() });
+    const starting = await created;
+    assert.equal(starting.status, "starting");
+    await assert.rejects(manager.switchHarness(starting.id, "fake-b"), /is still starting/);
+    const thread = await creating;
+    assert.equal(thread.harness, "fake-slow");
+    assert.equal(thread.status, "idle");
+  });
+
+  it("takes the harness from the session when other code replaces it", async () => {
+    const thread = await manager.create({ harness: "fake", settings: settings() });
+    const other = new FakeSession(settings());
+    other.info.harness = "elsewhere";
+    await thread.thread.replaceSession([{ create: () => other as unknown as HarnessSession }]);
+    assert.equal(thread.harness, "elsewhere");
+    assert.equal(thread.status, "idle");
   });
 
   it("refuses to move a working thread or to a harness that is not there", async () => {

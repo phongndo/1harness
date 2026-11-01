@@ -17,7 +17,7 @@ import {
 import { createSession, drivers, findDriver } from "../drivers/index.ts";
 import type { ExtensionHost } from "../extensions/host.ts";
 import type { ToolServer } from "../extensions/tool-server.ts";
-import { handoffText } from "./handoff.ts";
+import { handoffText, stripHandoff } from "./handoff.ts";
 
 export type ThreadStatus = "starting" | "idle" | "working" | "waiting" | "closed";
 
@@ -132,6 +132,11 @@ export class ModeError extends Error {
 }
 
 const TITLE_LENGTH = 48;
+
+/** A harness's name as people know it, such as `Claude Code`. */
+function label(harness: HarnessId): string {
+  return findDriver(harness)?.label ?? harness;
+}
 
 /** A one-line title from the start of a message. */
 export function titleFrom(text: string): string {
@@ -301,6 +306,8 @@ export class ThreadManager {
     const fresh = options.fresh === true;
     if (harness === from && !fresh) throw new Error(`${id} already runs on ${harness}`);
     if (this.#switching.has(id)) throw new Error(`${id} is already moving to another harness`);
+    // Its first session is still starting; moving now would race that start.
+    if (managed.status === "starting") throw new Error(`${id} is still starting`);
     const thread = managed.thread;
     if (thread.busy || thread.requests.length > 0)
       throw new Error(`${id} is working; wait for the turn to end or stop it first`);
@@ -346,53 +353,55 @@ export class ThreadManager {
       ...(Object.keys(servers).length > 0 ? { mcpServers: servers } : {}),
       ...(toolPolicy ? { toolPolicy } : {}),
     };
-    const attempts = [
+    const plans = [
       ...(earlier?.native && !fresh ? [{ resume: earlier.native, seen: earlier.runs }] : []),
       { resume: null, seen: 0 },
-    ];
+    ].map((plan) => {
+      const unseen = managed.runs.slice(plan.seen);
+      const handoff = handoffText({
+        threadId: id,
+        to: harness,
+        runs: unseen,
+        resumed: plan.resume !== null,
+        label,
+      });
+      return { ...plan, unseen, handoff, asked: { ...settings, resume: plan.resume } };
+    });
 
     this.#switching.set(id, harness);
     this.#refresh(managed);
-    let resumeError: string | null = null;
     try {
-      for (const attempt of attempts) {
-        const asked = { ...settings, resume: attempt.resume };
-        const unseen = managed.runs.slice(attempt.seen);
-        const handoff = handoffText({
-          threadId: id,
-          to: harness,
-          runs: unseen,
-          resumed: attempt.resume !== null,
-          label: (other) => findDriver(other)?.label ?? other,
-        });
-        try {
-          const next = createSession(harness, { ...asked, ...extras }, this.#env());
-          await thread.replaceSession(next, {
-            handoff,
-            prepare: () => holdModes(next, harness, asked),
-          });
-          visits.set(from, leaving);
-          this.#visits.set(id, visits);
-          if (handoff) this.#seenWithoutHandoff.set(id, attempt.seen);
-          else this.#seenWithoutHandoff.delete(id);
-          const resumed = attempt.resume !== null && earlier !== undefined;
-          return {
-            from,
-            to: harness,
-            resumed,
-            resumeError,
-            handedOver: handoff ? unseen.filter((run) => run.status !== "running").length : 0,
-            resumedContext: resumed
-              ? { tokens: earlier.contextTokens, idleMs: now - earlier.leftAt }
-              : null,
-          };
-        } catch (error) {
-          // Only a failed resume is worth another try, with a new thread.
-          if (attempt.resume === null || error instanceof ModeError || thread.closed) throw error;
-          resumeError = errorMessage(error);
-        }
-      }
-      throw new Error(`Could not start ${harness}`);
+      // One switch tries every plan, so nothing sent meanwhile reaches the old harness.
+      const { attempt, failures } = await thread.replaceSession(
+        plans.map((plan) => ({
+          create: () => createSession(harness, { ...plan.asked, ...extras }, this.#env()),
+          handoff: plan.handoff,
+          prepare: async (next) => {
+            // An agent that cannot resume may start a new thread instead, and say nothing.
+            if (plan.resume !== null && next.info.threadId !== plan.resume)
+              throw new Error(`${label(harness)} started a new thread instead of resuming it`);
+            await holdModes(next, harness, plan.asked);
+          },
+          // A narrower mode is no more available in a new thread than in a resumed one.
+          fallThrough: (error) => !(error instanceof ModeError),
+        })),
+      );
+      const plan = plans[attempt]!;
+      visits.set(from, leaving);
+      this.#visits.set(id, visits);
+      if (plan.handoff) this.#seenWithoutHandoff.set(id, plan.seen);
+      else this.#seenWithoutHandoff.delete(id);
+      const resumed = plan.resume !== null && earlier !== undefined;
+      return {
+        from,
+        to: harness,
+        resumed,
+        resumeError: attempt > 0 && failures[0] !== undefined ? errorMessage(failures[0]) : null,
+        handedOver: plan.handoff ? plan.unseen.filter((run) => run.status !== "running").length : 0,
+        resumedContext: resumed
+          ? { tokens: earlier.contextTokens, idleMs: now - earlier.leftAt }
+          : null,
+      };
     } finally {
       this.#switching.delete(id);
       this.#refresh(managed);
@@ -507,7 +516,7 @@ export class ThreadManager {
         const item = event.item;
         if (item.kind === "user_message" && run?.status === "running" && run.input === "") {
           const message = item.inputId ? managed.thread.message(item.inputId) : undefined;
-          run.input = message ? messageText(message) : item.text;
+          run.input = message ? messageText(message) : stripHandoff(item.text);
           run.origin = message?.origin ?? null;
           if (!managed.title) managed.title = titleFrom(run.input);
         }
@@ -525,7 +534,10 @@ export class ThreadManager {
         break;
       }
       case "session.replaced":
-        managed.harness = this.#switching.get(managed.id) ?? managed.harness;
+        // The session that took over may come from code other than switchHarness.
+        managed.harness = this.#switching.get(managed.id) ?? managed.thread.session.info.harness;
+        // The new session runs the thread now, though the old one may still be closing.
+        this.#switching.delete(managed.id);
         break;
       case "error":
         // A message that could not start its turn is a run that failed at once.

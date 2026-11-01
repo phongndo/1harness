@@ -632,9 +632,11 @@ export class App {
   /** Fetches the harness's own commands for completion and /help. */
   async #loadCommands(): Promise<void> {
     const thread = this.#thread;
+    const session = thread?.session;
     try {
-      const commands = (await thread?.session.listCommands?.()) ?? [];
-      if (thread !== this.#thread) return;
+      const commands = (await session?.listCommands?.()) ?? [];
+      // A switch keeps the thread but not the session, whose commands no longer apply.
+      if (thread !== this.#thread || session !== this.#thread?.session) return;
       const own = new Set(
         this.#commands.list().flatMap((command) => [command.name, ...(command.aliases ?? [])]),
       );
@@ -1380,7 +1382,7 @@ export class App {
         if (!this.#thread || this.#thread.closed) throw new Error("No session is running.");
         // One the harness did not list goes as a message; the harness says if it has none.
         if (native) await this.#thread.command(native, arg.trim());
-        else this.#thread.send({ text });
+        else this.#thread.send({ text }, undefined, { command: true });
         return;
       }
       this.#notice("warning", `Unknown command /${name}. Type /help for commands.`);
