@@ -30,7 +30,7 @@ export default function sharedNotes(api: ExtensionAPI): void {
     execute(input, context) {
       const text = String(input["text"] ?? "").trim();
       if (!text) throw new Error("The note is empty");
-      const harness = context.thread.session.info.harness;
+      const harness = context.thread.info.harness;
       api.storage.set("notes", [...notes(), { text, harness, savedAt: Date.now() }]);
       return "Saved.";
     },

@@ -332,13 +332,13 @@ describe("ThreadManager", () => {
 
   it("holds every thread to its mode, whatever mode its harness starts in", async () => {
     const sticky = await manager.create({ harness: "fake-sticky", settings: settings() });
-    assert.equal(sticky.thread.session.info.runtimeMode, "supervised");
+    assert.equal(sticky.thread.info.runtimeMode, "supervised");
     await assert.rejects(
       manager.create({ harness: "fake-wide", settings: settings("auto-edit") }),
       /fake-wide has no mode as narrow as auto-edit/,
     );
     const wide = await manager.create({ harness: "fake-wide", settings: settings("full-access") });
-    assert.equal(wide.thread.session.info.runtimeMode, "full-access");
+    assert.equal(wide.thread.info.runtimeMode, "full-access");
     await assert.rejects(
       manager.create({
         harness: "fake-wide",
@@ -362,16 +362,101 @@ describe("ThreadManager", () => {
     );
   });
 
-  it("ends the run when a session ends by itself, and tells extensions", async () => {
+  it("parks a thread whose session ends by itself, and resumes it for the next message", async () => {
     const thread = await manager.create({ harness: "fake", settings: settings() });
+    const native = thread.thread.info.threadId;
     thread.thread.send({ text: "go CRASH" });
     await manager.wait(thread.id, 1000);
-    assert.equal(thread.status, "closed");
+    assert.equal(thread.status, "parked");
+    assert.equal(thread.thread.session, null);
+    assert.equal(thread.error, "crashed");
     assert.deepEqual(
       thread.runs.map((run) => [run.status, run.error]),
       [["failed", "crashed"]],
     );
     assert.ok(closedEvents.includes("crashed"));
+    // What the thread knew of its session stays for clients and tools.
+    assert.equal(thread.thread.info.threadId, native);
+    thread.thread.send({ text: "again" });
+    await settle(5);
+    await manager.wait(thread.id, 1000);
+    await settle(5);
+    assert.equal(thread.status, "idle");
+    assert.equal(thread.error, null);
+    // Its harness picked up its own thread, which saw every turn, so it needs no handoff.
+    assert.equal(sessionOf(thread).options.resume, native);
+    assert.deepEqual(sessionOf(thread).prompts, ["again"]);
+    assert.deepEqual(
+      thread.runs.map((run) => run.status),
+      ["failed", "completed"],
+    );
+  });
+
+  it("closes an idle thread's harness after a while, and the next message resumes it", async () => {
+    const idle = new ThreadManager({ version: "test", extensions, tools, idleCloseMs: 15 });
+    try {
+      const thread = await idle.create({ harness: "fake", settings: settings() });
+      const first = sessionOf(thread);
+      thread.thread.send({ text: "ASK" });
+      await settle(5);
+      const request = thread.thread.requests[0]!;
+      await thread.thread.respond(request.id, { kind: "approval", optionId: "yes" });
+      await idle.wait(thread.id, 1000);
+      // Working, or waiting on the user, is not idle: the timer starts once the turn ends.
+      await settle(40);
+      assert.equal(thread.status, "parked");
+      // Busy with nothing, a session is cheap to keep but a process to hold.
+      first.background = [];
+      thread.thread.send({ text: "next" });
+      thread.thread.send({ text: "and then" });
+      await idle.wait(thread.id, 1000);
+      await settle(5);
+      assert.notEqual(sessionOf(thread), first);
+      assert.equal(sessionOf(thread).options.resume, first.info.threadId);
+      // Messages sent while it woke went in order, to the session that took over.
+      assert.deepEqual(sessionOf(thread).prompts, ["next", "and then"]);
+    } finally {
+      await idle.closeAll();
+    }
+  });
+
+  it("keeps a session open while its harness has background work", async () => {
+    const idle = new ThreadManager({ version: "test", extensions, tools, idleCloseMs: 10 });
+    try {
+      const thread = await idle.create({ harness: "fake", settings: settings() });
+      sessionOf(thread).background = ["a background agent"];
+      assert.equal(await idle.park(thread.id), false);
+      await settle(30);
+      assert.equal(thread.status, "idle");
+      sessionOf(thread).background = [];
+      await settle(30);
+      assert.equal(thread.status, "parked");
+    } finally {
+      await idle.closeAll();
+    }
+  });
+
+  it("wakes into a new thread with a handoff when the harness cannot resume its own", async () => {
+    const thread = await manager.create({ harness: "fake-forgetful", settings: settings() });
+    thread.thread.send({ text: "remember the parser" });
+    await manager.wait(thread.id, 1000);
+    assert.equal(await manager.park(thread.id), true);
+    thread.thread.send({ text: "what was it?" });
+    await manager.wait(thread.id, 1000);
+    await settle(5);
+    const prompt = sessionOf(thread).prompts[0] ?? "";
+    assert.match(prompt, /^<1harness-handoff>/);
+    assert.match(prompt, /remember the parser/);
+    assert.match(prompt, /what was it\?$/);
+  });
+
+  it("lets parked threads stay open past the limit, which counts running harnesses", async () => {
+    const threads: ManagedThread[] = [];
+    for (let index = 0; index < MAX_OPEN_THREADS; index++)
+      threads.push(await manager.create({ harness: "fake", settings: settings() }));
+    for (const thread of threads.slice(1)) assert.equal(await manager.park(thread.id), true);
+    const result = await call("delegate_task", threads[0]!, { task: "more", wait: true });
+    assert.equal(result["status"], "completed");
   });
 });
 
@@ -780,7 +865,7 @@ describe("Orchestrator", () => {
     );
     const child = await call("delegate_task", parent, { task: "y", runtimeMode: "supervised" });
     const target = manager.get(String(child["threadId"]));
-    assert.equal(target?.thread.session.info.runtimeMode, "supervised");
+    assert.equal(target?.thread.info.runtimeMode, "supervised");
     await assert.rejects(
       call("thread_send", parent, { threadId: parent.id, message: "hi" }),
       /invalid_request/,

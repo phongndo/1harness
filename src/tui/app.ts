@@ -302,7 +302,7 @@ export class App {
   }
 
   get #info(): SessionInfo | null {
-    return this.#current?.thread.session.info ?? null;
+    return this.#current?.thread.info ?? null;
   }
 
   /** The context every command runs with: this client's UI and the current thread. */
@@ -701,7 +701,7 @@ export class App {
     if (this.#prompt && this.#prompt.asking.threadId !== thread.id) this.#prompt = null;
     this.#nextRequest();
     // /new and /harness start from the thread on screen.
-    const info = thread.thread.session.info;
+    const info = thread.thread.info;
     this.#harness = thread.harness;
     this.#settings = {
       ...this.#settings,
@@ -1461,7 +1461,7 @@ export class App {
       return;
     }
     const input: UserInput = { text };
-    if (thread.session.capabilities.images) {
+    if (thread.capabilities.images) {
       const images = mentionedImages(text, this.#cwd());
       if (images.length > 0) input.images = images;
     }
@@ -1495,7 +1495,7 @@ export class App {
       const native = this.#nativeCommands.find(
         (command) => command.name === name || command.aliases.includes(name),
       );
-      if (native || this.#thread?.session.capabilities.nativeSlashCommands) {
+      if (native || this.#thread?.capabilities.nativeSlashCommands) {
         // The harness runs its own commands and skills, such as Claude's /context or Codex's /review.
         if (!this.#thread || this.#thread.closed) throw new Error("No session is running.");
         // One the harness did not list goes as a message; the harness says if it has none.
@@ -1518,6 +1518,7 @@ export class App {
   #session() {
     const thread = this.#thread;
     if (!thread || thread.closed) throw new Error("No session is running. Use /new to start one.");
+    if (!thread.session) throw new Error("The session is closed; send a message to resume it.");
     return thread.session;
   }
 
@@ -1726,7 +1727,7 @@ export class App {
           : (turn.heading ?? turn.phase);
     const dot = this.#blinkOn ? style.text("•") : " ";
     const tokens = `(↑${formatTokens(Math.ceil(turn.up))} ↓${formatTokens(Math.ceil(turn.down))})`;
-    const hint = this.#thread?.session.capabilities.steer
+    const hint = this.#thread?.capabilities.steer
       ? "esc stop · enter adds to turn · tab queues"
       : "esc stop · enter queues";
     const left = `${dot} ${style.text(`${phase} (${seconds}s)`)} ${style.muted(tokens)}`;

@@ -24,7 +24,7 @@ export interface ThreadStatusInput {
   id: string;
   parentId: string | null;
   title: string;
-  status: "starting" | "idle" | "working" | "waiting" | "closed";
+  status: "starting" | "idle" | "working" | "waiting" | "parked" | "closed";
   /** The oldest open request, if any. */
   request: { kind: "approval" | "question"; title: string } | null;
   lastRun: {

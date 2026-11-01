@@ -25,6 +25,7 @@ export function agentStatus(thread: ManagedThread): AgentStatus {
     case "waiting":
       return "needs you";
     case "idle":
+    case "parked":
     case "closed": {
       const run = thread.runs.at(-1);
       if (!run) return thread.error ? "failed" : thread.status === "closed" ? "stopped" : "idle";
@@ -128,7 +129,7 @@ export function agentRowOf(thread: ManagedThread): AgentRow {
 
 /** `claude · haiku`, or the harness alone when its model is its default. */
 export function harnessLabel(thread: ManagedThread): string {
-  const model = thread.thread.session.info.model;
+  const model = thread.thread.info.model;
   return model ? `${thread.harness} · ${model}` : thread.harness;
 }
 

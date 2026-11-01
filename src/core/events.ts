@@ -349,6 +349,21 @@ export interface SessionOptions {
   toolPolicy?: ToolPolicy;
 }
 
+/** Optional `HarnessSession` methods, which clients check for rather than for a harness. */
+export const SESSION_METHODS = [
+  "setModel",
+  "listModels",
+  "setEffort",
+  "compact",
+  "listThreads",
+  "listCommands",
+  "runCommand",
+  "listMcpServers",
+  "mcpAction",
+] as const;
+
+export type SessionMethod = (typeof SESSION_METHODS)[number];
+
 /**
  * One live conversation with a harness. `events` has a single consumer and ends
  * after `session.closed`. Commands resolve when the harness accepts them, not

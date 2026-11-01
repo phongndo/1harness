@@ -14,7 +14,7 @@ const ROLES = ["implementation", "research", "review", "design", "test", "genera
 export const MAX_DEPTH = 3;
 /** How many threads may work at once, so delegation cannot run away. */
 export const MAX_RUNNING_THREADS = 8;
-/** How many threads may be open, idle ones included, since each keeps a harness running. */
+/** How many threads may have a harness running, idle ones included; parked ones have none. */
 export const MAX_OPEN_THREADS = 16;
 const DEFAULT_WAIT_SECONDS = 600;
 const MAX_WAIT_SECONDS = 3000;
@@ -389,15 +389,20 @@ export class Orchestrator {
     await Promise.all([...stopping.map((done) => done.catch(() => {})), thread.thread.interrupt()]);
   }
 
-  /** Open threads, and the ones among them with work, counting tasks still starting. */
+  /**
+   * Threads with a harness running, and the ones among them with work, counting
+   * tasks still starting. A parked thread holds no harness, so it is not counted.
+   */
   #counts(): { open: number; running: number } {
-    const open = this.#manager.list().filter((thread) => !this.#manager.closing(thread.id));
+    const open = this.#manager
+      .list()
+      .filter((thread) => !this.#manager.closing(thread.id) && thread.status !== "parked");
     const running = open.filter((thread) => thread.status === "starting" || !thread.thread.idle);
     return { open: open.length + this.#reserved, running: running.length + this.#reserved };
   }
 
   #capabilities(caller: ManagedThread) {
-    const info = caller.thread.session.info;
+    const info = caller.thread.info;
     const counts = this.#counts();
     return {
       you: {
@@ -469,7 +474,7 @@ export class Orchestrator {
     const reason = driver.unavailable(this.#env);
     if (reason) throw new OrchestrationError("harness_unavailable", reason);
 
-    const info = caller.thread.session.info;
+    const info = caller.thread.info;
     const asked = text(input, "runtimeMode");
     const mode = asked === undefined || asked === "inherit" ? info.runtimeMode : asked;
     if (!isRuntimeMode(mode))
@@ -610,7 +615,7 @@ export class Orchestrator {
   }
 
   #threadView(thread: ManagedThread) {
-    const info = thread.thread.session.info;
+    const info = thread.thread.info;
     const last = thread.runs.at(-1);
     return {
       threadId: thread.id,
@@ -645,7 +650,7 @@ export class Orchestrator {
     const outcome = view.result ?? view.error ?? "(no reply)";
     const message = `[1harness] Task ${task.id} (${child.harness}: ${child.title}) ${status}:\n\n${outcome}`;
     const origin = { type: "report", from: child.id, status, result: outcome } as const;
-    if (parent.thread.busy && parent.thread.session.capabilities.steer) {
+    if (parent.thread.busy && parent.thread.capabilities.steer) {
       void parent.thread.steer({ text: message }, origin);
     } else {
       parent.thread.send({ text: message }, origin);
@@ -684,8 +689,8 @@ export class Orchestrator {
       throw new OrchestrationError("invalid_request", "use your own turn for your own thread");
     if (target.status === "closed")
       throw new OrchestrationError("thread_closed", `thread ${target.id} is closed`);
-    const mine = caller.thread.session.info;
-    const theirs = target.thread.session.info;
+    const mine = caller.thread.info;
+    const theirs = target.thread.info;
     if (modeRank(theirs.runtimeMode) > modeRank(mine.runtimeMode))
       throw new OrchestrationError(
         "runtime_mode_escalation_denied",

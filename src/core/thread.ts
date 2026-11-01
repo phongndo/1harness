@@ -1,16 +1,19 @@
 import { randomUUID } from "node:crypto";
-import type {
-  ApprovalAction,
-  HarnessEvent,
-  HarnessRequest,
-  HarnessSession,
-  Item,
-  NativeCommand,
-  RequestResponse,
-  SessionInfo,
-  TurnStatus,
-  Usage,
-  UserInput,
+import {
+  SESSION_METHODS,
+  type ApprovalAction,
+  type Capabilities,
+  type HarnessEvent,
+  type HarnessRequest,
+  type HarnessSession,
+  type Item,
+  type NativeCommand,
+  type RequestResponse,
+  type SessionInfo,
+  type SessionMethod,
+  type TurnStatus,
+  type Usage,
+  type UserInput,
 } from "./events.ts";
 
 /** Where a message came from, so clients and records need not read it from its text. */
@@ -100,7 +103,15 @@ const REQUEST_HANDLER_TIMEOUT_MS = 10_000;
  * behave the same everywhere.
  */
 export class Thread {
-  #session: HarnessSession;
+  /** The session the thread runs on, or null while it is parked. */
+  #session: HarnessSession | null;
+  /** The last session's info, capabilities, and methods, for while none runs. */
+  #info: SessionInfo;
+  #capabilities: Capabilities;
+  #methods: SessionMethod[];
+  /** Starts a session for a parked thread, such as by resuming its native thread. */
+  #waker: (() => Promise<void>) | null = null;
+  #waking: Promise<void> | null = null;
   /**
    * A session starting to take the thread over and the events it sent so far;
    * `closing` once `close` has closed it.
@@ -137,11 +148,76 @@ export class Thread {
 
   constructor(session: HarnessSession) {
     this.#session = session;
+    this.#info = { ...session.info };
+    this.#capabilities = session.capabilities;
+    this.#methods = methodsOf(session);
   }
 
-  /** The session the thread runs on; `replaceSession` changes it. */
-  get session(): HarnessSession {
+  /**
+   * The session the thread runs on, or null while it is parked: its session
+   * ended, as an idle one is closed, and the next message wakes it.
+   * `replaceSession` changes it.
+   */
+  get session(): HarnessSession | null {
     return this.#session;
+  }
+
+  /** The session's info, or the last session's while the thread is parked. */
+  get info(): SessionInfo {
+    return this.#session?.info ?? this.#info;
+  }
+
+  get capabilities(): Capabilities {
+    return this.#session?.capabilities ?? this.#capabilities;
+  }
+
+  /** The optional session methods its harness has, such as `listModels`. */
+  get methods(): readonly SessionMethod[] {
+    return this.#session ? methodsOf(this.#session) : this.#methods;
+  }
+
+  /** No session runs the thread, though it has not ended; a message wakes it. */
+  get parked(): boolean {
+    return this.#session === null && !this.#closed;
+  }
+
+  /** Sets what starts a session when a parked thread gets work. */
+  setWaker(waker: () => Promise<void>): void {
+    this.#waker = waker;
+  }
+
+  /**
+   * The running session, starting one first when the thread is parked. Throws
+   * when it cannot start or the thread has ended.
+   */
+  async wake(): Promise<HarnessSession> {
+    if (this.#session) return this.#session;
+    if (this.#closed || this.#ending) throw new Error("The thread has ended");
+    if (!this.#waker) throw new Error("The thread has no session and cannot start one");
+    await (this.#waking ?? this.#startWaking());
+    if (!this.#session) throw new Error("The thread's session did not start");
+    return this.#session;
+  }
+
+  #startWaking(): Promise<void> {
+    const waking = (this.#incoming ? Promise.resolve() : this.#waker!()).finally(() => {
+      if (this.#waking === waking) this.#waking = null;
+    });
+    this.#waking = waking;
+    return waking;
+  }
+
+  /**
+   * Closes the session but keeps the thread: its messages, queue, handlers,
+   * always-allow choices, and handoff stay for the session that wakes it.
+   * Only an idle thread parks.
+   */
+  async park(): Promise<void> {
+    const session = this.#session;
+    if (!session || this.#ending) return;
+    if (!this.idle) throw new Error("The thread is working");
+    await session.close();
+    await this.#pumping;
   }
 
   /** Another session is starting to take the thread over. */
@@ -203,8 +279,10 @@ export class Thread {
   }
 
   async start(): Promise<void> {
-    this.#pumping = this.#pump(this.#session);
-    await this.#session.start();
+    const session = this.#session;
+    if (!session) throw new Error("The thread has no session to start");
+    this.#pumping = this.#pump(session);
+    await session.start();
   }
 
   /**
@@ -271,6 +349,7 @@ export class Thread {
         continue;
       }
       const previous = this.#session;
+      const previousInfo = { ...this.info };
       const previousPump = this.#pumping;
       this.#session = next;
       this.#pumping = pumping;
@@ -278,12 +357,14 @@ export class Thread {
       this.#generation++;
       this.#usage = null;
       this.#handoff = attempt.handoff ?? null;
-      this.#emit({ type: "session.replaced", previous: { ...previous.info } });
+      this.#emit({ type: "session.replaced", previous: previousInfo });
       for (const event of incoming.events) this.#apply(this.#renumber(event));
       if (!this.#busy) this.#drain();
       this.#emitQueue();
-      await previous.close().catch(() => {});
-      await previousPump;
+      if (previous) {
+        await previous.close().catch(() => {});
+        await previousPump;
+      }
       return { attempt: index, failures };
     }
     return this.#giveUp(new Error("No session to move to"));
@@ -302,7 +383,7 @@ export class Thread {
    * as the thread's items are numbered, or null when the harness cannot tell.
    */
   callId(meta: Record<string, unknown>, tool: string): string | null {
-    const id = this.#session.mcpCallId?.(meta, tool) ?? null;
+    const id = this.#session?.mcpCallId?.(meta, tool) ?? null;
     return id === null ? null : this.#itemId(id);
   }
 
@@ -389,7 +470,8 @@ export class Thread {
 
   /** Adds input to the running turn where the harness supports it; otherwise queues it. */
   async steer(input: UserInput, origin: MessageOrigin = FROM_USER): Promise<void> {
-    if (!this.#busy || !this.session.capabilities.steer) {
+    const session = this.#session;
+    if (!this.#busy || !session || !session.capabilities.steer) {
       this.send(input, origin);
       return;
     }
@@ -398,7 +480,8 @@ export class Thread {
     if (!filtered) return;
     const prepared = prepare(message, filtered);
     try {
-      await this.session.steer(prepared.input);
+      if (session !== this.#session) throw new Error("The session changed");
+      await session.steer(prepared.input);
     } catch {
       // The turn ended between the check and the request, so it becomes a follow-up.
       this.#enqueue(prepared);
@@ -414,8 +497,11 @@ export class Thread {
       this.send({ text: args ? `/${command.name} ${args}` : `/${command.name}` }, FROM_USER, {
         command: true,
       });
-    else if (this.session.runCommand) await this.session.runCommand(command.name, args);
-    else throw new Error(`${this.session.info.harness} cannot run /${command.name}`);
+    else {
+      const session = await this.wake();
+      if (session.runCommand) await session.runCommand(command.name, args);
+      else throw new Error(`${session.info.harness} cannot run /${command.name}`);
+    }
   }
 
   /** Removes and returns the message the user queued last; others' messages stay. */
@@ -438,7 +524,7 @@ export class Thread {
   }
 
   async interrupt(): Promise<void> {
-    if (this.#busy) await this.session.interrupt();
+    if (this.#busy && this.#session) await this.#session.interrupt();
   }
 
   async respond(requestId: string, response: RequestResponse): Promise<void> {
@@ -448,7 +534,8 @@ export class Thread {
       const key = actionKey(request.action);
       if (option?.effect === "allow-always" && key) this.#allowances.add(key);
     }
-    await this.session.respond(requestId, response);
+    if (!this.#session) throw new Error("The thread's session has ended");
+    await this.#session.respond(requestId, response);
   }
 
   async close(): Promise<void> {
@@ -459,8 +546,10 @@ export class Thread {
       incoming.closing = true;
       void incoming.session.close().catch(() => {});
     }
-    await this.session.close();
+    if (this.#session) await this.#session.close();
     await this.#pumping;
+    // A parked thread has no session to say it closed.
+    this.#closed = true;
   }
 
   async #filterInput(input: UserInput): Promise<UserInput | null> {
@@ -479,14 +568,18 @@ export class Thread {
     return message;
   }
 
-  /** Queues a message that already passed the input handlers. */
+  /** Queues a message that already passed the input handlers; a parked thread wakes for it. */
   #enqueue(entry: Prepared): void {
-    if (!this.#busy && this.#incoming === null) {
+    if (!this.#busy && this.#incoming === null && this.#session) {
       this.#dispatch(entry);
       return;
     }
     this.#queue.push(entry);
     this.#emitQueue();
+    if (this.parked && this.#waker && !this.#waking && !this.#incoming && !this.#ending)
+      void this.#startWaking().catch((error: unknown) =>
+        this.#emit({ type: "error", message: `Could not wake the thread: ${errorMessage(error)}` }),
+      );
   }
 
   /** Approves a request the user already chose to always allow, if it is one. */
@@ -510,7 +603,7 @@ export class Thread {
         this.#emit({ type: "error", message: `A request handler failed: ${errorMessage(error)}` });
       }
       if (response) {
-        await this.session.respond(request.id, response).catch(() => {});
+        await this.#session?.respond(request.id, response).catch(() => {});
         return;
       }
     }
@@ -520,6 +613,12 @@ export class Thread {
   }
 
   #dispatch(entry: Prepared): void {
+    const session = this.#session;
+    if (!session) {
+      this.#queue.unshift(entry);
+      this.#emitQueue();
+      return;
+    }
     // Busy is set before the harness confirms so a second send queues instead of racing.
     this.#busy = true;
     // A harness command must start the text to run, so the handoff waits for the next message.
@@ -528,7 +627,7 @@ export class Thread {
     const input = handoff
       ? { ...entry.input, text: `${handoff}\n\n${entry.input.text}` }
       : entry.input;
-    this.session.startTurn(input).catch((error: unknown) => {
+    session.startTurn(input).catch((error: unknown) => {
       if (handoff) this.#handoff ??= handoff;
       this.#busy = false;
       this.#emit({ type: "error", message: errorMessage(error), unsent: entry.message });
@@ -537,6 +636,7 @@ export class Thread {
   }
 
   #drain(): void {
+    if (!this.#session) return;
     const next = this.#queue.shift();
     if (!next) return;
     this.#emitQueue();
@@ -544,18 +644,43 @@ export class Thread {
   }
 
   async #pump(session: HarnessSession): Promise<void> {
+    let ended = false;
     try {
-      for await (const event of session.events) this.#receive(session, event);
+      for await (const event of session.events) {
+        if (event.type === "session.closed") ended = true;
+        this.#receive(session, event);
+      }
     } catch (error) {
+      ended = true;
       this.#receive(session, { type: "session.closed", error: errorMessage(error) });
     }
+    // A harness whose events end without saying it closed.
+    if (!ended) this.#receive(session, { type: "session.closed", error: null });
   }
 
   /** Applies the running session's events, holds a starting one's, and drops a replaced one's. */
   #receive(session: HarnessSession, event: HarnessEvent): void {
-    if (session === this.#session) this.#apply(this.#renumber(event));
-    else if (session === this.#incoming?.session && keptWhileStarting(event))
+    if (session === this.#session) {
+      if (event.type === "session.closed") this.#detach(session);
+      this.#apply(this.#renumber(event));
+    } else if (session === this.#incoming?.session && keptWhileStarting(event))
       this.#incoming.events.push(event);
+  }
+
+  /**
+   * Lets go of a session that ended: the thread parks, keeping what it knew
+   * of the session, or ends, when `close` asked.
+   */
+  #detach(session: HarnessSession): void {
+    this.#info = { ...session.info };
+    this.#capabilities = session.capabilities;
+    this.#methods = methodsOf(session);
+    this.#session = null;
+    this.#busy = false;
+    this.#turnId = null;
+    this.#requests.clear();
+    this.#items.clear();
+    if (this.#ending) this.#closed = true;
   }
 
   #apply(event: HarnessEvent): void {
@@ -584,7 +709,7 @@ export class Thread {
       case "request.opened": {
         const allowed = this.#allowed(event.request);
         if (allowed) {
-          void this.session.respond(event.request.id, allowed).catch(() => {});
+          void this.#session?.respond(event.request.id, allowed).catch(() => {});
           return;
         }
         if (this.#requestHandlers.length > 0) {
@@ -601,11 +726,10 @@ export class Thread {
         this.#usage = event.usage;
         break;
       case "session.closed":
-        this.#closed = true;
-        this.#busy = false;
-        this.#requests.clear();
+        // `#detach` already let the session go.
         break;
       case "session.updated":
+        this.#info = { ...event.info };
         break;
     }
     this.#emit(event);
@@ -639,6 +763,11 @@ function keptWhileStarting(event: HarnessEvent): boolean {
     default:
       return true;
   }
+}
+
+/** The optional methods a session has. */
+function methodsOf(session: HarnessSession): SessionMethod[] {
+  return SESSION_METHODS.filter((method) => typeof session[method] === "function");
 }
 
 /** A message, and the input the harness is sent for it: after the handlers, with its ID. */

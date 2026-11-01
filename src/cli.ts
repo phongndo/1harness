@@ -140,7 +140,7 @@ async function print(
   });
   const root = await manager.create({ harness, settings: session });
   const thread = root.thread;
-  const images = thread.session.capabilities.images ? mentionedImages(prompt, session.cwd) : [];
+  const images = thread.capabilities.images ? mentionedImages(prompt, session.cwd) : [];
   thread.send(images.length > 0 ? { text: prompt, images } : { text: prompt });
   await finished;
   await manager.closeAll();

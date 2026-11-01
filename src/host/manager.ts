@@ -19,7 +19,11 @@ import type { ExtensionHost } from "../extensions/host.ts";
 import type { ToolServer } from "../extensions/tool-server.ts";
 import { handoffText, stripHandoff } from "./handoff.ts";
 
-export type ThreadStatus = "starting" | "idle" | "working" | "waiting" | "closed";
+/**
+ * `parked` is a thread whose session ended, as an idle one is closed: it keeps
+ * its place and its history, and its next message starts a session again.
+ */
+export type ThreadStatus = "starting" | "idle" | "working" | "waiting" | "parked" | "closed";
 
 /** One turn of a thread, counted from 1, with what started it and how it ended. */
 export interface RunRecord {
@@ -85,7 +89,15 @@ export interface ManagerOptions {
   tools: ToolServer;
   /** Problems with the shared MCP config, reported once each. */
   onWarning?: (text: string) => void;
+  /**
+   * How long a thread may sit idle before its harness is closed, which frees
+   * the process; the next message resumes it. 0 keeps sessions open.
+   */
+  idleCloseMs?: number;
 }
+
+/** Thirty minutes. */
+export const IDLE_CLOSE_MS = 30 * 60 * 1000;
 
 /** How a thread moved to another harness, for clients to describe. */
 export interface SwitchResult {
@@ -174,6 +186,8 @@ export class ThreadManager {
   #counter = 0;
   /** What each thread looked like when last announced. */
   #keys = new Map<string, string>();
+  /** Idle threads whose sessions close when the timer fires. */
+  #idleTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(options: ManagerOptions) {
     this.#options = options;
@@ -262,6 +276,7 @@ export class ThreadManager {
     this.#byThread.set(thread, managed);
     this.#servers.set(managed.id, mcp.servers);
     const unsubscribe = thread.subscribe((event) => this.#apply(managed, event));
+    thread.setWaker(() => this.wake(managed.id));
     const detach = extensions.attach(thread);
     this.#cleanups.set(managed.id, () => {
       unsubscribe();
@@ -274,6 +289,7 @@ export class ThreadManager {
     this.#emit({ type: "thread.created", thread: managed });
     try {
       await thread.start();
+      if (!thread.session) throw new Error(`${label(managed.harness)} ended as it started`);
       await holdModes(thread.session, managed.harness, options.settings);
     } catch (error) {
       managed.error = errorMessage(error);
@@ -305,34 +321,94 @@ export class ThreadManager {
     const from = managed.harness;
     const fresh = options.fresh === true;
     if (harness === from && !fresh) throw new Error(`${id} already runs on ${harness}`);
-    if (this.#switching.has(id)) throw new Error(`${id} is already moving to another harness`);
-    // Its first session is still starting; moving now would race that start.
-    if (managed.status === "starting") throw new Error(`${id} is still starting`);
-    const thread = managed.thread;
-    if (thread.busy || thread.requests.length > 0)
-      throw new Error(`${id} is working; wait for the turn to end or stop it first`);
-    const background = thread.session.backgroundTasks?.() ?? [];
-    if (background.length > 0)
-      throw new Error(
-        `${id} still runs background work on ${from}, which moving would stop: ${background.join("; ")}. Wait for it to finish first`,
-      );
     if (!findDriver(harness))
       throw new Error(
         `No harness named ${harness}; try ${drivers()
           .map((driver) => driver.id)
           .join(", ")}`,
       );
+    const earlier = harness === from ? undefined : this.#visits.get(id)?.get(harness);
+    return this.#move(managed, harness, earlier && !fresh ? earlier : undefined, options);
+  }
 
-    const info = thread.session.info;
-    const visits = this.#visits.get(id) ?? new Map<HarnessId, Visit>();
-    const earlier = harness === from ? undefined : visits.get(harness);
+  /**
+   * Starts a session for a parked thread, on the harness it ran on: resuming
+   * that harness's own thread where it can, with a handoff of anything it has
+   * not seen, and a new thread with a handoff of every turn otherwise, as for
+   * an agent that cannot resume.
+   */
+  async wake(id: string): Promise<void> {
+    const managed = this.#threads.get(id);
+    if (!managed || this.closing(id)) throw new Error(`No open thread ${id}`);
+    const thread = managed.thread;
+    if (!thread.parked) return;
+    if (this.#switching.has(id)) throw new Error(`${id} is already starting`);
+    const info = thread.info;
+    const own: Visit = {
+      native: info.threadId,
+      runs: this.#seen(managed),
+      model: info.model,
+      effort: info.effort,
+      contextTokens: null,
+      leftAt: Date.now(),
+    };
+    await this.#move(managed, managed.harness, own.native ? own : undefined, {}, true);
+  }
+
+  /**
+   * Closes an idle thread's session, keeping the thread; its next message
+   * resumes it. Work the harness runs in the background would stop with it, so
+   * a thread with any is left open.
+   */
+  async park(id: string): Promise<boolean> {
+    const managed = this.#threads.get(id);
+    if (!managed || this.closing(id) || this.#switching.has(id)) return false;
+    const thread = managed.thread;
+    if (!thread.session || !thread.idle) return false;
+    if ((thread.session.backgroundTasks?.() ?? []).length > 0) return false;
+    await thread.park();
+    return true;
+  }
+
+  /** How many of the thread's runs its harness's own thread has seen. */
+  #seen(managed: ManagedThread): number {
+    return managed.thread.handoff === null
+      ? managed.runs.length
+      : (this.#seenWithoutHandoff.get(managed.id) ?? managed.runs.length);
+  }
+
+  /**
+   * Moves a thread onto a session of `harness`: resuming `earlier`, that
+   * harness's own thread, where given, and a new thread when that fails or
+   * there is none. `waking` starts a parked thread on its own harness.
+   */
+  async #move(
+    managed: ManagedThread,
+    harness: HarnessId,
+    earlier: Visit | undefined,
+    options: { model?: string | null; effort?: string | null },
+    waking = false,
+  ): Promise<SwitchResult> {
+    const id = managed.id;
+    const from = managed.harness;
+    if (this.#switching.has(id)) throw new Error(`${id} is already moving to another harness`);
+    // Its first session is still starting; moving now would race that start.
+    if (managed.status === "starting") throw new Error(`${id} is still starting`);
+    const thread = managed.thread;
+    if (thread.busy || thread.requests.length > 0)
+      throw new Error(`${id} is working; wait for the turn to end or stop it first`);
+    const background = thread.session?.backgroundTasks?.() ?? [];
+    if (background.length > 0)
+      throw new Error(
+        `${id} still runs background work on ${from}, which moving would stop: ${background.join("; ")}. Wait for it to finish first`,
+      );
+
+    const info = thread.info;
+    const same = harness === from;
     const now = Date.now();
     const leaving: Visit = {
       native: info.threadId,
-      runs:
-        thread.handoff === null
-          ? managed.runs.length
-          : (this.#seenWithoutHandoff.get(id) ?? managed.runs.length),
+      runs: this.#seen(managed),
       model: info.model,
       effort: info.effort,
       contextTokens: thread.usage?.contextTokens ?? null,
@@ -341,8 +417,8 @@ export class ThreadManager {
     // As narrow as the thread runs now, which may be narrower than it was asked to.
     const settings: SessionOptions = {
       cwd: info.cwd,
-      model: options.model ?? (harness === from ? info.model : (earlier?.model ?? null)),
-      effort: options.effort ?? (harness === from ? info.effort : (earlier?.effort ?? null)),
+      model: options.model ?? (same ? info.model : (earlier?.model ?? null)),
+      effort: options.effort ?? (same ? info.effort : (earlier?.effort ?? null)),
       runtimeMode: info.runtimeMode,
       interactionMode: info.interactionMode,
       resume: null,
@@ -354,7 +430,7 @@ export class ThreadManager {
       ...(toolPolicy ? { toolPolicy } : {}),
     };
     const plans = [
-      ...(earlier?.native && !fresh ? [{ resume: earlier.native, seen: earlier.runs }] : []),
+      ...(earlier?.native ? [{ resume: earlier.native, seen: earlier.runs }] : []),
       { resume: null, seen: 0 },
     ].map((plan) => {
       const unseen = managed.runs.slice(plan.seen);
@@ -387,8 +463,11 @@ export class ThreadManager {
         })),
       );
       const plan = plans[attempt]!;
-      visits.set(from, leaving);
-      this.#visits.set(id, visits);
+      if (!waking) {
+        const visits = this.#visits.get(id) ?? new Map<HarnessId, Visit>();
+        visits.set(from, leaving);
+        this.#visits.set(id, visits);
+      }
       if (plan.handoff) this.#seenWithoutHandoff.set(id, plan.seen);
       else this.#seenWithoutHandoff.delete(id);
       const resumed = plan.resume !== null && earlier !== undefined;
@@ -398,9 +477,10 @@ export class ThreadManager {
         resumed,
         resumeError: attempt > 0 && failures[0] !== undefined ? errorMessage(failures[0]) : null,
         handedOver: plan.handoff ? plan.unseen.filter((run) => run.status !== "running").length : 0,
-        resumedContext: resumed
-          ? { tokens: earlier.contextTokens, idleMs: now - earlier.leftAt }
-          : null,
+        resumedContext:
+          resumed && !waking
+            ? { tokens: earlier.contextTokens, idleMs: now - earlier.leftAt }
+            : null,
       };
     } finally {
       this.#switching.delete(id);
@@ -420,8 +500,12 @@ export class ThreadManager {
     const managed = this.#threads.get(id);
     if (!managed) return Promise.reject(new Error(`No thread ${id}`));
     // The thread knows the moment a message is sent, before the harness reports a turn.
+    // A parked one has nothing running, and wakes only when sent something.
     const settled = () =>
-      managed.status === "closed" || managed.thread.closed || managed.thread.idle;
+      managed.status === "closed" ||
+      managed.status === "parked" ||
+      managed.thread.closed ||
+      managed.thread.idle;
     return new Promise((resolve) => {
       if (settled()) {
         resolve({ thread: managed, timedOut: false });
@@ -474,6 +558,9 @@ export class ThreadManager {
   #release(id: string): void {
     this.#cleanups.get(id)?.();
     this.#cleanups.delete(id);
+    const timer = this.#idleTimers.get(id);
+    if (timer) clearTimeout(timer);
+    this.#idleTimers.delete(id);
   }
 
   /** Ends a run the session closed under: interrupted, or failed with the session's error. */
@@ -535,7 +622,8 @@ export class ThreadManager {
       }
       case "session.replaced":
         // The session that took over may come from code other than switchHarness.
-        managed.harness = this.#switching.get(managed.id) ?? managed.thread.session.info.harness;
+        managed.harness = this.#switching.get(managed.id) ?? managed.thread.info.harness;
+        managed.error = null;
         // The new session runs the thread now, though the old one may still be closing.
         this.#switching.delete(managed.id);
         break;
@@ -564,8 +652,9 @@ export class ThreadManager {
       case "session.closed":
         managed.error = event.error;
         this.#endRun(managed, event.error);
+        // A thread whose session ended on its own parks; only closing it ends it.
         // Later listeners, such as extensions', still have to see this event.
-        queueMicrotask(() => this.#release(managed.id));
+        if (managed.thread.closed) queueMicrotask(() => this.#release(managed.id));
         break;
     }
     this.#emit({ type: "thread.event", threadId: managed.id, event });
@@ -580,11 +669,14 @@ export class ThreadManager {
       ? "closed"
       : this.#switching.has(managed.id)
         ? "starting"
-        : thread.requests.length > 0
-          ? "waiting"
-          : thread.idle
-            ? "idle"
-            : "working";
+        : thread.parked
+          ? "parked"
+          : thread.requests.length > 0
+            ? "waiting"
+            : thread.idle
+              ? "idle"
+              : "working";
+    this.#idle(managed);
     const run = managed.runs.at(-1);
     const key = [
       managed.status,
@@ -597,6 +689,30 @@ export class ThreadManager {
     if (this.#keys.get(managed.id) === key) return;
     this.#keys.set(managed.id, key);
     this.#emit({ type: "thread.updated", thread: managed });
+  }
+
+  /** Starts the idle timer for a thread that went idle, and stops it for one that did not. */
+  #idle(managed: ManagedThread): void {
+    const ms = this.#options.idleCloseMs ?? IDLE_CLOSE_MS;
+    const timer = this.#idleTimers.get(managed.id);
+    if (managed.status !== "idle" || ms <= 0) {
+      if (timer) clearTimeout(timer);
+      this.#idleTimers.delete(managed.id);
+      return;
+    }
+    if (timer) return;
+    const next = setTimeout(() => {
+      this.#idleTimers.delete(managed.id);
+      void this.park(managed.id).then(
+        (parked) => {
+          // Background work keeps it open; it is tried again later.
+          if (!parked && managed.status === "idle") this.#idle(managed);
+        },
+        () => {},
+      );
+    }, ms);
+    next.unref();
+    this.#idleTimers.set(managed.id, next);
   }
 
   #emit(event: ManagerEvent): void {

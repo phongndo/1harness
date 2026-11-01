@@ -48,6 +48,7 @@ class FakeSession {
   async runCommand(name: string, args: string): Promise<void> {
     this.commands.push(`${name} ${args}`);
   }
+  async respond(): Promise<void> {}
   async close(): Promise<void> {
     this.events.end();
   }
@@ -435,5 +436,65 @@ describe("Thread", () => {
     assert.equal(slow.events.ended, true);
     release();
     await assert.rejects(moving, /ended/);
+  });
+
+  it("parks when its session ends, keeping the queue and choices, and wakes for work", async () => {
+    const { session, thread } = await setup();
+    session.events.push(approval("a1", "pnpm test"));
+    await settle();
+    await thread.respond("a1", { kind: "approval", optionId: "always" });
+    session.events.push({ type: "request.resolved", requestId: "a1" });
+    session.events.push({ type: "session.closed", error: "crashed" });
+    await settle();
+    assert.equal(thread.parked, true);
+    assert.equal(thread.closed, false);
+    assert.equal(thread.session, null);
+    // What clients read stays: the harness, its native thread, and what it can do.
+    assert.equal(thread.info.threadId, "t");
+    assert.equal(thread.capabilities.steer, true);
+    assert.deepEqual(thread.methods, ["runCommand"]);
+    await assert.rejects(thread.respond("gone", { kind: "cancel" }), /session has ended/);
+
+    const next = new FakeSession();
+    let woke = 0;
+    thread.setWaker(async () => {
+      woke++;
+      await thread.replaceSession([attempt(next)]);
+    });
+    thread.send({ text: "one" });
+    thread.send({ text: "two" });
+    await settle();
+    await settle();
+    assert.equal(woke, 1);
+    assert.equal(thread.session, next as unknown as HarnessSession);
+    assert.deepEqual(next.turns, ["one"]);
+    assert.deepEqual(
+      thread.queue.map((message) => message.input.text),
+      ["two"],
+    );
+    // An action allowed for good is still allowed on the session that woke it.
+    next.events.push(approval("a2", "pnpm test"));
+    await settle();
+    assert.equal(thread.requests.length, 0);
+    await thread.close();
+    assert.equal(thread.closed, true);
+  });
+
+  it("parks an idle thread on request, and ends a parked one when closed", async () => {
+    const { session, thread } = await setup();
+    thread.send({ text: "busy" });
+    await assert.rejects(thread.park(), /working/);
+    session.events.push({ type: "turn.started", turnId: "x" });
+    session.events.push({ type: "turn.ended", turnId: "x", status: "completed", error: null });
+    await settle();
+    await thread.park();
+    assert.equal(thread.parked, true);
+    // Without a waker, work waits in the queue.
+    thread.send({ text: "later" });
+    assert.equal(thread.queue.length, 1);
+    await assert.rejects(thread.wake(), /cannot start one/);
+    await thread.close();
+    assert.equal(thread.parked, false);
+    assert.equal(thread.closed, true);
   });
 });

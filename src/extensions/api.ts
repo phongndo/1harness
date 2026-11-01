@@ -39,6 +39,12 @@ export type {
 
 /** What a session handler can reach. */
 export interface ExtensionContext {
+  /**
+   * The thread. Its `session` is null while the thread is parked, after its
+   * session ended or closed for being idle, until a message wakes it; read
+   * `thread.info` and `thread.capabilities`, which stay, and `await
+   * thread.wake()` for a session to call.
+   */
   readonly thread: Thread;
   /** The client's UI, or null when nobody is watching, as with `--print`. */
   readonly ui: CommandUI | null;
