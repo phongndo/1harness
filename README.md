@@ -123,6 +123,21 @@ messages you queued still run.
 keeps running in the background while it or a thread it started has work, and
 closes once they are done.
 
+### Status in your terminal
+
+In a terminal that supports the
+[Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status)
+(OSC 7501), such as [Rex](https://www.superlogical.com/rex), 1harness reports
+what each thread is doing: working, waiting on you (an approval or a question,
+with what it asks), done with a reply you have not seen, or failed. Each thread
+is its own record, nested under the thread that started it, so Rex's session
+picker and tab headers show agents that need you or have finished. A reply that
+finishes while you are looking counts as seen; 1harness knows you are looking
+from the terminal's focus reports and from your typing. An agent's thread
+reports its work and requests, not its results, which go to that agent.
+1harness asks the terminal whether it supports the protocol; set
+`ONEHARNESS_PROGRAM_STATUS=1` or `0` to decide yourself.
+
 ### Extensions
 
 An extension is a TypeScript or JavaScript module whose default export receives
