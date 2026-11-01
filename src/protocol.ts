@@ -297,6 +297,24 @@ export interface Methods {
   "thread.seen": { params: { threadId: string; runs: number }; result: null };
   "thread.close": { params: { threadId: string }; result: null };
   "thread.unqueue": { params: { threadId: string }; result: Message | null };
+  "thread.rename": { params: { threadId: string; title: string }; result: null };
+  /** Pins a thread to the top of listings, or archives one out of them; archiving closes it. */
+  "thread.flag": {
+    params: { threadId: string; pinned?: boolean; archived?: boolean };
+    result: ThreadListing;
+  };
+  /**
+   * A new thread on the same harness and folder that starts from this one's
+   * turns, through `turn` or all of them, with a handoff of them.
+   */
+  "thread.fork": { params: { threadId: string; turn?: number }; result: ThreadState };
+  /** Deletes a thread, and the threads it started, for good. */
+  "thread.forget": { params: { threadId: string }; result: { forgotten: string[] } };
+  /** Threads whose transcripts match, with where. */
+  "threads.search": {
+    params: { query: string; limit?: number };
+    result: { thread: ThreadListing; snippet: string }[];
+  };
   "thread.switchHarness": {
     params: { threadId: string; harness: HarnessId; fresh?: boolean };
     result: SwitchResult;

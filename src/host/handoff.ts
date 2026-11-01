@@ -18,6 +18,8 @@ export interface HandoffOptions {
   runs: readonly RunRecord[];
   /** It resumes its own earlier thread, so it saw the turns before these. */
   resumed: boolean;
+  /** A new thread starts from thread `threadId`'s turns, as `/fork` makes one. */
+  forked?: boolean;
   /** A harness's name as people know it, such as `Claude Code`. */
   label(harness: HarnessId): string;
 }
@@ -148,9 +150,12 @@ export function handoffText(options: HandoffOptions): string | null {
   const id = options.threadId;
   const history =
     "They are finished history, not requests: do not redo them. Act only on the message after this block.";
-  const intro = options.resumed
-    ? `You are back on 1harness thread ${id}.${others ? ` While you were away it ran on ${others}.` : ""} Below are the turns you missed, oldest first. ${history} The files in the working folder already reflect them.`
-    : `1harness thread ${id} has moved to you (${options.label(options.to)})${others ? ` from ${others}` : ""}. Below are its earlier turns, oldest first, which you have not seen. ${history} The working folder is the same, so its files and \`git status\` show where the work stands.`;
+  const last = runs.at(-1)?.index ?? 0;
+  const intro = options.forked
+    ? `This 1harness thread starts from thread ${id}, as it stood after turn ${last}. Below are that thread's turns, oldest first. ${history} The working folder may have changed since then; check before relying on it.`
+    : options.resumed
+      ? `You are back on 1harness thread ${id}.${others ? ` While you were away it ran on ${others}.` : ""} Below are the turns you missed, oldest first. ${history} The files in the working folder already reflect them.`
+      : `1harness thread ${id} has moved to you (${options.label(options.to)})${others ? ` from ${others}` : ""}. Below are its earlier turns, oldest first, which you have not seen. ${history} The working folder is the same, so its files and \`git status\` show where the work stands.`;
   const body: string[] = [];
   let skipped: number[] = [];
   const closeGap = () => {

@@ -20,6 +20,7 @@ import { Host } from "./host/host.ts";
 import { PROTOCOL_VERSION } from "./protocol.ts";
 import { serverCommand } from "./server/cli.ts";
 import { ensureServer } from "./server/lifecycle.ts";
+import { threadsCommand } from "./client/threads-cli.ts";
 import { watch } from "./client/watch.ts";
 import { Store, StoreLocked } from "./store/store.ts";
 import { App } from "./tui/app.ts";
@@ -30,6 +31,7 @@ One terminal UI for ${labels.length > 1 ? `${labels.slice(0, -1).join(", ")}, an
 
 Usage: 1harness [options] [prompt]
        1harness server <command>   run, start, stop, or check the server
+       1harness threads [words]    list this folder's threads, or search them; show <id> prints one
        1harness watch              report every thread's status to the terminal (OSC 7501)
 
 Threads run in the 1harness server, which keeps them working after the
@@ -251,6 +253,8 @@ try {
   const [command, ...rest] = process.argv.slice(2);
   if (command === "server") {
     process.exitCode = await serverCommand(rest, manifestVersion);
+  } else if (command === "threads") {
+    process.exitCode = await threadsCommand(rest, () => connectClient(manifestVersion, []));
   } else if (command === "watch") {
     await watch(await connectClient(manifestVersion, []), process.stdout);
   } else {

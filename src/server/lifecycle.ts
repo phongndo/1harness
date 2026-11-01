@@ -102,10 +102,17 @@ export async function runServer(options: RunOptions): Promise<RunningServer | nu
     }
     throw error;
   }
-  const { warnings: settingsWarnings } = loadSettings(configDir(env));
+  const { settings, warnings: settingsWarnings } = loadSettings(configDir(env));
   const warnings = [...settingsWarnings, ...registerConfiguredAgents(configDir(env))];
   for (const warning of warnings) log(`warning: ${warning}`);
-  const host = new Host({ version: options.version, cwd: homedir(), store, warnings, env });
+  const host = new Host({
+    version: options.version,
+    cwd: homedir(),
+    store,
+    warnings,
+    env,
+    retainClosedDays: settings.retainClosedDays,
+  });
   await host.start();
 
   let idleSince: number | null = null;

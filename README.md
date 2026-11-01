@@ -189,6 +189,20 @@ once you send that thread something. A task an agent delegated reports nothing
 after a restart; the agent can ask with `task_status`. Text still streaming when
 1harness crashes is kept up to the last write, a moment before.
 
+`/threads` (or ctrl+t) lists the open threads as a tree, with recent and
+archived ones under tabs, and marks the ones that need you, have news, or are
+parked; `/threads <words>` searches what every thread said. `/rename` names a
+thread, `/pin` keeps it at the top, `/archive` ends it and moves it out of the
+way (`/unarchive` brings it back), and `/forget` deletes it for good, with the
+threads it started. `/fork [turn]` starts a new thread on the same harness and
+folder from this one's turns, all of them or up to a turn; its first message
+carries them, and its agent can read the rest with `thread_read`. Outside the
+terminal, `1harness threads` lists this folder's threads (`--all` for every
+folder, words to search, `--json` for scripts), and `1harness threads show t42`
+prints one. Closed threads are kept until you forget them; set
+`retainClosedDays` in `settings.json` to delete ones closed longer ago when the
+server starts. Pinned ones are always kept.
+
 Only one 1harness keeps threads at a time, normally the server. A second one
 started with `ONEHARNESS_AUTOSTART=0` meanwhile says so and keeps none of its
 own, leaving the first one's alone.

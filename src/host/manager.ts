@@ -61,6 +61,8 @@ export interface ManagedThread {
   readonly origin: "user" | "delegated";
   /** The client that opened it, which shows it; null for agents' threads. */
   openedBy: string | null;
+  /** The thread it was forked from, whose turns it started with. */
+  readonly forkedFrom: string | null;
   readonly thread: Thread;
   readonly createdAt: number;
   status: ThreadStatus;
@@ -92,6 +94,8 @@ export interface CreateThreadOptions {
   parentCallId?: string | null;
   origin?: "user" | "delegated";
   openedBy?: string | null;
+  /** The thread it is forked from, and the handoff of that thread's turns it starts with. */
+  fork?: { from: string; handoff: string | null };
 }
 
 /**
@@ -125,6 +129,7 @@ export interface RestoredThread {
   parentId: string | null;
   parentCallId: string | null;
   origin: "user" | "delegated";
+  forkedFrom: string | null;
   createdAt: number;
   error: string | null;
   runs: RunRecord[];
@@ -311,6 +316,7 @@ export class ThreadManager {
       parentCallId: options.parentCallId ?? null,
       origin: options.origin ?? "user",
       openedBy: options.openedBy ?? null,
+      forkedFrom: options.fork?.from ?? null,
       thread,
       createdAt: Date.now(),
       status: "starting",
@@ -319,6 +325,11 @@ export class ThreadManager {
     };
     this.#servers.set(managed.id, mcp.servers);
     if (mcp.grant) this.#grants.set(managed.id, mcp.grant);
+    // Its harness's own thread has seen none of the turns the fork's handoff carries.
+    if (options.fork?.handoff) {
+      thread.setHandoff(options.fork.handoff);
+      this.#seenWithoutHandoff.set(managed.id, 0);
+    }
     this.#adopt(managed, extensions);
     this.#emit({ type: "thread.created", thread: managed });
     try {
@@ -404,6 +415,7 @@ export class ThreadManager {
         parentCallId: entry.parentCallId,
         origin: entry.origin,
         openedBy: null,
+        forkedFrom: entry.forkedFrom,
         thread: new Thread(null, entry.thread),
         createdAt: entry.createdAt,
         status: "parked",
@@ -518,6 +530,14 @@ export class ThreadManager {
     await thread.park();
     this.#emit({ type: "thread.parked", thread: managed });
     return true;
+  }
+
+  /** Renames a thread. */
+  rename(id: string, title: string): void {
+    const managed = this.#threads.get(id);
+    if (!managed) throw new Error(`No thread ${id}`);
+    managed.title = title;
+    this.#refresh(managed);
   }
 
   /** Drops a closed thread from memory, such as one with nothing in it. */

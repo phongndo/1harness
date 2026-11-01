@@ -95,13 +95,12 @@ const CAPABILITIES: Capabilities = {
  * Codex's own UI runs its commands itself, so the driver carries the ones that
  * act on the session through app-server. Left out are those that only change
  * Codex's terminal (/diff, /theme, /copy), those 1harness has its own of
- * (/model, /permissions, /plan, /new, /resume, /compact, /status), and those
+ * (/model, /permissions, /plan, /new, /resume, /compact, /status, /rename), and those
  * that manage the installation (/login, /config, /plugins).
  */
 const COMMANDS: NativeCommand[] = [
   nativeCommand("review", "review my current changes and find issues", "[instructions]", true),
   nativeCommand("init", "create an AGENTS.md file with instructions for the agent", "", true),
-  nativeCommand("rename", "rename the current thread", "<name>", false),
   nativeCommand("ps", "list background terminals", "", false),
   // Codex's /stop, by its other name, since 1harness's /stop interrupts the turn.
   nativeCommand("clean", "stop all background terminals", "", false),
@@ -437,14 +436,9 @@ export class CodexSession implements HarnessSession {
     ];
   }
 
-  async runCommand(name: string, args: string): Promise<void> {
+  async runCommand(name: string, _args: string): Promise<void> {
     const threadId = this.#threadId();
     switch (name) {
-      case "rename":
-        if (!args) throw new Error("Usage: /rename <name>");
-        await this.#request("thread/name/set", { threadId, name: args });
-        this.#notice("info", `Thread renamed to ${args}`);
-        return;
       case "ps": {
         const response = await this.#request<{ data: { command: string; osPid: number | null }[] }>(
           "thread/backgroundTerminals/list",

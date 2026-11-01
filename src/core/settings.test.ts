@@ -10,9 +10,22 @@ describe("loadSettings", () => {
   it("reads the start mode", () => {
     const dir = mkdtempSync(join(tmpdir(), "1harness-settings-"));
     try {
-      assert.deepEqual(loadSettings(dir), { settings: { mode: null }, warnings: [] });
+      assert.deepEqual(loadSettings(dir), {
+        settings: { mode: null, retainClosedDays: null },
+        warnings: [],
+      });
       writeFileSync(join(dir, "settings.json"), '{ "mode": "auto" }');
-      assert.deepEqual(loadSettings(dir), { settings: { mode: "auto" }, warnings: [] });
+      assert.deepEqual(loadSettings(dir), {
+        settings: { mode: "auto", retainClosedDays: null },
+        warnings: [],
+      });
+      writeFileSync(join(dir, "settings.json"), '{ "retainClosedDays": 30 }');
+      assert.equal(loadSettings(dir).settings.retainClosedDays, 30);
+      // A bad number keeps everything, and says so.
+      writeFileSync(join(dir, "settings.json"), '{ "retainClosedDays": "soon" }');
+      const kept = loadSettings(dir);
+      assert.equal(kept.settings.retainClosedDays, null);
+      assert.match(kept.warnings[0] ?? "", /retainClosedDays/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

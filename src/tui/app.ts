@@ -114,6 +114,11 @@ function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
+/** A short date and time, for lists of threads. */
+function day(time: number): string {
+  return new Date(time).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+}
+
 /** A command's pick entry as a menu row. */
 function pickEntry(item: PickEntry): MenuEntry {
   return entry(item.label, item.detail ?? "", {
@@ -393,8 +398,9 @@ export class App {
       },
       {
         name: "threads",
-        usage: "[id]",
-        description: "switch to another thread, such as one an agent started (also ctrl+t)",
+        usage: "[id | words]",
+        description:
+          "open threads, recent and archived ones, or search what they said (also ctrl+t)",
         group: "Session",
         complete: () => ({
           start: 0,
@@ -405,6 +411,98 @@ export class App {
           })),
         }),
         run: (_context, args) => this.#switchThread(args),
+      },
+      {
+        name: "rename",
+        usage: "<title>",
+        description: "rename this thread",
+        group: "Session",
+        available: () => this.#current !== undefined,
+        run: async (_context, args) => {
+          const current = this.#current;
+          if (!current) throw new Error("No thread to rename");
+          if (!args) throw new Error("Usage: /rename <title>");
+          await this.#client.call("thread.rename", { threadId: current.id, title: args });
+          this.#notice("info", `Renamed ${current.id}: ${args}`);
+        },
+      },
+      {
+        name: "pin",
+        usage: "[id]",
+        description: "keep a thread at the top of /threads and /resume, or unpin it",
+        group: "Session",
+        run: async (_context, args) => {
+          const id = args || this.#currentId;
+          if (!id) throw new Error("No thread to pin");
+          const pinned = !(this.#client.threads.get(id)?.pinned ?? false);
+          const listed = await this.#client.call("thread.flag", { threadId: id, pinned });
+          this.#notice("info", `${listed.pinned ? "Pinned" : "Unpinned"} ${id}`);
+        },
+      },
+      {
+        name: "archive",
+        usage: "[id]",
+        description: "end a thread and move it out of the lists, into /threads' Archived tab",
+        group: "Session",
+        run: async (_context, args) => {
+          const id = args || this.#currentId;
+          if (!id) throw new Error("No thread to archive");
+          await this.#client.call("thread.flag", { threadId: id, archived: true });
+          this.#notice("info", `Archived ${id}; /threads lists it under Archived.`);
+        },
+      },
+      {
+        name: "unarchive",
+        usage: "<id>",
+        description: "bring an archived thread back into the lists",
+        group: "Session",
+        run: async (_context, args) => {
+          if (!args) throw new Error("Usage: /unarchive <id>");
+          await this.#client.call("thread.flag", { threadId: args, archived: false });
+          this.#notice("info", `Brought ${args} back; /resume ${args} opens it.`);
+        },
+      },
+      {
+        name: "fork",
+        usage: "[turn]",
+        description: "start a new thread from this one's turns, through a turn or all of them",
+        group: "Session",
+        available: () => (this.#current?.runCount ?? 0) > 0,
+        run: async (_context, args) => {
+          const current = this.#current;
+          if (!current) throw new Error("No thread to fork");
+          const turn = args ? Number(args) : undefined;
+          if (turn !== undefined && !Number.isInteger(turn)) throw new Error("Usage: /fork [turn]");
+          const fork = await this.#client.call("thread.fork", {
+            threadId: current.id,
+            ...(turn === undefined ? {} : { turn }),
+          });
+          const shown = this.#client.threads.get(fork.id) ?? fork;
+          if (this.#currentId !== shown.id) this.#show(shown);
+        },
+      },
+      {
+        name: "forget",
+        usage: "[id]",
+        description: "delete a thread and the threads it started, for good",
+        group: "Session",
+        run: async (_context, args) => {
+          const id = args || this.#currentId;
+          if (!id) throw new Error("No thread to forget");
+          const title = this.#client.threads.get(id)?.title;
+          const answer = await this.#pick(
+            `Forget ${id}${title ? ` (${title})` : ""}? Its transcript and the threads it started go too.`,
+            [entry("Keep it"), entry("Forget it for good")],
+          );
+          if (answer !== 1) return;
+          const { forgotten } = await this.#client.call("thread.forget", { threadId: id });
+          this.#notice("info", `Forgot ${forgotten.join(", ")}`);
+          if (this.#currentId === null || forgotten.includes(this.#currentId)) {
+            const next = this.#threadOrder().find((thread) => thread.status !== "closed");
+            if (next) this.#show(next);
+            else await this.#open(this.#harness, { ...this.#settings, resume: null });
+          }
+        },
       },
       {
         name: "stop",
@@ -679,31 +777,126 @@ export class App {
   }
 
   /** Shows a thread, picking one from the tree of threads when no ID is given. */
-  async #switchThread(id: string): Promise<void> {
-    let target = id ? this.#client.threads.get(id) : undefined;
-    if (!target) {
-      if (id) throw new Error(`No thread ${id}`);
-      const threads = this.#threadOrder();
-      const prefixes = treePrefixes(threads);
-      const index = await this.#pick(
-        "Threads",
-        threads.map((thread, row) =>
-          entry(
-            `${prefixes[row] ?? ""}${thread.title || thread.id}`,
-            `${harnessLabel(thread)} · ${agentStatus(thread)}`,
-            { tag: thread.id === this.#currentId ? "current" : thread.id },
-          ),
-        ),
-        Math.max(
-          0,
-          threads.findIndex((thread) => thread.id === this.#currentId),
-        ),
-        true,
-      );
-      target = index === null ? undefined : threads[index];
+  /**
+   * Shows a thread by its ID, or picks one: the open ones as a tree, recent
+   * and archived ones from the host's records, or, given words, the threads
+   * whose titles or transcripts match them.
+   */
+  async #switchThread(args: string): Promise<void> {
+    const words = args.trim();
+    const named = /^t\d+$/.test(words) ? words : null;
+    if (named) {
+      const open = this.#client.threads.get(named);
+      if (open && open.status !== "closed") this.#show(open);
+      else if (named !== this.#currentId) await this.#resume(named, this.#harness);
+      return;
     }
-    if (!target || target.id === this.#currentId) return;
-    this.#show(target);
+    const choices: { id: string; open: boolean }[] = [];
+    const entries: MenuEntry[] = [];
+    const add = (id: string, open: boolean, made: MenuEntry) => {
+      choices.push({ id, open });
+      entries.push(made);
+    };
+    if (words) {
+      const found = await this.#client.call("threads.search", { query: words });
+      const titled = await this.#client.call("threads.list", { scope: "recent", query: words });
+      const ids = new Set<string>();
+      for (const { thread, snippet } of found) {
+        ids.add(thread.id);
+        add(
+          thread.id,
+          false,
+          entry(thread.title || thread.id, oneLine(snippet), { tag: thread.id }),
+        );
+      }
+      for (const thread of titled)
+        if (!ids.has(thread.id))
+          add(
+            thread.id,
+            false,
+            entry(thread.title || thread.id, `${thread.harness} · ${thread.status}`, {
+              tag: thread.id,
+            }),
+          );
+      if (entries.length === 0) {
+        this.#notice("info", `No thread mentions ${words}.`);
+        return;
+      }
+      const index = await this.#pick(`Threads matching ${words}`, entries, 0, true);
+      const chosen = index === null ? undefined : choices[index];
+      if (chosen) await this.#resume(chosen.id, this.#harness);
+      return;
+    }
+    const open = this.#threadOrder().filter(
+      (thread) => thread.status !== "closed" && !thread.archived,
+    );
+    const prefixes = treePrefixes(open);
+    open.forEach((thread, row) =>
+      add(
+        thread.id,
+        true,
+        entry(
+          `${prefixes[row] ?? ""}${thread.title || thread.id}`,
+          `${harnessLabel(thread)} · ${agentStatus(thread)}`,
+          { tag: this.#marker(thread), group: "Open" },
+        ),
+      ),
+    );
+    const [recent, archived] = await Promise.all([
+      this.#client.call("threads.list", { scope: "recent", limit: 100 }).catch(() => []),
+      this.#client.call("threads.list", { scope: "archived", limit: 100 }).catch(() => []),
+    ]);
+    const shown = new Set(open.map((thread) => thread.id));
+    const cwd = this.#cwd();
+    for (const thread of recent)
+      if (!shown.has(thread.id) && thread.parentId === null)
+        add(
+          thread.id,
+          false,
+          entry(
+            thread.title || thread.id,
+            `${thread.id} · ${thread.harness} · ${thread.status}${thread.cwd === cwd ? "" : ` · ${thread.cwd}`}`,
+            {
+              tag: thread.pinned ? "pinned" : thread.unseen ? "new" : day(thread.updatedAt),
+              group: "Recent",
+            },
+          ),
+        );
+    for (const thread of archived)
+      add(
+        thread.id,
+        false,
+        entry(thread.title || thread.id, `${thread.id} · ${thread.harness}`, {
+          tag: day(thread.updatedAt),
+          group: "Archived",
+        }),
+      );
+    const index = await this.#pick(
+      "Threads",
+      entries,
+      Math.max(
+        0,
+        choices.findIndex((choice) => choice.id === this.#currentId),
+      ),
+      true,
+      { tabs: true },
+    );
+    const chosen = index === null ? undefined : choices[index];
+    if (!chosen || chosen.id === this.#currentId) return;
+    const target = this.#client.threads.get(chosen.id);
+    if (chosen.open && target) this.#show(target);
+    else await this.#resume(chosen.id, this.#harness);
+  }
+
+  /** What the thread list marks a thread with: what needs the user, what is new, or where it is. */
+  #marker(thread: ThreadState): string {
+    if (thread.id === this.#currentId) return "current";
+    if (thread.status === "waiting") return "needs you";
+    const finished = thread.lastRun && thread.lastRun.status !== "running";
+    if (finished && thread.runCount > Math.max(thread.seenRuns, this.#seenRuns.get(thread.id) ?? 0))
+      return "new";
+    if (thread.pinned) return "pinned";
+    return thread.status === "parked" ? "parked" : thread.id;
   }
 
   #show(thread: ThreadState): void {

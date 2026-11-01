@@ -259,7 +259,7 @@ export class Orchestrator {
         },
         readOnly: true,
         execute: (input, context) => {
-          const thread = this.#thread(this.#caller(context), input);
+          const thread = this.#thread(this.#caller(context), input, true);
           const from = runNumber(input, "fromRun");
           const to = runNumber(input, "toRun");
           const count = typeof input["runs"] === "number" ? Math.max(1, input["runs"]) : 5;
@@ -733,13 +733,30 @@ export class Orchestrator {
     return task;
   }
 
-  /** A thread in the caller's tree; another tree's is not found. */
-  #thread(caller: ManagedThread, input: Record<string, unknown>): ManagedThread {
+  /**
+   * A thread in the caller's tree; another tree's is not found. `read` also
+   * finds the threads the caller's tree was forked from, whose turns its
+   * handoff points to.
+   */
+  #thread(caller: ManagedThread, input: Record<string, unknown>, read = false): ManagedThread {
     const id = text(input, "threadId") ?? "";
     const thread = this.#manager.get(id);
-    if (!thread || this.#root(thread) !== this.#root(caller))
+    const ours = thread && this.#root(thread) === this.#root(caller);
+    if (!thread || (!ours && !(read && this.#forkedFrom(caller).has(thread.id))))
       throw new OrchestrationError("thread_not_found", `no thread ${id} in your tree`);
     return thread;
+  }
+
+  /** The threads the caller's tree was forked from, and the ones those were forked from. */
+  #forkedFrom(caller: ManagedThread): Set<string> {
+    const sources = new Set<string>();
+    let source = this.#root(caller).forkedFrom;
+    while (source && !sources.has(source)) {
+      sources.add(source);
+      const thread = this.#manager.get(source);
+      source = thread ? this.#root(thread).forkedFrom : null;
+    }
+    return sources;
   }
 
   /** Another open thread the caller may act on: never one allowed more than the caller. */

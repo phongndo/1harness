@@ -21,6 +21,8 @@ export interface ThreadRow {
   parentId: string | null;
   parentCallId: string | null;
   origin: "user" | "delegated";
+  /** The thread it was forked from. */
+  forkedFrom: string | null;
   /** `open` has a session, `parked` had one and will again, `closed` was ended. */
   state: "open" | "parked" | "closed";
   info: SessionInfo;
@@ -85,6 +87,7 @@ CREATE TABLE IF NOT EXISTS threads (
   archived INTEGER NOT NULL DEFAULT 0,
   seen_runs INTEGER NOT NULL DEFAULT 0,
   native TEXT,
+  forked_from TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -219,6 +222,12 @@ export class Store {
 
   #migrate(): void {
     this.#db.exec(SCHEMA);
+    // Columns added since a store was first made.
+    const columns = new Set(
+      this.#all("PRAGMA table_info(threads)").map((row) => String(row["name"])),
+    );
+    if (!columns.has("forked_from"))
+      this.#db.exec("ALTER TABLE threads ADD COLUMN forked_from TEXT");
     const version = this.#meta("schema");
     if (version === null) this.#setMeta("schema", String(SCHEMA_VERSION));
     else if (Number(version) > SCHEMA_VERSION)
@@ -295,8 +304,8 @@ export class Store {
     this.#run(
       `INSERT INTO threads (id, title, cwd, harness, parent_id, parent_call_id, origin, state, info,
          capabilities, methods, handoff, seen_without_handoff, generation, error, pinned, archived,
-         seen_runs, native, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         seen_runs, native, forked_from, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET title = excluded.title, cwd = excluded.cwd,
          harness = excluded.harness, state = excluded.state, info = excluded.info,
          capabilities = excluded.capabilities, methods = excluded.methods,
@@ -323,6 +332,7 @@ export class Store {
       row.archived ? 1 : 0,
       row.seenRuns,
       row.info.threadId,
+      row.forkedFrom,
       row.createdAt,
       row.updatedAt,
     );
@@ -337,6 +347,10 @@ export class Store {
       parentId: row["parent_id"] === null ? null : String(row["parent_id"]),
       parentCallId: row["parent_call_id"] === null ? null : String(row["parent_call_id"]),
       origin: row["origin"] === "delegated" ? "delegated" : "user",
+      forkedFrom:
+        row["forked_from"] === null || row["forked_from"] === undefined
+          ? null
+          : String(row["forked_from"]),
       state: String(row["state"]) as ThreadRow["state"],
       info: json(row["info"]),
       capabilities: json(row["capabilities"]),
@@ -425,6 +439,26 @@ export class Store {
        ORDER BY pinned DESC, updated_at DESC LIMIT ?`,
       ...params,
     ).map((row) => this.#summary(row));
+  }
+
+  /** One thread with what listings show of its runs. */
+  summary(id: string): ThreadSummaryRow | null {
+    const row = this.#get(
+      `SELECT threads.*,
+         (SELECT COUNT(*) FROM runs WHERE runs.thread_id = threads.id) AS run_count,
+         (SELECT record FROM runs WHERE runs.thread_id = threads.id ORDER BY idx DESC LIMIT 1) AS last_run
+       FROM threads WHERE id = ?`,
+      id,
+    );
+    return row ? this.#summary(row) : null;
+  }
+
+  /** The threads a thread started, and the ones they started. */
+  descendants(id: string): string[] {
+    const children = this.#all("SELECT id FROM threads WHERE parent_id = ?", id).map((row) =>
+      String(row["id"]),
+    );
+    return children.flatMap((child) => [child, ...this.descendants(child)]);
   }
 
   /** Where a search matched in each thread's transcript, best first. */

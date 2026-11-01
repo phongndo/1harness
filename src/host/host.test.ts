@@ -462,3 +462,126 @@ describe("Host with a store", () => {
     assert.equal(host.manager.get(parent.id)?.thread.session, null);
   });
 });
+
+/** A thread the scripted harness has run `messages` on, one turn each. */
+async function threadWith(client: HostClient, ...messages: string[]) {
+  const thread = await client.call("thread.open", { harness: "scripted", settings });
+  for (const text of messages) {
+    await client.call("thread.send", { threadId: thread.id, text });
+    await idle(client, thread.id);
+  }
+  return thread;
+}
+
+describe("Managing threads over time", () => {
+  let count = 0;
+  const store = () => Store.open(join(root, `manage-${++count}.db`));
+
+  it("renames, pins, and archives threads, and lists them by where they belong", async () => {
+    newHost([], store());
+    const client = await connect("tui");
+    const first = await threadWith(client, "parser work");
+    const second = await threadWith(client, "lexer work");
+    await client.call("thread.rename", { threadId: first.id, title: "The parser" });
+    await settle(5);
+    assert.equal(client.threads.get(first.id)?.title, "The parser");
+    await client.call("thread.flag", { threadId: first.id, pinned: true });
+    const recent = await client.call("threads.list", { scope: "recent" });
+    // Pinned first, then newest.
+    assert.deepEqual(
+      recent.map((thread) => thread.id),
+      [first.id, second.id],
+    );
+    const archived = await client.call("thread.flag", { threadId: second.id, archived: true });
+    assert.equal(archived.status, "closed");
+    assert.deepEqual(
+      (await client.call("threads.list", { scope: "recent" })).map((thread) => thread.id),
+      [first.id],
+    );
+    assert.deepEqual(
+      (await client.call("threads.list", { scope: "archived" })).map((thread) => thread.id),
+      [second.id],
+    );
+  });
+
+  it("finds threads by what was said in them", async () => {
+    newHost([], store());
+    const client = await connect("tui");
+    const parser = await threadWith(client, "the tokenizer drops tabs");
+    await threadWith(client, "something else");
+    const found = await client.call("threads.search", { query: "tokeniz" });
+    assert.deepEqual(
+      found.map((hit) => hit.thread.id),
+      [parser.id],
+    );
+    assert.match(found[0]?.snippet ?? "", /tokenizer/);
+  });
+
+  it("forks a thread through a turn, handing the new one those turns", async () => {
+    newHost([], store());
+    const client = await connect("tui");
+    const source = await threadWith(client, "first idea", "second idea", "third idea");
+    const fork = await client.call("thread.fork", { threadId: source.id, turn: 2 });
+    assert.notEqual(fork.id, source.id);
+    assert.match(fork.title, /\(fork\)$/);
+    await client.call("thread.send", { threadId: fork.id, text: "go on" });
+    await idle(client, fork.id);
+    const session = host.manager.get(fork.id)?.thread.session as unknown as ScriptedSession;
+    const prompt = session.prompts[0] ?? "";
+    assert.match(prompt, new RegExp(`starts from thread ${source.id}, as it stood after turn 2`));
+    assert.match(prompt, /second idea/);
+    assert.doesNotMatch(prompt, /third idea/);
+    assert.match(prompt, /go on$/);
+    await assert.rejects(
+      client.call("thread.fork", { threadId: source.id, turn: 9 }),
+      /has turns 1 to 3/,
+    );
+  });
+
+  it("forgets a thread for good, with what it started", async () => {
+    newHost([], store());
+    const client = await connect("tui");
+    const thread = await threadWith(client, "remember nothing");
+    const { forgotten } = await client.call("thread.forget", { threadId: thread.id });
+    assert.deepEqual(forgotten, [thread.id]);
+    await settle(5);
+    assert.equal(client.threads.has(thread.id), false);
+    assert.deepEqual(await client.call("threads.list", { scope: "recent" }), []);
+    await assert.rejects(client.call("thread.attach", { threadId: thread.id }), /No thread/);
+  });
+
+  it("deletes closed threads past the retention when it starts, but not pinned ones", async () => {
+    const file = join(root, `manage-${++count}.db`);
+    newHost([], Store.open(file));
+    let client = await connect("tui");
+    const old = await threadWith(client, "old work");
+    const kept = await threadWith(client, "kept work");
+    await client.call("thread.flag", { threadId: kept.id, pinned: true });
+    await client.call("thread.close", { threadId: old.id });
+    await client.call("thread.close", { threadId: kept.id });
+    await host.shutdown();
+    // A day passes.
+    const later = Date.now() + 2 * 86_400_000;
+    const now = Date.now;
+    Date.now = () => later;
+    try {
+      host = new Host({
+        version: "test",
+        cwd: root,
+        configDir: join(root, "config"),
+        stateDir: join(root, "state"),
+        idleCloseMs: 0,
+        store: Store.open(file),
+        retainClosedDays: 1,
+      });
+      client = await connect("tui");
+      const left = await client.call("threads.list", { scope: "recent" });
+      assert.deepEqual(
+        left.map((thread) => thread.id),
+        [kept.id],
+      );
+    } finally {
+      Date.now = now;
+    }
+  });
+});

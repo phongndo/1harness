@@ -32,6 +32,7 @@ import {
   type UiRequest,
 } from "../protocol.ts";
 import type { Store, ThreadRow, ThreadSummaryRow } from "../store/store.ts";
+import { handoffText } from "./handoff.ts";
 import { ThreadLog } from "./log.ts";
 import {
   ThreadManager,
@@ -102,6 +103,8 @@ export interface HostOptions {
    * with the host.
    */
   store?: Store | null;
+  /** Closed threads last used longer ago than this are deleted when the host starts; pinned ones stay. */
+  retainClosedDays?: number | null;
 }
 
 /** A harness's name as people know it, such as `Claude Code`. */
@@ -314,6 +317,9 @@ export class Host {
   async #restore(): Promise<void> {
     const store = this.#store;
     if (!store) return;
+    const days = this.#options.retainClosedDays;
+    if (days)
+      for (const id of store.closedBefore(Date.now() - days * 86_400_000)) store.deleteThread(id);
     const rows = store.liveThreads();
     const interrupted = new Set<string>();
     const saved: RestoredThread[] = [];
@@ -359,6 +365,7 @@ export class Host {
       parentId: row.parentId,
       parentCallId: row.parentCallId,
       origin: row.origin,
+      forkedFrom: row.forkedFrom,
       createdAt: row.createdAt,
       error: row.error,
       runs,
@@ -440,7 +447,11 @@ export class Host {
     client.pending.clear();
     const showing = client.showing;
     client.showing = null;
-    if (showing) await this.#discardIfEmpty(showing, client);
+    if (showing) {
+      // What it showed up to the end was seen.
+      this.#markSeen(showing);
+      await this.#discardIfEmpty(showing, client);
+    }
   }
 
   /** How many clients are connected. */
@@ -546,6 +557,7 @@ export class Host {
       parentId: managed.parentId,
       parentCallId: managed.parentCallId,
       origin: managed.origin,
+      forkedFrom: managed.forkedFrom,
       state: managed.status === "closed" ? "closed" : thread.session ? "open" : "parked",
       info: { ...thread.info },
       capabilities: thread.capabilities,
@@ -1297,6 +1309,120 @@ export class Host {
       "thread.close": async (_client, { threadId }) => {
         await this.manager.close(this.#managed(threadId).id);
         return null;
+      },
+      "thread.rename": async (_client, { threadId, title }) => {
+        const name = title.replace(/\s+/g, " ").trim();
+        if (!name) throw new RpcError("invalid_request", "A title cannot be empty");
+        const managed = this.manager.get(threadId);
+        if (managed) this.manager.rename(threadId, name);
+        else {
+          const row = this.#store?.thread(threadId);
+          if (!row) throw new RpcError("thread_not_found", `No thread ${threadId}`);
+          this.#store!.saveThread({ ...row, title: name });
+        }
+        return null;
+      },
+      "thread.flag": async (_client, { threadId, pinned, archived }) => {
+        const managed = this.manager.get(threadId);
+        const row = managed ? null : this.#store?.thread(threadId);
+        if (!managed && !row) throw new RpcError("thread_not_found", `No thread ${threadId}`);
+        const flags = this.#flags.get(threadId) ?? {
+          pinned: row?.pinned ?? false,
+          archived: row?.archived ?? false,
+        };
+        const next = {
+          pinned: pinned ?? flags.pinned,
+          archived: archived ?? flags.archived,
+        };
+        this.#flags.set(threadId, next);
+        // An archived thread is done with: it ends, with the threads it started.
+        if (managed && next.archived && managed.status !== "closed")
+          await this.manager.close(threadId);
+        if (managed) {
+          this.#dirty.add(threadId);
+          this.#announce(managed);
+          this.#flush();
+          return this.#listing(managed);
+        }
+        this.#store!.saveThread({ ...row!, ...next });
+        return this.#rowListing(this.#store!.summary(threadId)!);
+      },
+      "thread.fork": async (client, { threadId, turn }) => {
+        const source = this.manager.get(threadId) ?? (await this.#reopen(threadId));
+        if (!source) throw new RpcError("thread_not_found", `No thread ${threadId}`);
+        const last = turn ?? source.runs.length;
+        if (!Number.isInteger(last) || last < 0 || last > source.runs.length)
+          throw new RpcError(
+            "invalid_request",
+            `${threadId} has turns 1 to ${source.runs.length}; fork after one of them`,
+          );
+        const info = source.thread.info;
+        const handoff = handoffText({
+          threadId: source.id,
+          to: source.harness,
+          runs: source.runs.slice(0, last),
+          resumed: false,
+          forked: true,
+          label,
+        });
+        const managed = await this.manager.create({
+          harness: source.harness,
+          settings: {
+            cwd: info.cwd,
+            model: info.model,
+            effort: info.effort,
+            runtimeMode: info.runtimeMode,
+            interactionMode: info.interactionMode,
+            resume: null,
+          },
+          title: `${source.title || source.id} (fork)`,
+          origin: "user",
+          openedBy: client.id,
+          fork: { from: source.id, handoff },
+        });
+        this.#notice(
+          managed.id,
+          "info",
+          `Forked from ${source.id} after turn ${last}. Your first message brings ${label(source.harness)} up to date on ${last} ${last === 1 ? "turn" : "turns"}.`,
+        );
+        return this.#state(managed);
+      },
+      "thread.forget": async (_client, { threadId }) => {
+        const managed = this.manager.get(threadId);
+        if (!managed && !this.#store?.thread(threadId))
+          throw new RpcError("thread_not_found", `No thread ${threadId}`);
+        const ids = [
+          ...new Set([
+            threadId,
+            ...this.manager.descendants(threadId).map((thread) => thread.id),
+            ...(this.#store?.descendants(threadId) ?? []),
+          ]),
+        ];
+        if (managed) await this.manager.close(threadId);
+        for (const id of ids.toReversed()) {
+          if (this.manager.get(id)) {
+            this.#discarding.add(id);
+            this.manager.forget(id);
+          } else this.#store?.deleteThread(id);
+          this.#flags.delete(id);
+          this.#seenRuns.delete(id);
+        }
+        return { forgotten: ids };
+      },
+      "threads.search": async (_client, { query, limit }) => {
+        const store = this.#store;
+        if (!store) return [];
+        this.#flush();
+        const seen = new Set<string>();
+        const found: { thread: ThreadListing; snippet: string }[] = [];
+        for (const hit of store.search(query, (limit ?? 30) * 4)) {
+          if (seen.has(hit.threadId)) continue;
+          seen.add(hit.threadId);
+          const row = store.summary(hit.threadId);
+          if (row) found.push({ thread: this.#rowListing(row), snippet: hit.snippet });
+          if (found.length >= (limit ?? 30)) break;
+        }
+        return found;
       },
       "thread.unqueue": async (_client, { threadId }) =>
         this.#open(threadId).thread.unqueue() ?? null,

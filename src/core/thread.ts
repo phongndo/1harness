@@ -304,6 +304,11 @@ export class Thread {
     return this.#handoff;
   }
 
+  /** Sets what the next message carries in front of it, such as where a forked thread starts. */
+  setHandoff(handoff: string | null): void {
+    this.#handoff = handoff;
+  }
+
   get busy(): boolean {
     return this.#busy;
   }

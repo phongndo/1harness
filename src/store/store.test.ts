@@ -38,6 +38,7 @@ function row(id: string, overrides: Partial<ThreadRow> = {}): ThreadRow {
     parentId: null,
     parentCallId: null,
     origin: "user",
+    forkedFrom: null,
     state: "open",
     info,
     capabilities,
