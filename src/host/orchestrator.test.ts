@@ -21,15 +21,21 @@ import { ThreadManager, type ManagedThread } from "./manager.ts";
 import { MAX_OPEN_THREADS, MAX_RUNNING_THREADS, Orchestrator } from "./orchestrator.ts";
 
 const ALL_MODES: RuntimeMode[] = ["supervised", "auto-edit", "auto", "full-access"];
+/** Numbers each new native thread, so a resumed one can be told apart. */
+let natives = 0;
 
 /** A harness that answers each message with `done: <message>` on the next tick. */
 class FakeSession {
   readonly capabilities: Capabilities;
   readonly info: SessionInfo;
+  /** What the session was started with. */
+  readonly options: SessionOptions;
   readonly events = new AsyncQueue<HarnessEvent>();
   /** What each turn was started with, as the harness got it. */
   readonly prompts: string[] = [];
   readonly steered: string[] = [];
+  /** Work it reports running between turns, as a harness's background agents. */
+  background: string[] = [];
   #turns = 0;
   #pending: (() => void) | null = null;
   /** The running turn, which an interrupt ends. */
@@ -42,6 +48,7 @@ class FakeSession {
     // A harness that starts in its own mode whatever it is asked, as some ACP agents do.
     starts: RuntimeMode | null = null,
   ) {
+    this.options = options;
     this.capabilities = {
       steer: true,
       planMode,
@@ -53,7 +60,7 @@ class FakeSession {
     };
     this.info = {
       harness: "fake",
-      threadId: "native",
+      threadId: options.resume ?? `native-${++natives}`,
       cwd: options.cwd,
       model: options.model,
       effort: options.effort,
@@ -65,7 +72,10 @@ class FakeSession {
     };
   }
 
-  async start(): Promise<void> {}
+  async start(): Promise<void> {
+    // A native thread the harness no longer has.
+    if (this.options.resume === "gone") throw new Error("no such thread");
+  }
 
   async startTurn(input: UserInput): Promise<void> {
     if (input.text.endsWith("FAIL")) throw new Error("the harness refused the turn");
@@ -81,8 +91,32 @@ class FakeSession {
         ...(input.id ? { inputId: input.id } : {}),
       },
     });
+    // A message ending in "CMD" runs a command that fails.
+    if (input.text.endsWith("CMD"))
+      this.events.push({
+        type: "item.completed",
+        item: {
+          kind: "command",
+          id: `${turnId}-cmd`,
+          command: "pnpm test",
+          output: "1 failing",
+          exitCode: 1,
+          status: "completed",
+        },
+      });
     const finish = () => {
       this.#running = null;
+      this.events.push({
+        type: "usage.updated",
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          contextTokens: 150_000 * this.#turns,
+          contextWindow: 1_000_000,
+          costUsd: null,
+          limits: [],
+        },
+      });
       this.events.push({
         type: "item.completed",
         item: {
@@ -123,6 +157,10 @@ class FakeSession {
 
   async steer(input: UserInput): Promise<void> {
     this.steered.push(input.text);
+  }
+
+  backgroundTasks(): string[] {
+    return this.background;
   }
 
   async interrupt(): Promise<void> {
@@ -210,6 +248,12 @@ before(async () => {
       label: "Fake sticky",
       unavailable: () => null,
       create: (options) => new FakeSession(options, ALL_MODES, true, "full-access"),
+    }),
+    registerDriver({
+      id: "fake-b",
+      label: "Fake B",
+      unavailable: () => null,
+      create: (options) => new FakeSession(options),
     }),
     // Only broad modes, and no plan mode.
     registerDriver({
@@ -313,6 +357,176 @@ describe("ThreadManager", () => {
       [["failed", "crashed"]],
     );
     assert.ok(closedEvents.includes("crashed"));
+  });
+});
+
+const sessionOf = (thread: ManagedThread) => thread.thread.session as unknown as FakeSession;
+
+describe("Switching harness", () => {
+  it("moves a thread with a handoff of what it missed, and back to its old thread", async () => {
+    const thread = await manager.create({ harness: "fake", settings: settings() });
+    const first = sessionOf(thread);
+    thread.thread.send({ text: "plan the parser" });
+    await manager.wait(thread.id, 1000);
+
+    const moved = await manager.switchHarness(thread.id, "fake-b");
+    assert.deepEqual(moved, {
+      from: "fake",
+      to: "fake-b",
+      resumed: false,
+      resumeError: null,
+      handedOver: 1,
+      resumedContext: null,
+    });
+    assert.equal(thread.harness, "fake-b");
+    assert.equal(thread.status, "idle");
+    assert.equal(first.events.ended, true);
+    const second = sessionOf(thread);
+    assert.equal(second.info.runtimeMode, "supervised");
+
+    // The handoff rides on the next message; the run keeps the message as sent.
+    thread.thread.send({ text: "write it" });
+    await manager.wait(thread.id, 1000);
+    const handed = second.prompts[0] ?? "";
+    assert.match(
+      handed,
+      /^<1harness-handoff>\n1harness thread t\d+ has moved to you \(Fake B\) from Fake\./,
+    );
+    assert.match(handed, /Turn 1 · Fake\nUser: plan the parser\nReply: done: plan the parser/);
+    assert.ok(handed.endsWith("The next message follows.\n\nwrite it"));
+    assert.deepEqual(
+      thread.runs.map((run) => [run.harness, run.input, run.result]),
+      [
+        ["fake", "plan the parser", "done: plan the parser"],
+        ["fake-b", "write it", "done: write it"],
+      ],
+    );
+    const read = await call("thread_read", thread, { threadId: thread.id });
+    assert.deepEqual(
+      (read["runs"] as { harness: string }[]).map((run) => run.harness),
+      ["fake", "fake-b"],
+    );
+
+    // Going back resumes the first harness's own thread, which missed only turn 2.
+    const back = await manager.switchHarness(thread.id, "fake");
+    assert.equal(back.resumed, true);
+    assert.equal(back.handedOver, 1);
+    const third = sessionOf(thread);
+    assert.equal(third.options.resume, first.info.threadId);
+    thread.thread.send({ text: "test it" });
+    await manager.wait(thread.id, 1000);
+    const delta = third.prompts[0] ?? "";
+    assert.match(
+      delta,
+      /You are back on 1harness thread t\d+\. While you were away it ran on Fake B/,
+    );
+    assert.match(delta, /Turn 2 · Fake B\nUser: write it/);
+    assert.doesNotMatch(delta, /Turn 1/);
+  });
+
+  it("starts a new thread when the old one is gone, and stays put on a narrower mode", async () => {
+    const thread = await manager.create({ harness: "fake", settings: settings() });
+    thread.thread.send({ text: "one" });
+    await manager.wait(thread.id, 1000);
+    sessionOf(thread).info.threadId = "gone";
+    await manager.switchHarness(thread.id, "fake-b");
+    const back = await manager.switchHarness(thread.id, "fake");
+    assert.deepEqual(
+      [back.resumed, back.resumeError, back.handedOver],
+      [false, "no such thread", 1],
+    );
+    assert.equal(sessionOf(thread).options.resume, null);
+
+    // A supervised thread cannot move to a harness whose narrowest mode is auto.
+    const staying = sessionOf(thread);
+    await assert.rejects(
+      manager.switchHarness(thread.id, "fake-wide"),
+      /fake-wide has no mode as narrow as supervised/,
+    );
+    assert.equal(thread.harness, "fake");
+    assert.equal(sessionOf(thread), staying);
+    thread.thread.send({ text: "two" });
+    await manager.wait(thread.id, 1000);
+    assert.equal(thread.runs.at(-1)?.status, "completed");
+  });
+
+  it("keeps a handoff that was never sent for the next time the harness is used", async () => {
+    const thread = await manager.create({ harness: "fake", settings: settings() });
+    thread.thread.send({ text: "one" });
+    await manager.wait(thread.id, 1000);
+    // Onto fake-b and straight back, so fake-b's handoff never goes out.
+    await manager.switchHarness(thread.id, "fake-b");
+    const skipped = sessionOf(thread);
+    await manager.switchHarness(thread.id, "fake");
+    thread.thread.send({ text: "two" });
+    await manager.wait(thread.id, 1000);
+    // fake-b resumes its thread, which never heard of turn 1 either.
+    const again = await manager.switchHarness(thread.id, "fake-b");
+    assert.equal(again.resumed, true);
+    assert.equal(sessionOf(thread).options.resume, skipped.info.threadId);
+    assert.equal(again.handedOver, 2);
+    thread.thread.send({ text: "three" });
+    await manager.wait(thread.id, 1000);
+    const handed = sessionOf(thread).prompts[0] ?? "";
+    assert.match(handed, /Turn 1 · Fake\nUser: one/);
+    assert.match(handed, /Turn 2 · Fake\nUser: two/);
+  });
+
+  it("starts a harness over with fresh, and says how large a resumed thread is", async () => {
+    const thread = await manager.create({ harness: "fake", settings: settings() });
+    const first = sessionOf(thread);
+    thread.thread.send({ text: "check it CMD" });
+    await manager.wait(thread.id, 1000);
+    assert.deepEqual(thread.runs[0]?.commands, [{ command: "pnpm test", exitCode: 1 }]);
+    await manager.switchHarness(thread.id, "fake-b");
+    const handed = (() => {
+      thread.thread.send({ text: "go on" });
+      return manager.wait(thread.id, 1000).then(() => sessionOf(thread).prompts[0] ?? "");
+    })();
+    assert.match(await handed, /Commands: `pnpm test` → exit 1/);
+
+    const back = await manager.switchHarness(thread.id, "fake");
+    assert.equal(back.resumed, true);
+    assert.equal(back.resumedContext?.tokens, 150_000);
+    assert.ok((back.resumedContext?.idleMs ?? -1) >= 0);
+    assert.equal(sessionOf(thread).options.resume, first.info.threadId);
+
+    // fresh skips the resume, and restarts the harness the thread is on.
+    const restarted = await manager.switchHarness(thread.id, "fake", { fresh: true });
+    assert.deepEqual(
+      [
+        restarted.from,
+        restarted.to,
+        restarted.resumed,
+        restarted.resumedContext,
+        restarted.handedOver,
+      ],
+      ["fake", "fake", false, null, 2],
+    );
+    assert.equal(sessionOf(thread).options.resume, null);
+  });
+
+  it("does not move while the old harness still runs background work", async () => {
+    const thread = await manager.create({ harness: "fake", settings: settings() });
+    sessionOf(thread).background = ["Explore the parser"];
+    await assert.rejects(
+      manager.switchHarness(thread.id, "fake-b"),
+      /still runs background work on fake, which moving would stop: Explore the parser/,
+    );
+    assert.equal(thread.harness, "fake");
+    sessionOf(thread).background = [];
+    await manager.switchHarness(thread.id, "fake-b");
+    assert.equal(thread.harness, "fake-b");
+  });
+
+  it("refuses to move a working thread or to a harness that is not there", async () => {
+    const thread = await manager.create({ harness: "fake", settings: settings() });
+    await assert.rejects(manager.switchHarness(thread.id, "nope"), /No harness named nope/);
+    await assert.rejects(manager.switchHarness(thread.id, "fake"), /already runs on fake/);
+    thread.thread.send({ text: "busy SLOW" });
+    await settle(5);
+    await assert.rejects(manager.switchHarness(thread.id, "fake-b"), /is working/);
+    await manager.wait(thread.id, 1000);
   });
 });
 

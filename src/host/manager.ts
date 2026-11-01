@@ -3,6 +3,8 @@ import {
   isRuntimeMode,
   modeRank,
   type HarnessId,
+  type HarnessSession,
+  type McpServerConfig,
   type SessionOptions,
 } from "../core/events.ts";
 import {
@@ -12,9 +14,10 @@ import {
   type MessageOrigin,
   type ThreadEvent,
 } from "../core/thread.ts";
-import { createSession } from "../drivers/index.ts";
+import { createSession, drivers, findDriver } from "../drivers/index.ts";
 import type { ExtensionHost } from "../extensions/host.ts";
 import type { ToolServer } from "../extensions/tool-server.ts";
+import { handoffText } from "./handoff.ts";
 
 export type ThreadStatus = "starting" | "idle" | "working" | "waiting" | "closed";
 
@@ -22,6 +25,8 @@ export type ThreadStatus = "starting" | "idle" | "working" | "waiting" | "closed
 export interface RunRecord {
   index: number;
   turnId: string;
+  /** The harness that ran it; a thread can move between harnesses. */
+  harness: HarnessId;
   status: "running" | "completed" | "failed" | "interrupted";
   /** What started the run: what the user typed, the task without its brief, or a task's result. */
   input: string;
@@ -29,6 +34,10 @@ export interface RunRecord {
   origin: MessageOrigin | null;
   /** The last assistant message, which is the run's result. */
   result: string | null;
+  /** Files the run changed, in the order it first changed them. */
+  files: string[];
+  /** Shell commands the run finished, with how each exited. */
+  commands: { command: string; exitCode: number | null }[];
   error: string | null;
   startedAt: number;
   endedAt: number | null;
@@ -38,7 +47,8 @@ export interface RunRecord {
 export interface ManagedThread {
   readonly id: string;
   title: string;
-  readonly harness: HarnessId;
+  /** The harness it runs on now; `switchHarness` moves it. */
+  harness: HarnessId;
   /** The thread that started this one, for delegated work. */
   readonly parentId: string | null;
   /** The tool call in the parent's thread that started this one, where its harness said which. */
@@ -77,6 +87,37 @@ export interface ManagerOptions {
   onWarning?: (text: string) => void;
 }
 
+/** How a thread moved to another harness, for clients to describe. */
+export interface SwitchResult {
+  from: HarnessId;
+  to: HarnessId;
+  /** The harness picked up its own earlier thread rather than starting one. */
+  resumed: boolean;
+  /** Why its earlier thread could not be picked up, when a new one started instead. */
+  resumeError: string | null;
+  /** How many turns the handoff carries to the harness's next message. */
+  handedOver: number;
+  /**
+   * The resumed thread as the thread left it: how much context it held, when
+   * known, and how long ago it was last used. A large or long-idle one costs
+   * more to pick up than it looks. Null for a new thread.
+   */
+  resumedContext: { tokens: number | null; idleMs: number } | null;
+}
+
+/** Where a thread left a harness, so going back resumes that harness's own thread. */
+interface Visit {
+  /** The harness's own thread ID, or null when it never assigned one. */
+  native: string | null;
+  /** How many of the thread's runs that harness's own thread has seen. */
+  runs: number;
+  model: string | null;
+  effort: string | null;
+  /** How much context its thread held when the thread left, when the harness said. */
+  contextTokens: number | null;
+  leftAt: number;
+}
+
 /** A thread that cannot run as narrowly as asked; it is closed rather than started. */
 export class ModeError extends Error {
   readonly code:
@@ -110,6 +151,18 @@ export class ThreadManager {
   #byThread = new Map<Thread, ManagedThread>();
   #listeners = new Set<ManagerListener>();
   #cleanups = new Map<string, () => void>();
+  /** The MCP servers each thread's sessions get, the tool server's grant among them. */
+  #servers = new Map<string, Record<string, McpServerConfig>>();
+  /** Harnesses each thread ran on before, by harness. */
+  #visits = new Map<string, Map<HarnessId, Visit>>();
+  /** Threads moving to another harness, and the harness they are moving to. */
+  #switching = new Map<string, HarnessId>();
+  /**
+   * For a thread whose harness has a handoff it has not been sent yet, how many
+   * runs its own thread had seen without it. Leaving before the handoff goes
+   * out must not count the turns the handoff would have told it.
+   */
+  #seenWithoutHandoff = new Map<string, number>();
   /** Threads being closed, children first, so work no longer goes to them. */
   #closing = new Set<string>();
   #warned = new Set<string>();
@@ -202,17 +255,21 @@ export class ThreadManager {
     };
     this.#threads.set(managed.id, managed);
     this.#byThread.set(thread, managed);
+    this.#servers.set(managed.id, mcp.servers);
     const unsubscribe = thread.subscribe((event) => this.#apply(managed, event));
     const detach = extensions.attach(thread);
     this.#cleanups.set(managed.id, () => {
       unsubscribe();
       detach();
       mcp.grant?.revoke();
+      this.#servers.delete(managed.id);
+      this.#visits.delete(managed.id);
+      this.#seenWithoutHandoff.delete(managed.id);
     });
     this.#emit({ type: "thread.created", thread: managed });
     try {
       await thread.start();
-      await holdModes(managed, options.settings);
+      await holdModes(thread.session, managed.harness, options.settings);
     } catch (error) {
       managed.error = errorMessage(error);
       await this.close(managed.id);
@@ -220,6 +277,130 @@ export class ThreadManager {
     }
     this.#refresh(managed);
     return managed;
+  }
+
+  /**
+   * Moves a thread onto another harness, keeping its ID, runs, queue, and the
+   * threads it started. Going back to a harness the thread ran on before
+   * resumes that harness's own thread, and a new one starts when that fails,
+   * there is none, or `fresh` asks for one; `fresh` also restarts the current
+   * harness. The harness's next message carries a handoff of the turns it has
+   * not seen. The thread keeps its permission and plan modes; a harness that
+   * cannot run that narrowly is refused, and the thread stays where it was, as
+   * it does when the harness cannot start. Work the old harness runs in the
+   * background would stop with it, so the thread does not move while it runs.
+   */
+  async switchHarness(
+    id: string,
+    harness: HarnessId,
+    options: { model?: string | null; effort?: string | null; fresh?: boolean } = {},
+  ): Promise<SwitchResult> {
+    const managed = this.#threads.get(id);
+    if (!managed || this.closing(id)) throw new Error(`No open thread ${id}`);
+    const from = managed.harness;
+    const fresh = options.fresh === true;
+    if (harness === from && !fresh) throw new Error(`${id} already runs on ${harness}`);
+    if (this.#switching.has(id)) throw new Error(`${id} is already moving to another harness`);
+    const thread = managed.thread;
+    if (thread.busy || thread.requests.length > 0)
+      throw new Error(`${id} is working; wait for the turn to end or stop it first`);
+    const background = thread.session.backgroundTasks?.() ?? [];
+    if (background.length > 0)
+      throw new Error(
+        `${id} still runs background work on ${from}, which moving would stop: ${background.join("; ")}. Wait for it to finish first`,
+      );
+    if (!findDriver(harness))
+      throw new Error(
+        `No harness named ${harness}; try ${drivers()
+          .map((driver) => driver.id)
+          .join(", ")}`,
+      );
+
+    const info = thread.session.info;
+    const visits = this.#visits.get(id) ?? new Map<HarnessId, Visit>();
+    const earlier = harness === from ? undefined : visits.get(harness);
+    const now = Date.now();
+    const leaving: Visit = {
+      native: info.threadId,
+      runs:
+        thread.handoff === null
+          ? managed.runs.length
+          : (this.#seenWithoutHandoff.get(id) ?? managed.runs.length),
+      model: info.model,
+      effort: info.effort,
+      contextTokens: thread.usage?.contextTokens ?? null,
+      leftAt: now,
+    };
+    // As narrow as the thread runs now, which may be narrower than it was asked to.
+    const settings: SessionOptions = {
+      cwd: info.cwd,
+      model: options.model ?? (harness === from ? info.model : (earlier?.model ?? null)),
+      effort: options.effort ?? (harness === from ? info.effort : (earlier?.effort ?? null)),
+      runtimeMode: info.runtimeMode,
+      interactionMode: info.interactionMode,
+      resume: null,
+    };
+    const servers = this.#servers.get(id) ?? {};
+    const toolPolicy = this.#options.extensions.toolPolicy(() => thread);
+    const extras = {
+      ...(Object.keys(servers).length > 0 ? { mcpServers: servers } : {}),
+      ...(toolPolicy ? { toolPolicy } : {}),
+    };
+    const attempts = [
+      ...(earlier?.native && !fresh ? [{ resume: earlier.native, seen: earlier.runs }] : []),
+      { resume: null, seen: 0 },
+    ];
+
+    this.#switching.set(id, harness);
+    this.#refresh(managed);
+    let resumeError: string | null = null;
+    try {
+      for (const attempt of attempts) {
+        const asked = { ...settings, resume: attempt.resume };
+        const unseen = managed.runs.slice(attempt.seen);
+        const handoff = handoffText({
+          threadId: id,
+          to: harness,
+          runs: unseen,
+          resumed: attempt.resume !== null,
+          label: (other) => findDriver(other)?.label ?? other,
+        });
+        try {
+          const next = createSession(harness, { ...asked, ...extras }, this.#env());
+          await thread.replaceSession(next, {
+            handoff,
+            prepare: () => holdModes(next, harness, asked),
+          });
+          visits.set(from, leaving);
+          this.#visits.set(id, visits);
+          if (handoff) this.#seenWithoutHandoff.set(id, attempt.seen);
+          else this.#seenWithoutHandoff.delete(id);
+          const resumed = attempt.resume !== null && earlier !== undefined;
+          return {
+            from,
+            to: harness,
+            resumed,
+            resumeError,
+            handedOver: handoff ? unseen.filter((run) => run.status !== "running").length : 0,
+            resumedContext: resumed
+              ? { tokens: earlier.contextTokens, idleMs: now - earlier.leftAt }
+              : null,
+          };
+        } catch (error) {
+          // Only a failed resume is worth another try, with a new thread.
+          if (attempt.resume === null || error instanceof ModeError || thread.closed) throw error;
+          resumeError = errorMessage(error);
+        }
+      }
+      throw new Error(`Could not start ${harness}`);
+    } finally {
+      this.#switching.delete(id);
+      this.#refresh(managed);
+    }
+  }
+
+  #env() {
+    return { version: this.#options.version };
   }
 
   /**
@@ -302,10 +483,13 @@ export class ThreadManager {
         managed.runs.push({
           index: managed.runs.length + 1,
           turnId: event.turnId,
+          harness: managed.harness,
           status: "running",
           input: "",
           origin: null,
           result: null,
+          files: [],
+          commands: [],
           error: null,
           startedAt: Date.now(),
           endedAt: null,
@@ -330,8 +514,19 @@ export class ThreadManager {
         if (item.kind === "assistant_message" && event.type === "item.completed" && run) {
           if (item.text.trim()) run.result = item.text;
         }
+        if (item.kind === "command" && event.type === "item.completed" && run)
+          run.commands.push({ command: item.command, exitCode: item.exitCode });
+        if (item.kind === "file_change" && item.status === "completed" && run) {
+          for (const change of item.changes) {
+            const path = change.movePath ?? change.path;
+            if (!run.files.includes(path)) run.files.push(path);
+          }
+        }
         break;
       }
+      case "session.replaced":
+        managed.harness = this.#switching.get(managed.id) ?? managed.harness;
+        break;
       case "error":
         // A message that could not start its turn is a run that failed at once.
         if (event.unsent) {
@@ -340,10 +535,13 @@ export class ThreadManager {
           managed.runs.push({
             index: managed.runs.length + 1,
             turnId: "",
+            harness: managed.harness,
             status: "failed",
             input,
             origin: event.unsent.origin,
             result: null,
+            files: [],
+            commands: [],
             error: event.message,
             startedAt: now,
             endedAt: now,
@@ -368,11 +566,13 @@ export class ThreadManager {
     const thread = managed.thread;
     managed.status = thread.closed
       ? "closed"
-      : thread.requests.length > 0
-        ? "waiting"
-        : thread.idle
-          ? "idle"
-          : "working";
+      : this.#switching.has(managed.id)
+        ? "starting"
+        : thread.requests.length > 0
+          ? "waiting"
+          : thread.idle
+            ? "idle"
+            : "working";
     const run = managed.runs.at(-1);
     const key = [
       managed.status,
@@ -398,33 +598,36 @@ export class ThreadManager {
  * and one that cannot go that narrow, or into plan mode, is refused. A harness
  * that lists no modes keeps its own and asks through its own approvals.
  */
-async function holdModes(managed: ManagedThread, settings: SessionOptions): Promise<void> {
-  const session = managed.thread.session;
+async function holdModes(
+  session: HarnessSession,
+  harness: HarnessId,
+  settings: SessionOptions,
+): Promise<void> {
   const asked = settings.runtimeMode;
   const offered = session.capabilities.runtimeModes;
   // Drivers load without type checks, so one that lists other modes fails here, not later.
   const unknown = offered.filter((mode) => !isRuntimeMode(mode));
   if (unknown.length > 0)
-    throw new Error(`The ${managed.harness} driver lists unknown modes: ${unknown.join(", ")}`);
+    throw new Error(`The ${harness} driver lists unknown modes: ${unknown.join(", ")}`);
   if (offered.length > 0) {
     const target = fitRuntimeMode(asked, offered);
     if (!target)
       throw new ModeError(
         "runtime_mode_unavailable",
-        `${managed.harness} has no mode as narrow as ${asked}`,
+        `${harness} has no mode as narrow as ${asked}`,
       );
     if (modeRank(session.info.runtimeMode) > modeRank(target)) await session.setRuntimeMode(target);
   }
   const plan = settings.interactionMode === "plan";
   if (plan && session.info.interactionMode !== "plan") {
     if (!session.capabilities.planMode)
-      throw new ModeError("plan_mode_unavailable", `${managed.harness} has no plan mode`);
+      throw new ModeError("plan_mode_unavailable", `${harness} has no plan mode`);
     await session.setInteractionMode("plan");
   }
   const { runtimeMode, interactionMode } = session.info;
   if (modeRank(runtimeMode) > modeRank(asked) || (plan && interactionMode !== "plan"))
     throw new ModeError(
       "runtime_mode_escalation_denied",
-      `${managed.harness} would run ${runtimeMode}${interactionMode === "plan" ? " in plan mode" : ""}, more than asked`,
+      `${harness} would run ${runtimeMode}${interactionMode === "plan" ? " in plan mode" : ""}, more than asked`,
     );
 }

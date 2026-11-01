@@ -19,6 +19,8 @@ export const MAX_OPEN_THREADS = 16;
 const DEFAULT_WAIT_SECONDS = 600;
 const MAX_WAIT_SECONDS = 3000;
 const RESULT_LIMIT = 8000;
+/** How many of a run's commands thread_read shows, the latest ones. */
+const COMMAND_COUNT = 20;
 
 /** A refusal an agent can act on: a stable code and a sentence. */
 export class OrchestrationError extends Error {
@@ -69,11 +71,19 @@ function runView(run: RunRecord) {
   const origin = run.origin;
   return {
     run: run.index,
+    // A thread can move between harnesses, so each run says which one ran it.
+    harness: run.harness,
     status: run.status,
     // Such as "user", or "report from t3" for a run a task's result started.
     startedBy: origin && (origin.type === "user" ? "user" : `${origin.type} from ${origin.from}`),
     input: clip(run.input),
     result: clip(run.result),
+    filesChanged: run.files,
+    // What ran and how it exited, never the output, which can be huge.
+    commands: run.commands.slice(-COMMAND_COUNT).map(({ command, exitCode }) => ({
+      command: command.length > 300 ? `${command.slice(0, 300)}…` : command,
+      exitCode,
+    })),
     error: run.error,
   };
 }
