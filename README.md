@@ -28,7 +28,8 @@ From a checkout, run `pnpm dev` or `node dist/cli.js` after `pnpm build`.
 1harness                          # Claude Code in the current folder
 1harness -H codex -m <model>      # Codex with a chosen model
 1harness --mode auto-edit --plan  # start in plan mode, edits auto-accepted
-1harness -r <thread-id>           # resume a native thread or session
+1harness -r t42                   # reopen a 1harness thread, from any folder
+1harness -r <thread-id>           # resume a harness's own thread or session
 1harness -p "summarize README.md" # one turn without the UI
 ```
 
@@ -126,6 +127,24 @@ or ends on its own, keeps its place: the harness is closed to free it, and your
 next message resumes the harness's own thread, or starts a new one with a
 handoff when it cannot. A harness running background work, such as Claude
 Code's background agents, stays open.
+
+### Threads that last
+
+1harness keeps every thread in `~/.local/state/1harness/1harness.db` (SQLite,
+under `$XDG_STATE_HOME`): what was said, each run, the harnesses it ran on, and
+your always-allow choices. Thread IDs such as `t42` are never reused. When
+1harness stops, its threads stop with their harnesses but keep their place; the
+next 1harness brings them back, and `1harness -r t42` or `/resume` opens one,
+along with your harness's own earlier threads under a second tab. Nothing
+starts by itself after a restart. A turn that was running when 1harness
+stopped is marked interrupted, since how it ended is unknown, and is never sent
+again. Messages that were still queued come back held: they run, in order,
+once you send that thread something. A task an agent delegated reports nothing
+after a restart; the agent can ask with `task_status`. Text still streaming when
+1harness crashes is kept up to the last write, a moment before.
+
+Only one 1harness keeps threads at a time. A second one started meanwhile says
+so and keeps none of its own, leaving the first one's alone.
 
 ### Status in your terminal
 

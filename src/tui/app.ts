@@ -6,6 +6,7 @@ import {
   type CommandThread,
   type Completion,
   type Completions,
+  type PickEntry,
   type Report,
   type SessionHandle,
 } from "../commands/registry.ts";
@@ -89,6 +90,15 @@ const SEQUENCE_TIMEOUT_MS = 40;
 // The SDK warns that full access skips canUseTool, which 1harness keeps for later mode changes.
 const IGNORED_STDERR = [/CLAUDE_SDK_CAN_USE_TOOL_SHADOWED/, /^\(Use `node --trace-warnings/];
 
+/** What a thread's view shows of a log too long to load at once. */
+interface Paged {
+  entries: { seq: number; entry: LogEntry }[];
+  /** The first entry loaded, which the page before ends at. */
+  oldest: number | null;
+  more: boolean;
+  children: Map<string, ThreadState>;
+}
+
 interface OpenRequest {
   threadId: string;
   request: HarnessRequest;
@@ -100,6 +110,14 @@ function sameRequest(a: OpenRequest, threadId: string, requestId: string): boole
 
 function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
+}
+
+/** A command's pick entry as a menu row. */
+function pickEntry(item: PickEntry): MenuEntry {
+  return entry(item.label, item.detail ?? "", {
+    tag: item.tag ?? "",
+    ...(item.group ? { group: item.group } : {}),
+  });
 }
 
 /** How a file mention is written: `@path`, quoted when the path has spaces. */
@@ -154,6 +172,8 @@ export class App {
   #known = new Set<string>();
   /** Threads whose logs are loading, and the live entries that arrived meanwhile. */
   #loading = new Map<string, { seq: number; entry: LogEntry }[]>();
+  /** Threads whose views show only the newest part of their logs. */
+  #paged = new Map<string, Paged>();
   /** Threads this terminal opened or showed, which its program status covers. */
   #own = new Set<string>();
   /** The line a thread being opened shows first, such as "New codex thread". */
@@ -305,9 +325,12 @@ export class App {
         pick: (title, entries, options) =>
           this.#pick(
             title,
-            entries.map((item) => entry(item.label, item.detail ?? "", { tag: item.tag ?? "" })),
+            entries.map(pickEntry),
             options?.initial ?? 0,
             options?.filter ?? false,
+            {
+              tabs: options?.tabs ?? false,
+            },
           ),
         progress: (text) => {
           const view = this.#view;
@@ -332,6 +355,7 @@ export class App {
         return this.#sessionHandle(live);
       },
       harnesses: () => this.#client.harnesses,
+      threads: (scope) => this.#client.call("threads.list", { scope }),
       lookup: (key, load) => this.#lookup(key, load),
       fetch: (key, load) => this.#fetch(key, load),
       forget: (key) => {
@@ -457,6 +481,12 @@ export class App {
       this.#notice(warning.startsWith("This folder has") ? "info" : "warning", warning);
     this.#registerHostCommands(hello.commands);
     for (const request of hello.pending) this.#ui(request);
+    const held = hello.threads.filter((thread) => thread.held).map((thread) => thread.id);
+    if (held.length > 0)
+      this.#notice(
+        "info",
+        `${held.join(", ")} ${held.length === 1 ? "has" : "have"} messages waiting from before 1harness stopped; /threads opens ${held.length === 1 ? "it" : "them"}.`,
+      );
     const resume = this.#settings.resume;
     if (resume) await this.#resume(resume, this.#harness);
     else await this.#open(this.#harness, this.#settings, false);
@@ -744,35 +774,79 @@ export class App {
    * Builds the view of a thread the terminal did not see start, from the
    * host's log of it, then follows it live.
    */
-  async #load(id: string, before?: number): Promise<void> {
+  async #load(id: string): Promise<void> {
     if (this.#loading.has(id)) return;
+    this.#loading.set(id, []);
+    try {
+      const page = await this.#client.call("thread.attach", { threadId: id, limit: PAGE_ENTRIES });
+      const children = new Map(page.children.map((child) => [child.id, child]));
+      const live = (this.#loading.get(id) ?? []).filter((logged) => logged.seq > page.cursor);
+      const paged: Paged = {
+        entries: [...page.entries, ...live],
+        oldest: page.entries[0]?.seq ?? null,
+        more: page.more,
+        children,
+      };
+      if (paged.more) this.#paged.set(id, paged);
+      const view = this.#views.get(id) ?? this.#newView(id);
+      this.#replay(view, paged);
+    } catch (error) {
+      this.#notice("error", `Could not load ${id}: ${errorMessage(error)}`);
+    } finally {
+      this.#loading.delete(id);
+      this.#schedule();
+    }
+  }
+
+  /** Shows a thread's loaded entries in its view, oldest first. */
+  #replay(view: ThreadView, paged: Paged): void {
+    if (paged.more) view.notice("info", "Earlier turns are above; scroll up to load them.");
+    const context: ViewContext = {
+      busy: false,
+      agent: (childId) => {
+        const child = this.#client.threads.get(childId) ?? paged.children.get(childId);
+        return child ? agentRowOf(child) : null;
+      },
+    };
+    for (const logged of paged.entries) view.apply(logged.entry, context);
+  }
+
+  /**
+   * Loads the page of a thread's log before what its view shows, and shows
+   * the view again from there, keeping the rows on screen where they were.
+   */
+  async #loadEarlier(id: string): Promise<void> {
+    const paged = this.#paged.get(id);
+    if (!paged?.more || paged.oldest === null || this.#loading.has(id)) return;
     this.#loading.set(id, []);
     try {
       const page = await this.#client.call("thread.attach", {
         threadId: id,
         limit: PAGE_ENTRIES,
-        ...(before === undefined ? {} : { before }),
+        before: paged.oldest,
       });
-      const children = new Map(page.children.map((child) => [child.id, child]));
-      const view = this.#views.get(id) ?? this.#newView(id);
-      if (page.more)
-        view.notice(
-          "info",
-          "Earlier turns are not shown here; agents can read them with thread_read.",
-        );
-      const replay: ViewContext = {
-        busy: false,
-        agent: (childId) => {
-          const child = this.#client.threads.get(childId) ?? children.get(childId);
-          return child ? agentRowOf(child) : null;
-        },
-      };
-      for (const logged of page.entries) view.apply(logged.entry, replay);
-      // What arrived while the page loaded goes on top of it.
-      for (const live of this.#loading.get(id) ?? [])
-        if (live.seq > page.cursor) view.apply(live.entry, this.#viewContext(id));
+      for (const child of page.children) paged.children.set(child.id, child);
+      paged.entries = [...page.entries, ...paged.entries, ...(this.#loading.get(id) ?? [])];
+      paged.oldest = page.entries[0]?.seq ?? paged.oldest;
+      paged.more = page.more;
+      if (!paged.more) this.#paged.delete(id);
+      const old = this.#views.get(id);
+      const view = new ThreadView(id);
+      this.#replay(view, paged);
+      if (old) {
+        const rows = (current: ThreadView) =>
+          current.transcript.view(
+            { width: this.#screen.columns, cwd: this.#cwd(), blink: true, now: Date.now() },
+            0,
+            0,
+          ).total;
+        // The same rows stay on screen; the earlier ones are above them.
+        view.scroll = old.scroll + Math.max(0, rows(view) - rows(old));
+        view.turn = old.turn;
+      }
+      this.#views.set(id, view);
     } catch (error) {
-      this.#notice("error", `Could not load ${id}: ${errorMessage(error)}`);
+      this.#notice("error", `Could not load earlier turns: ${errorMessage(error)}`);
     } finally {
       this.#loading.delete(id);
       this.#schedule();
@@ -955,6 +1029,7 @@ export class App {
         break;
       case "removed": {
         this.#views.delete(event.threadId);
+        this.#paged.delete(event.threadId);
         this.#dropRequests(event.threadId);
         this.#own.delete(event.threadId);
         if (this.#currentId === event.threadId) this.#currentId = null;
@@ -967,6 +1042,8 @@ export class App {
           loading.push({ seq: event.seq, entry: event.entry });
           break;
         }
+        // A paged view keeps what it shows, to show it again with earlier pages.
+        this.#paged.get(event.threadId)?.entries.push({ seq: event.seq, entry: event.entry });
         this.#views.get(event.threadId)?.apply(event.entry, this.#viewContext(event.threadId));
         break;
       }
@@ -1047,6 +1124,7 @@ export class App {
   #resynced(): void {
     const current = this.#currentId;
     this.#views.clear();
+    this.#paged.clear();
     this.#homeTaken = true;
     this.#requests = [];
     this.#prompt = null;
@@ -1104,12 +1182,14 @@ export class App {
         this.#panel = { kind: "info", title: request.title, rows: request.rows };
         return;
       case "pick": {
-        const entries = request.entries.map((item) =>
-          entry(item.label, item.detail ?? "", { tag: item.tag ?? "" }),
-        );
-        void this.#pick(request.title, entries, request.initial, request.filter, request.id).then(
-          (index) =>
-            this.#client.call("ui.reply", { id: request.id, result: index }).catch(() => {}),
+        void this.#pick(
+          request.title,
+          request.entries.map(pickEntry),
+          request.initial,
+          request.filter,
+          { pick: request.id, tabs: request.tabs },
+        ).then((index) =>
+          this.#client.call("ui.reply", { id: request.id, result: index }).catch(() => {}),
         );
         return;
       }
@@ -1234,13 +1314,13 @@ export class App {
     this.#nextRequest();
   }
 
-  /** `pick` is the host's request the menu answers, when it asked. */
+  /** `pick` is the host's request the menu answers, when it asked; `tabs` groups entries in tabs. */
   #pick(
     title: string,
     entries: MenuEntry[],
     initial = 0,
     filter = false,
-    pick?: string,
+    options: { pick?: string; tabs?: boolean } = {},
   ): Promise<number | null> {
     return new Promise((resolve) => {
       if (entries.length === 0) {
@@ -1249,9 +1329,15 @@ export class App {
       }
       this.#panel = {
         kind: "menu",
-        menu: new Menu({ title, entries, initial, filter }),
+        menu: new Menu({
+          title,
+          entries,
+          initial,
+          filter,
+          ...(options.tabs ? { tabs: true } : {}),
+        }),
         onDone: resolve,
-        ...(pick ? { pick } : {}),
+        ...(options.pick ? { pick: options.pick } : {}),
       };
       this.#schedule();
     });
@@ -1699,7 +1785,11 @@ export class App {
   }
 
   #scrollBy(rows: number): void {
-    this.#view.scroll = Math.max(0, this.#view.scroll + rows);
+    const view = this.#view;
+    view.scroll = Math.max(0, view.scroll + rows);
+    // At the top of what is loaded, the page before it loads.
+    if (rows > 0 && this.#currentId && view.scroll >= view.total - this.#screen.rows)
+      void this.#loadEarlier(this.#currentId);
   }
 
   #submit(raw: string): void {
@@ -1915,8 +2005,17 @@ export class App {
     const rows: string[] = [""];
     if (this.#view.turn && !this.#prompt) rows.push(this.#activity(width), "");
     const queue = this.#current?.queue ?? [];
+    // A queue held after a restart waits for the user's next message.
+    const held = this.#current?.held === true;
     for (const queued of queue)
-      rows.push(truncate(style.muted(`  ↳ queued: ${oneLine(queuedText(queued))}`), width));
+      rows.push(
+        truncate(
+          style.muted(`  ↳ ${held ? "held" : "queued"}: ${oneLine(queuedText(queued))}`),
+          width,
+        ),
+      );
+    if (held && queue.length > 0)
+      rows.push(style.muted("    your next message runs these first · /unqueue takes one back"));
     if (queue.length > 0) rows.push("");
     const attention = this.#attention(width);
     if (attention) rows.push(attention, "");

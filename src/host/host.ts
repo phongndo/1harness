@@ -9,7 +9,7 @@ import {
 import type { HarnessId, SessionOptions, UserInput } from "../core/events.ts";
 import { FileIndex, mentionedImages } from "../core/files.ts";
 import { configDir, stateDir } from "../core/paths.ts";
-import { errorMessage, type Thread } from "../core/thread.ts";
+import { errorMessage, type Thread, type ThreadEvent } from "../core/thread.ts";
 import { formatTokens } from "../core/wording.ts";
 import { drivers, findDriver } from "../drivers/index.ts";
 import type { ToolDefinition } from "../extensions/api.ts";
@@ -29,11 +29,14 @@ import {
   type ThreadState,
   type UiRequest,
 } from "../protocol.ts";
+import type { Store, ThreadRow, ThreadSummaryRow } from "../store/store.ts";
 import { ThreadLog } from "./log.ts";
 import {
   ThreadManager,
   type ManagedThread,
   type ManagerEvent,
+  type RestoredThread,
+  type RunRecord,
   type SwitchResult,
 } from "./manager.ts";
 import { Orchestrator } from "./orchestrator.ts";
@@ -81,6 +84,12 @@ export interface HostOptions {
   configDir?: string;
   stateDir?: string;
   env?: NodeJS.ProcessEnv;
+  /**
+   * Where threads are kept across restarts. The host brings back the ones not
+   * closed, parked, and owns the store from then on; without one, threads end
+   * with the host.
+   */
+  store?: Store | null;
 }
 
 /** A harness's name as people know it, such as `Claude Code`. */
@@ -183,11 +192,27 @@ export class Host {
   #files = new Map<string, { index: FileIndex; ready: boolean }>();
   #uiCount = 0;
   #started: Promise<void> | null = null;
+  #store: Store | null;
+  /** Threads whose rows changed since the store was last written. */
+  #dirty = new Set<string>();
+  #flushTimer: NodeJS.Immediate | null = null;
+  /** Pinned and archived, by thread, as the store keeps them. */
+  #flags = new Map<string, { pinned: boolean; archived: boolean }>();
+  /** How many of each thread's runs a client has shown. */
+  #seenRuns = new Map<string, number>();
+  /** Threads being dropped for good, which the store deletes too. */
+  #discarding = new Set<string>();
+  #stopped = false;
+  /** Writing the store failed, which is reported once. */
+  #storeFailed = false;
   #handlers: { [M in Method]: (client: Client, params: Params<M>) => Promise<Result<M>> };
 
   constructor(options: HostOptions) {
     this.#options = options;
     this.version = options.version;
+    this.#store = options.store ?? null;
+    const store = this.#store;
+    if (store) this.#seq = store.maxSeq();
     this.extensions = new ExtensionHost({
       cwd: options.cwd,
       configDir: options.configDir ?? configDir(),
@@ -205,6 +230,7 @@ export class Host {
       tools: this.tools,
       onWarning: (text) => this.#broadcast("warning", text),
       ...(options.idleCloseMs === undefined ? {} : { idleCloseMs: options.idleCloseMs }),
+      ...(store ? { nextId: () => store.nextThreadId() } : {}),
     });
     this.orchestrator = new Orchestrator(this.manager, options.env);
     this.#orchestratorTools = new Map(this.orchestrator.tools.map((tool) => [tool.name, { tool }]));
@@ -212,10 +238,104 @@ export class Host {
     this.#handlers = this.#methods();
   }
 
-  /** Loads extensions; calls after the first wait for it. */
+  /** Loads extensions and brings back stored threads; calls after the first wait for it. */
   start(): Promise<void> {
-    this.#started ??= this.extensions.loadAll(this.#options.extensions ?? []);
+    this.#started ??= (async () => {
+      await this.extensions.loadAll(this.#options.extensions ?? []);
+      this.#restore();
+    })();
     return this.#started;
+  }
+
+  /** Where the store is, or null when the host keeps nothing. */
+  get storePath(): string | null {
+    return this.#store ? (this.#store.path ?? ":memory:") : null;
+  }
+
+  /**
+   * Brings back every thread that was not closed, parked, with nothing
+   * started: a run that was going is marked interrupted, and a queue waits
+   * for the user.
+   */
+  #restore(): void {
+    const store = this.#store;
+    if (!store) return;
+    const rows = store.liveThreads();
+    const interrupted = new Set<string>();
+    const saved = rows.map((row) => {
+      const runs = store.runs(row.id);
+      if (runs.some((run) => run.status === "running")) interrupted.add(row.id);
+      return this.#restored(row, runs);
+    });
+    for (const managed of this.manager.restore(saved)) {
+      if (interrupted.has(managed.id)) {
+        const run = managed.runs.at(-1);
+        if (run) store.saveRun(managed.id, run);
+        this.#notice(
+          managed.id,
+          "warning",
+          `1harness stopped while turn ${run?.index ?? ""} ran, so it may not have finished. Nothing was sent again.`,
+        );
+      }
+      const held = managed.thread.queue.length;
+      if (managed.thread.held)
+        this.#notice(
+          managed.id,
+          "info",
+          `${held} queued ${held === 1 ? "message was" : "messages were"} waiting when 1harness stopped. They run in order once you send this thread a message; /unqueue takes the last one back.`,
+        );
+      this.#dirty.add(managed.id);
+    }
+    this.orchestrator.restoreTasks(store.tasks());
+    this.#scheduleFlush();
+  }
+
+  #restored(row: ThreadRow, runs: RunRecord[]): RestoredThread {
+    const store = this.#store!;
+    this.#flags.set(row.id, { pinned: row.pinned, archived: row.archived });
+    this.#seenRuns.set(row.id, row.seenRuns);
+    return {
+      id: row.id,
+      title: row.title,
+      harness: row.harness,
+      parentId: row.parentId,
+      parentCallId: row.parentCallId,
+      origin: row.origin,
+      createdAt: row.createdAt,
+      error: row.error,
+      runs,
+      visits: store.visits(row.id),
+      seenWithoutHandoff: row.seenWithoutHandoff,
+      thread: {
+        info: row.info,
+        capabilities: row.capabilities,
+        methods: row.methods,
+        handoff: row.handoff,
+        generation: row.generation,
+        allowances: store.allowances(row.id),
+        queue: store.queuedMessages(row.id).map(({ message, sent }) => ({ message, input: sent })),
+      },
+    };
+  }
+
+  /** Brings a stored thread back into memory, parked, such as a closed one reopened. */
+  #reopen(id: string): ManagedThread | null {
+    const store = this.#store;
+    const row = store?.thread(id);
+    if (!store || !row) return null;
+    const existing = this.manager.get(id);
+    if (existing) {
+      if (existing.status !== "closed") return existing;
+      this.#flush();
+      this.manager.forget(id);
+    }
+    const [managed] = this.manager.restore([
+      this.#restored({ ...row, state: "parked" }, store.runs(id)),
+    ]);
+    if (!managed) return null;
+    this.#dirty.add(id);
+    this.#scheduleFlush();
+    return managed;
   }
 
   /** The newest event's number. */
@@ -267,14 +387,123 @@ export class Host {
     return [...this.#clients.values()].filter((client) => client.connected).length;
   }
 
-  /** Ends every thread and stops what the host started. */
+  /**
+   * Stops what the host started. With a store, every thread parks to be
+   * brought back next time, and a running turn is interrupted; without one,
+   * threads end.
+   */
   async shutdown(): Promise<void> {
+    if (this.#stopped) return;
     for (const client of this.#clients.values()) await this.disconnect(client.id);
-    await this.manager.closeAll();
+    if (this.#store) await this.manager.parkAll();
+    else await this.manager.closeAll();
+    this.#stopped = true;
     for (const { index } of this.#files.values()) index.close();
     this.#files.clear();
     await this.tools.close();
     await this.extensions.close();
+    if (this.#store) {
+      this.#flush();
+      this.#store.close();
+    }
+  }
+
+  // The store
+
+  #scheduleFlush(): void {
+    if (!this.#store || this.#flushTimer || this.#stopped) return;
+    this.#flushTimer = setImmediate(() => {
+      this.#flushTimer = null;
+      this.#flush();
+    });
+  }
+
+  /** Writes what changed: thread rows, their newest runs, and new or changed log entries. */
+  #flush(): void {
+    const store = this.#store;
+    if (!store) return;
+    if (this.#flushTimer) clearImmediate(this.#flushTimer);
+    this.#flushTimer = null;
+    try {
+      this.#write(store);
+    } catch (error) {
+      // The threads go on; what they did since may not survive a restart.
+      if (!this.#storeFailed)
+        this.#broadcast("error", `Could not save threads: ${errorMessage(error)}`);
+      this.#storeFailed = true;
+    }
+  }
+
+  #write(store: Store): void {
+    store.transaction(() => {
+      for (const id of this.#dirty) {
+        const managed = this.manager.get(id);
+        if (!managed) continue;
+        store.saveThread(this.#row(managed));
+        // Runs change only at the end.
+        for (const run of managed.runs.slice(-2)) store.saveRun(id, run);
+        for (const [harness, visit] of this.manager.visits(id)) store.saveVisit(id, harness, visit);
+        store.saveAllowances(id, managed.thread.allowances);
+      }
+      this.#dirty.clear();
+      for (const [id, log] of this.#logs) {
+        const changed = log.flush();
+        if (changed.length > 0 && (this.manager.get(id) || store.thread(id)))
+          store.writeLog(id, changed);
+      }
+      for (const task of this.orchestrator.taskRows()) store.saveTask(task);
+      store.saveSeq(this.#seq);
+    });
+  }
+
+  #row(managed: ManagedThread): ThreadRow {
+    const thread = managed.thread;
+    const last = managed.runs.at(-1);
+    const flags = this.#flags.get(managed.id) ?? { pinned: false, archived: false };
+    return {
+      id: managed.id,
+      title: managed.title,
+      cwd: thread.info.cwd,
+      harness: managed.harness,
+      parentId: managed.parentId,
+      parentCallId: managed.parentCallId,
+      origin: managed.origin,
+      state: managed.status === "closed" ? "closed" : thread.session ? "open" : "parked",
+      info: { ...thread.info },
+      capabilities: thread.capabilities,
+      methods: [...thread.methods],
+      handoff: thread.handoff,
+      seenWithoutHandoff: this.manager.seenWithoutHandoff(managed.id),
+      generation: thread.generation,
+      error: managed.error,
+      pinned: flags.pinned,
+      archived: flags.archived,
+      seenRuns: this.#seenRuns.get(managed.id) ?? 0,
+      createdAt: managed.createdAt,
+      updatedAt: last?.endedAt ?? last?.startedAt ?? managed.createdAt,
+    };
+  }
+
+  /** Admission is written at once, before the harness is sent anything. */
+  #admit(managed: ManagedThread, change: ManagerEvent & { type: "thread.event" }): void {
+    const store = this.#store;
+    if (!store || this.#storeFailed) return;
+    try {
+      this.#record(store, managed, change.event);
+    } catch (error) {
+      this.#broadcast("error", `Could not save threads: ${errorMessage(error)}`);
+      this.#storeFailed = true;
+    }
+  }
+
+  #record(store: Store, managed: ManagedThread, event: ThreadEvent): void {
+    if (event.type === "message.recorded") {
+      // A thread's row exists before its first message does.
+      store.saveThread(this.#row(managed));
+      store.recordMessage(managed.id, event.message, event.input, "queued");
+    } else if (event.type === "message.dispatched")
+      store.setMessageState(event.messageId, "dispatched");
+    else if (event.type === "message.dropped") store.setMessageState(event.messageId, "dropped");
   }
 
   // The feed
@@ -287,10 +516,11 @@ export class Host {
     for (const listener of this.#listeners) listener(numbered);
   }
 
+  /** A thread's log, read from the store the first time it is needed. */
   #log(id: string): ThreadLog {
     let log = this.#logs.get(id);
     if (!log) {
-      log = new ThreadLog();
+      log = new ThreadLog(this.#store?.log(id) ?? []);
       this.#logs.set(id, log);
     }
     return log;
@@ -300,21 +530,28 @@ export class Host {
     switch (event.type) {
       case "thread.created": {
         const thread = event.thread;
-        this.#log(thread.id);
         this.#announce(thread);
-        if (thread.parentId && this.#logs.has(thread.parentId)) {
+        if (event.restored) return;
+        this.#store?.saveThread(this.#row(thread));
+        if (thread.parentId && this.manager.get(thread.parentId)) {
           const entry = this.#log(thread.parentId).agent(this.#seq + 1, thread.id);
           this.#emit({ type: "entry", threadId: thread.parentId, entry });
+          this.#scheduleFlush();
         }
         return;
       }
       case "thread.updated":
         this.#announce(event.thread);
+        this.#dirty.add(event.thread.id);
+        this.#scheduleFlush();
         return;
       case "thread.event": {
         const managed = this.manager.get(event.threadId);
         if (!managed) return;
         const change = event.event;
+        this.#admit(managed, event);
+        if (change.type !== "item.delta") this.#dirty.add(managed.id);
+        this.#scheduleFlush();
         if (change.type === "commands.updated" || change.type === "session.replaced")
           this.#commandsVersion.set(managed.id, (this.#commandsVersion.get(managed.id) ?? 0) + 1);
         const entry = this.#log(managed.id).apply(change, this.#seq + 1, (id) =>
@@ -347,6 +584,8 @@ export class Host {
         this.#logs.delete(event.threadId);
         this.#announced.delete(event.threadId);
         this.#commandsVersion.delete(event.threadId);
+        this.#dirty.delete(event.threadId);
+        if (this.#discarding.delete(event.threadId)) this.#store?.deleteThread(event.threadId);
         this.#emit({ type: "removed", threadId: event.threadId });
         return;
     }
@@ -381,7 +620,7 @@ export class Host {
       methods: [...thread.methods],
       busy: thread.busy,
       queue: [...thread.queue],
-      held: false,
+      held: thread.held,
       requests: [...thread.requests],
       usage: thread.usage,
       runCount: managed.runs.length,
@@ -391,8 +630,8 @@ export class Host {
       background: thread.session?.backgroundTasks?.() ?? [],
       commandsVersion: this.#commandsVersion.get(managed.id) ?? 0,
       openedBy: managed.openedBy,
-      pinned: false,
-      archived: false,
+      pinned: this.#flags.get(managed.id)?.pinned ?? false,
+      archived: this.#flags.get(managed.id)?.archived ?? false,
     };
   }
 
@@ -406,11 +645,15 @@ export class Host {
     text: string,
     id?: string,
   ): string {
-    const log = this.#logs.get(threadId);
     const noticeId = id ?? `notice-${this.#seq + 1}`;
-    if (!log) return noticeId;
-    const entry = log.item(this.#seq + 1, { kind: "notice", id: noticeId, level, text }, true);
+    if (!this.manager.get(threadId)) return noticeId;
+    const entry = this.#log(threadId).item(
+      this.#seq + 1,
+      { kind: "notice", id: noticeId, level, text },
+      true,
+    );
     this.#emit({ type: "entry", threadId, entry });
+    this.#scheduleFlush();
     return noticeId;
   }
 
@@ -464,6 +707,7 @@ export class Host {
             entries,
             initial: options?.initial ?? 0,
             filter: options?.filter ?? false,
+            tabs: options?.tabs ?? false,
           });
           client.picks.set(id, resolve);
         }),
@@ -573,6 +817,7 @@ export class Host {
         return sessionHandle(managed.thread);
       },
       harnesses: () => this.#harnesses(),
+      threads: (scope) => this.call(client.id, "threads.list", { scope }),
       lookup: <T>(key: string, load: () => Promise<T[]>): T[] => {
         const cached = client.lookups.get(prefix + key);
         if (Array.isArray(cached)) return cached as T[];
@@ -686,11 +931,13 @@ export class Host {
     );
     if (!empty || shown) return;
     await this.manager.close(threadId);
+    this.#discarding.add(threadId);
     this.manager.forget(threadId);
   }
 
   #listing(managed: ManagedThread): ThreadListing {
     const last = managed.runs.at(-1);
+    const flags = this.#flags.get(managed.id);
     return {
       id: managed.id,
       title: managed.title,
@@ -701,11 +948,89 @@ export class Host {
       runCount: managed.runs.length,
       createdAt: managed.createdAt,
       updatedAt: last?.endedAt ?? last?.startedAt ?? managed.createdAt,
-      pinned: false,
-      archived: false,
-      unseen: false,
+      pinned: flags?.pinned ?? false,
+      archived: flags?.archived ?? false,
+      unseen: this.#unseen(managed.id, managed.runs.length, last?.status ?? null),
       native: managed.thread.info.threadId,
     };
+  }
+
+  /** A stored thread for a listing; one in memory is listed as it is now. */
+  #rowListing(row: ThreadSummaryRow): ThreadListing {
+    const live = this.manager.get(row.id);
+    if (live) return this.#listing(live);
+    return {
+      id: row.id,
+      title: row.title,
+      harness: row.harness,
+      cwd: row.cwd,
+      status: row.state === "closed" ? "closed" : "parked",
+      parentId: row.parentId,
+      runCount: row.runCount,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      pinned: row.pinned,
+      archived: row.archived,
+      unseen: this.#unseen(row.id, row.runCount, row.lastRunStatus, row.seenRuns),
+      native: row.info.threadId,
+    };
+  }
+
+  /** Whether a thread finished runs no client has shown. */
+  #unseen(
+    id: string,
+    runs: number,
+    last: RunRecord["status"] | null,
+    stored = this.#seenRuns.get(id) ?? 0,
+  ): boolean {
+    const seen = this.#seenRuns.get(id) ?? stored;
+    const finished = last === "running" ? runs - 1 : runs;
+    return finished > seen;
+  }
+
+  /** A thread's state from the store alone, for one not in memory, such as a closed agent. */
+  #storedState(row: ThreadRow): ThreadState {
+    const runs = this.#store?.runs(row.id) ?? [];
+    const last = runs.at(-1);
+    return {
+      id: row.id,
+      title: row.title,
+      harness: row.harness,
+      parentId: row.parentId,
+      parentCallId: row.parentCallId,
+      origin: row.origin,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      status: row.state === "closed" ? "closed" : "parked",
+      error: row.error,
+      info: row.info,
+      capabilities: row.capabilities,
+      methods: row.methods,
+      busy: false,
+      queue: [],
+      held: false,
+      requests: [],
+      usage: null,
+      runCount: runs.length,
+      lastRun: last
+        ? { ...last, input: clipText(last.input) ?? "", result: clipText(last.result) }
+        : null,
+      background: [],
+      commandsVersion: 0,
+      openedBy: null,
+      pinned: row.pinned,
+      archived: row.archived,
+    };
+  }
+
+  /** Marks a thread's runs seen, as a client shows it. */
+  #markSeen(id: string): void {
+    const managed = this.manager.get(id);
+    if (!managed) return;
+    const running = managed.runs.at(-1)?.status === "running";
+    this.#seenRuns.set(id, managed.runs.length - (running ? 1 : 0));
+    this.#dirty.add(id);
+    this.#scheduleFlush();
   }
 
   #methods(): { [M in Method]: (client: Client, params: Params<M>) => Promise<Result<M>> } {
@@ -728,16 +1053,26 @@ export class Host {
           commands: this.#commandList(client, null),
           pending: [...client.pending.values()],
           warnings,
-          store: null,
+          store: this.storePath,
         };
       },
       "client.show": async (client, { threadId }) => {
         const previous = client.showing;
         client.showing = threadId;
-        if (previous && previous !== threadId) await this.#discardIfEmpty(previous, client);
+        if (previous && previous !== threadId) {
+          this.#markSeen(previous);
+          await this.#discardIfEmpty(previous, client);
+        }
+        if (threadId) this.#markSeen(threadId);
         return null;
       },
       "threads.list": async (_client, { scope, query, limit }) => {
+        if (this.#store) {
+          this.#flush();
+          return this.#store
+            .listThreads({ scope, ...(query ? { query } : {}), limit: limit ?? 200 })
+            .map((row) => this.#rowListing(row));
+        }
         const all = this.manager.list().filter((managed) => {
           if (scope === "archived") return false;
           if (scope === "open") return managed.status !== "closed";
@@ -768,7 +1103,10 @@ export class Host {
         } catch (error) {
           // One that could not start leaves nothing to show.
           const failed = created as ManagedThread | null;
-          if (failed) this.manager.forget(failed.id);
+          if (failed) {
+            this.#discarding.add(failed.id);
+            this.manager.forget(failed.id);
+          }
           throw error;
         } finally {
           unsubscribe();
@@ -776,40 +1114,57 @@ export class Host {
       },
       "thread.resume": async (client, { id, harness, settings }) => {
         const own = this.manager.get(id);
-        if (own) {
-          if (own.status === "closed") throw new RpcError("thread_closed", `${id} is closed`);
-          return this.#state(own);
-        }
-        // A native thread a 1harness thread already runs opens that thread.
+        if (own && own.status !== "closed") return this.#state(own);
+        // A stored one, closed or not, comes back parked.
+        const reopened = this.#reopen(id);
+        if (reopened) return this.#state(reopened);
+        if (own) throw new RpcError("thread_closed", `${id} is closed`);
+        // A native thread a 1harness thread runs, or ran, opens that thread.
         const running = this.manager
           .list()
           .find((managed) => managed.status !== "closed" && managed.thread.info.threadId === id);
         if (running) return this.#state(running);
+        const stored = this.#store?.threadByNative(id);
+        const again = stored ? this.#reopen(stored.id) : null;
+        if (again) return this.#state(again);
         return this.#handlers["thread.open"](client, {
           harness,
           settings: { ...settings, resume: id },
         });
       },
       "thread.attach": async (_client, { threadId, before, limit }) => {
-        const managed = this.#managed(threadId);
+        const managed = this.manager.get(threadId);
+        // A stored thread not in memory can be read without being opened.
+        const row = managed ? null : this.#store?.thread(threadId);
+        if (!managed && !row) throw new RpcError("thread_not_found", `No thread ${threadId}`);
         const page = this.#log(threadId).page(
           before,
           Math.min(limit ?? ATTACH_LIMIT, ATTACH_LIMIT),
         );
+        const children = new Map(
+          this.manager
+            .list()
+            .filter((other) => other.parentId === threadId)
+            .map((other) => [other.id, this.#state(other)]),
+        );
+        // Agents that ended before a restart are in the store only.
+        for (const logged of page.entries) {
+          if (logged.entry.type !== "agent" || children.has(logged.entry.threadId)) continue;
+          const child = this.#store?.thread(logged.entry.threadId);
+          if (child) children.set(child.id, this.#storedState(child));
+        }
         return {
-          thread: this.#state(managed),
+          thread: managed ? this.#state(managed) : this.#storedState(row!),
           entries: page.entries,
           more: page.more,
           cursor: this.#seq,
-          children: this.manager
-            .list()
-            .filter((other) => other.parentId === threadId)
-            .map((other) => this.#state(other)),
+          children: [...children.values()],
         };
       },
       "thread.send": async (client, { threadId, text, steer, command, requestId }) => {
         if (requestId) {
-          const sent = client.sent.get(requestId);
+          const sent =
+            client.sent.get(requestId) ?? this.#store?.messageByRequest(threadId, requestId);
           if (sent) return { messageId: sent };
         }
         const managed = this.#open(threadId);
@@ -820,10 +1175,10 @@ export class Host {
           if (images.length > 0) input.images = images;
         }
         const message = command
-          ? thread.send(input, undefined, { command: true })
+          ? thread.send(input, undefined, { command: true, ...(requestId ? { requestId } : {}) })
           : steer
             ? await thread.steer(input)
-            : thread.send(input);
+            : thread.send(input, undefined, requestId ? { requestId } : {});
         if (requestId) {
           client.sent.set(requestId, message.id);
           // Only recent retries matter.

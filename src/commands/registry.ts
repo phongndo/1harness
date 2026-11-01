@@ -11,7 +11,7 @@ import type {
   ThreadSummary,
 } from "../core/events.ts";
 import type { Message } from "../core/thread.ts";
-import type { HarnessInfo } from "../protocol.ts";
+import type { HarnessInfo, ThreadListing } from "../protocol.ts";
 
 /** Report text, styled by the client so it follows theme changes. */
 export interface ReportSpan {
@@ -30,6 +30,8 @@ export interface PickEntry {
   detail?: string;
   /** Shown at the right edge, such as `current`. */
   tag?: string;
+  /** The tab it goes under, when the pick has tabs. */
+  group?: string;
 }
 
 export type NoticeLevel = "info" | "warning" | "error";
@@ -44,7 +46,7 @@ export interface CommandUI {
   pick(
     title: string,
     entries: PickEntry[],
-    options?: { initial?: number; filter?: boolean },
+    options?: { initial?: number; filter?: boolean; tabs?: boolean },
   ): Promise<number | null>;
   /** Shows work in progress; the returned function replaces it with how it went. */
   progress(text: string): (level: NoticeLevel, text: string) => void;
@@ -95,6 +97,8 @@ export interface CommandContext {
   session(): SessionHandle;
   /** The harnesses threads can run on. */
   harnesses(): HarnessInfo[];
+  /** 1harness's threads, newest first, kept ones included. */
+  threads(scope: "open" | "recent" | "archived"): Promise<ThreadListing[]>;
   /**
    * A list kept for the current thread, such as models. The first call starts
    * fetching it and returns nothing; completion menus fill in when it arrives.

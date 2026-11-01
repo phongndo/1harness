@@ -35,6 +35,20 @@ export interface Message {
   readonly origin: MessageOrigin;
   /** A harness command, sent as `/name args`, which must reach the harness as written. */
   readonly command?: boolean;
+  /** The client's own ID for it, so a retried send is recognized. */
+  readonly requestId?: string;
+}
+
+/** What a thread keeps when its host stops, to start parked again later. */
+export interface SavedThread {
+  info: SessionInfo;
+  capabilities: Capabilities;
+  methods: SessionMethod[];
+  handoff: string | null;
+  generation: number;
+  allowances: string[];
+  /** Messages that were queued, with the input their harness gets; they come back held. */
+  queue: { message: Message; input: UserInput }[];
 }
 
 /**
@@ -79,7 +93,17 @@ export type ThreadEvent =
    */
   | { type: "session.replaced"; previous: SessionInfo }
   /** `unsent` is set when the error is that a message could not start its turn. */
-  | { type: "error"; message: string; unsent?: Message };
+  | { type: "error"; message: string; unsent?: Message }
+  /**
+   * A message passed the input handlers and was admitted: it starts a turn or
+   * waits in the queue. `input` is what its harness gets. Sent before the
+   * harness is, so a record of it can be kept first.
+   */
+  | { type: "message.recorded"; message: Message; input: UserInput }
+  /** The admitted message is about to go to the harness. */
+  | { type: "message.dispatched"; messageId: string }
+  /** The admitted message was taken out of the queue unsent. */
+  | { type: "message.dropped"; messageId: string };
 
 export type ThreadListener = (event: ThreadEvent) => void;
 
@@ -145,12 +169,56 @@ export class Thread {
   /** The messages in the handlers; one `clearQueue` drops is no longer here when they finish. */
   #pending = new Set<Message>();
   #allowances = new Set<string>();
+  /** The queue came back after a restart; it waits until the user sends something. */
+  #held = false;
 
-  constructor(session: HarnessSession) {
+  /**
+   * A thread on `session`, or one parked from what it saved, which starts a
+   * session when it gets work.
+   */
+  constructor(session: HarnessSession);
+  constructor(session: null, saved: SavedThread);
+  constructor(session: HarnessSession | null, saved?: SavedThread) {
     this.#session = session;
-    this.#info = { ...session.info };
-    this.#capabilities = session.capabilities;
-    this.#methods = methodsOf(session);
+    if (session) {
+      this.#info = { ...session.info };
+      this.#capabilities = session.capabilities;
+      this.#methods = methodsOf(session);
+      return;
+    }
+    if (!saved) throw new Error("A thread without a session needs what it saved");
+    this.#info = { ...saved.info };
+    this.#capabilities = saved.capabilities;
+    this.#methods = [...saved.methods];
+    this.#handoff = saved.handoff;
+    this.#generation = saved.generation;
+    for (const key of saved.allowances) this.#allowances.add(key);
+    for (const { message, input } of saved.queue) {
+      this.#messages.set(message.id, message);
+      this.#queue.push({ message, input });
+    }
+    this.#held = this.#queue.length > 0;
+  }
+
+  /** What to keep of the thread to start it parked again after a restart. */
+  save(): SavedThread {
+    return {
+      info: { ...this.info },
+      capabilities: this.capabilities,
+      methods: [...this.methods],
+      handoff: this.#handoff,
+      generation: this.#generation,
+      allowances: [...this.#allowances],
+      queue: this.#queue.map(({ message, input }) => ({ message, input })),
+    };
+  }
+
+  /**
+   * Its queue came back after a restart and waits: nothing in it runs until
+   * the user sends the thread something, which goes after it.
+   */
+  get held(): boolean {
+    return this.#held;
   }
 
   /**
@@ -210,14 +278,20 @@ export class Thread {
   /**
    * Closes the session but keeps the thread: its messages, queue, handlers,
    * always-allow choices, and handoff stay for the session that wakes it.
-   * Only an idle thread parks.
+   * Only an idle thread parks, unless `force`, as when the host stops, which
+   * ends a running turn.
    */
-  async park(): Promise<void> {
+  async park(force = false): Promise<void> {
     const session = this.#session;
     if (!session || this.#ending) return;
-    if (!this.idle) throw new Error("The thread is working");
+    if (!force && !this.idle) throw new Error("The thread is working");
     await session.close();
     await this.#pumping;
+  }
+
+  /** How many sessions have taken the thread over. */
+  get generation(): number {
+    return this.#generation;
   }
 
   /** Another session is starting to take the thread over. */
@@ -240,13 +314,14 @@ export class Thread {
 
   /**
    * Nothing to do: no turn, nothing queued or still passing input handlers,
-   * no open request, and no session taking over.
+   * no open request, and no session taking over. A held queue waits for the
+   * user, so it is nothing to do yet.
    */
   get idle(): boolean {
     return (
       !this.#busy &&
       this.#incoming === null &&
-      this.#queue.length === 0 &&
+      (this.#queue.length === 0 || this.#held) &&
       this.#pending.size === 0 &&
       this.#requests.size === 0
     );
@@ -441,9 +516,9 @@ export class Thread {
   send(
     input: UserInput,
     origin: MessageOrigin = FROM_USER,
-    options: { command?: boolean } = {},
+    options: { command?: boolean; requestId?: string } = {},
   ): Message {
-    const message = this.#record(input, origin, options.command === true);
+    const message = this.#record(input, origin, options.command === true, options.requestId);
     if (this.#inputHandlers.length === 0 && this.#pending.size === 0) {
       this.#enqueue(prepare(message, input));
       return message;
@@ -479,6 +554,8 @@ export class Thread {
     const prepared = prepare(message, filtered);
     try {
       if (session !== this.#session) throw new Error("The session changed");
+      this.#emit({ type: "message.recorded", message, input: prepared.input });
+      this.#emit({ type: "message.dispatched", messageId: message.id });
       await session.steer(prepared.input);
     } catch {
       // The turn ended between the check and the request, so it becomes a follow-up.
@@ -507,7 +584,11 @@ export class Thread {
   unqueue(): Message | undefined {
     const index = this.#queue.findLastIndex((entry) => entry.message.origin.type === "user");
     const [entry] = index === -1 ? [] : this.#queue.splice(index, 1);
-    if (entry) this.#emitQueue();
+    if (entry) {
+      this.#emit({ type: "message.dropped", messageId: entry.message.id });
+      this.#settleHold();
+      this.#emitQueue();
+    }
     return entry?.message;
   }
 
@@ -517,9 +598,18 @@ export class Thread {
    */
   clearQueue(drop: (message: Message) => boolean = () => true): void {
     const before = this.#queue.length + this.#pending.size;
+    const dropped = this.#queue.filter((entry) => drop(entry.message));
     this.#queue = this.#queue.filter((entry) => !drop(entry.message));
+    for (const entry of dropped)
+      this.#emit({ type: "message.dropped", messageId: entry.message.id });
     for (const message of this.#pending) if (drop(message)) this.#pending.delete(message);
+    this.#settleHold();
     if (this.#queue.length + this.#pending.size !== before) this.#emitQueue();
+  }
+
+  /** An empty queue holds nothing back. */
+  #settleHold(): void {
+    if (this.#queue.length === 0) this.#held = false;
   }
 
   async interrupt(): Promise<void> {
@@ -561,20 +651,39 @@ export class Thread {
     return current;
   }
 
-  #record(input: UserInput, origin: MessageOrigin, command = false): Message {
-    const message: Message = { id: randomUUID(), input, origin, ...(command ? { command } : {}) };
+  #record(input: UserInput, origin: MessageOrigin, command = false, requestId?: string): Message {
+    const message: Message = {
+      id: randomUUID(),
+      input,
+      origin,
+      ...(command ? { command } : {}),
+      ...(requestId ? { requestId } : {}),
+    };
     this.#messages.set(message.id, message);
     return message;
   }
 
-  /** Queues a message that already passed the input handlers; a parked thread wakes for it. */
+  /**
+   * Queues a message that already passed the input handlers; a parked thread
+   * wakes for it. One from the user lets a held queue go, in order.
+   */
   #enqueue(entry: Prepared): void {
-    if (!this.#busy && this.#incoming === null && this.#session) {
-      this.#dispatch(entry);
+    if (this.#held && entry.message.origin.type === "user") this.#held = false;
+    const ready = !this.#busy && this.#incoming === null && this.#session !== null && !this.#held;
+    if (ready && this.#queue.length === 0) {
+      this.#dispatch(entry, true);
       return;
     }
+    // Recorded once it is in the queue, so nobody sees the thread with nothing to do.
     this.#queue.push(entry);
+    this.#emit({ type: "message.recorded", message: entry.message, input: entry.input });
     this.#emitQueue();
+    // What waited goes first.
+    if (ready) {
+      this.#drain();
+      return;
+    }
+    if (this.#held) return;
     if (this.parked && this.#waker && !this.#waking && !this.#incoming && !this.#ending)
       void this.#startWaking().catch((error: unknown) =>
         this.#emit({ type: "error", message: `Could not wake the thread: ${errorMessage(error)}` }),
@@ -611,15 +720,21 @@ export class Thread {
     this.#emit({ type: "request.opened", request });
   }
 
-  #dispatch(entry: Prepared): void {
+  /** Sends a message to the harness; `record` admits it first, for one that never queued. */
+  #dispatch(entry: Prepared, record = false): void {
     const session = this.#session;
     if (!session) {
       this.#queue.unshift(entry);
+      if (record)
+        this.#emit({ type: "message.recorded", message: entry.message, input: entry.input });
       this.#emitQueue();
       return;
     }
     // Busy is set before the harness confirms so a second send queues instead of racing.
     this.#busy = true;
+    if (record)
+      this.#emit({ type: "message.recorded", message: entry.message, input: entry.input });
+    this.#emit({ type: "message.dispatched", messageId: entry.message.id });
     // A harness command must start the text to run, so the handoff waits for the next message.
     const handoff = entry.message.command ? null : this.#handoff;
     if (handoff) this.#handoff = null;
@@ -635,7 +750,7 @@ export class Thread {
   }
 
   #drain(): void {
-    if (!this.#session) return;
+    if (!this.#session || this.#held) return;
     const next = this.#queue.shift();
     if (!next) return;
     this.#emitQueue();

@@ -20,7 +20,9 @@ import { registerDriver } from "../drivers/index.ts";
 import type { LogEntry } from "../protocol.ts";
 import { agentRowOf } from "../tui/agents.ts";
 import { ThreadView } from "../tui/view.ts";
+import { Store } from "../store/store.ts";
 import { Host } from "./host.ts";
+import { UNKNOWN_OUTCOME } from "./manager.ts";
 
 let natives = 0;
 
@@ -218,11 +220,12 @@ after(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-function newHost(extensions: string[] = []): Host {
+function newHost(extensions: string[] = [], store: Store | null = null): Host {
   host = new Host({
     version: "test",
     cwd: root,
     extensions,
+    store,
     configDir: join(root, "config"),
     stateDir: join(root, "state"),
     idleCloseMs: 0,
@@ -248,6 +251,11 @@ async function idle(client: HostClient, id: string): Promise<void> {
     await settle(5);
   }
   throw new Error(`${id} did not settle`);
+}
+
+/** Stops a host as a crash would: its store closes, and nothing else is written. */
+function crash(store: Store): void {
+  store.close();
 }
 
 describe("Host", () => {
@@ -462,5 +470,168 @@ describe("Host", () => {
     await host.disconnect("tui");
     await running;
     assert.equal((globalThis as { waited?: unknown }).waited, null);
+  });
+});
+
+describe("Host with a store", () => {
+  let file: string;
+  let count = 0;
+  const fresh = () => {
+    file = join(root, `store-${++count}.db`);
+    return Store.open(file);
+  };
+
+  it("brings threads back parked, with their transcripts, and resumes their harness", async () => {
+    newHost([], fresh());
+    let client = await connect("tui");
+    const thread = await client.call("thread.open", { harness: "scripted", settings });
+    await client.call("thread.send", { threadId: thread.id, text: "the parser" });
+    await idle(client, thread.id);
+    const native = client.threads.get(thread.id)?.info.threadId;
+    const saved = await client.call("thread.attach", { threadId: thread.id });
+    await host.shutdown();
+
+    newHost([], Store.open(file));
+    client = await connect("tui");
+    const back = client.threads.get(thread.id);
+    assert.equal(back?.status, "parked");
+    assert.equal(back?.runCount, 1);
+    const restored = await client.call("thread.attach", { threadId: thread.id });
+    // The same transcript, and the session that ended when the host stopped.
+    assert.deepEqual(restored.entries.slice(0, saved.entries.length), saved.entries);
+    assert.deepEqual(
+      restored.entries.slice(saved.entries.length).map((logged) => logged.entry),
+      [{ type: "session.ended", error: null }],
+    );
+    // IDs are never reused.
+    const next = await client.call("thread.open", { harness: "scripted", settings });
+    assert.notEqual(next.id, thread.id);
+    await client.call("thread.send", { threadId: thread.id, text: "the lexer" });
+    await idle(client, thread.id);
+    const session = host.manager.get(thread.id)?.thread.session as unknown as ScriptedSession;
+    assert.equal(session.options.resume, native);
+    assert.deepEqual(session.prompts, ["the lexer"]);
+  });
+
+  it("marks a turn a crash cut off as interrupted, holds the queue, and sends nothing again", async () => {
+    const store = fresh();
+    const first = newHost([], store);
+    const client = await connect("tui");
+    const thread = await client.call("thread.open", { harness: "scripted", settings });
+    await client.call("thread.send", { threadId: thread.id, text: "go ASK" });
+    await client.call("thread.send", { threadId: thread.id, text: "queued one" });
+    await client.call("thread.send", { threadId: thread.id, text: "queued two" });
+    await settle();
+    crash(store);
+    await first.manager.closeAll();
+
+    newHost([], Store.open(file));
+    const again = await connect("tui");
+    const back = again.threads.get(thread.id)!;
+    assert.equal(back.status, "parked");
+    assert.equal(back.held, true);
+    assert.deepEqual(
+      back.queue.map((message) => message.input.text),
+      ["queued one", "queued two"],
+    );
+    assert.equal(back.lastRun?.status, "interrupted");
+    assert.equal(back.lastRun?.error, UNKNOWN_OUTCOME);
+    // Nothing started by itself.
+    await settle();
+    assert.equal(host.manager.get(thread.id)?.thread.session, null);
+    // The user's next message lets the queue go, after it.
+    await again.call("thread.send", { threadId: thread.id, text: "now" });
+    for (let tries = 0; tries < 100; tries++) {
+      const prompts = (
+        host.manager.get(thread.id)?.thread.session as unknown as ScriptedSession | null
+      )?.prompts;
+      if (prompts?.length === 3) break;
+      await settle(5);
+    }
+    const session = host.manager.get(thread.id)?.thread.session as unknown as ScriptedSession;
+    assert.deepEqual(session.prompts, ["queued one", "queued two", "now"]);
+  });
+
+  it("answers a retried message from before a restart without sending it", async () => {
+    const store = fresh();
+    newHost([], store);
+    let client = await connect("tui");
+    const thread = await client.call("thread.open", { harness: "scripted", settings });
+    const sent = await client.call("thread.send", {
+      threadId: thread.id,
+      text: "once",
+      requestId: "r-1",
+    });
+    await idle(client, thread.id);
+    await host.shutdown();
+    newHost([], Store.open(file));
+    client = await connect("tui");
+    const again = await client.call("thread.send", {
+      threadId: thread.id,
+      text: "once",
+      requestId: "r-1",
+    });
+    assert.equal(again.messageId, sent.messageId);
+    await settle();
+    assert.equal(client.threads.get(thread.id)?.status, "parked");
+  });
+
+  it("reopens a closed thread by its ID, and a harness's thread by its own ID", async () => {
+    newHost([], fresh());
+    let client = await connect("tui");
+    const thread = await client.call("thread.open", { harness: "scripted", settings });
+    await client.call("thread.send", { threadId: thread.id, text: "hello" });
+    await idle(client, thread.id);
+    const native = client.threads.get(thread.id)!.info.threadId!;
+    await client.call("thread.close", { threadId: thread.id });
+    await host.shutdown();
+
+    newHost([], Store.open(file));
+    client = await connect("tui");
+    assert.equal(client.threads.has(thread.id), false);
+    const listed = await client.call("threads.list", { scope: "recent" });
+    assert.ok(listed.some((entry) => entry.id === thread.id && entry.status === "closed"));
+    const byNative = await client.call("thread.resume", {
+      id: native,
+      harness: "scripted",
+      settings,
+    });
+    assert.equal(byNative.id, thread.id);
+    assert.equal(byNative.status, "parked");
+    const byId = await client.call("thread.resume", {
+      id: thread.id,
+      harness: "scripted",
+      settings,
+    });
+    assert.equal(byId.id, thread.id);
+  });
+
+  it("does not report a task cut off by a crash to the thread that started it", async () => {
+    const store = fresh();
+    const first = newHost([], store);
+    const client = await connect("tui");
+    const parent = await client.call("thread.open", { harness: "scripted", settings });
+    const delegate = first.orchestrator.tools.find((tool) => tool.name === "delegate_task")!;
+    const result = JSON.parse(
+      String(
+        await delegate.execute(
+          { task: "look ASK", wait: false },
+          { thread: first.manager.get(parent.id)!.thread },
+        ),
+      ),
+    ) as { taskId: string };
+    await settle();
+    crash(store);
+    await first.manager.closeAll();
+
+    newHost([], Store.open(file));
+    const again = await connect("tui");
+    await settle(30);
+    const child = again.threads.get(result.taskId);
+    assert.equal(child?.lastRun?.status, "interrupted");
+    const back = again.threads.get(parent.id)!;
+    assert.equal(back.runCount, 0);
+    assert.equal(back.queue.length, 0);
+    assert.equal(host.manager.get(parent.id)?.thread.session, null);
   });
 });

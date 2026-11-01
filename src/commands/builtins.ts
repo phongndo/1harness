@@ -1,4 +1,5 @@
 import type { McpAction, McpServer, ModelOption, ThreadSummary } from "../core/events.ts";
+import type { ThreadListing } from "../protocol.ts";
 import { errorMessage } from "../core/thread.ts";
 import { MODE_DESCRIPTIONS } from "../core/wording.ts";
 import {
@@ -36,8 +37,24 @@ async function listModels(context: CommandContext): Promise<ModelOption[]> {
   return session.listModels ? await session.listModels() : [];
 }
 
-function threads(context: CommandContext): ThreadSummary[] {
-  return context.lookup("threads", async () => (await context.session().listThreads?.()) ?? []);
+/** The harness's own earlier threads in this folder, where it lists them. */
+function nativeThreads(context: CommandContext): ThreadSummary[] {
+  const session = liveSession(context);
+  if (!session?.listThreads) return [];
+  return context.lookup("threads", async () => (await session.listThreads?.()) ?? []);
+}
+
+/** 1harness's threads, this folder's first, newest first, without the one on screen. */
+async function storedThreads(context: CommandContext): Promise<ThreadListing[]> {
+  const cwd = context.info?.cwd;
+  const all = await context.threads("recent");
+  return all
+    .filter((thread) => thread.id !== context.thread?.id && thread.parentId === null)
+    .toSorted((a, b) => Number(b.cwd === cwd) - Number(a.cwd === cwd) || b.updatedAt - a.updatedAt);
+}
+
+function when(time: number): string {
+  return new Date(time).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
 }
 
 async function mcpServers(context: CommandContext): Promise<McpServer[]> {
@@ -99,33 +116,57 @@ const newThread: CommandDefinition = {
 const resume: CommandDefinition = {
   name: "resume",
   usage: "[id]",
-  description: "resume an earlier thread in this folder",
+  description: "open an earlier thread: 1harness's, such as t42, or the harness's own",
   group: "Session",
-  available: (context) => liveSession(context)?.listThreads !== undefined,
   complete: (context) => ({
     start: 0,
-    items: threads(context).map((thread) =>
-      completion(thread.id, oneLine(thread.title).slice(0, 50)),
-    ),
+    items: [
+      ...context
+        .lookup("stored", () => storedThreads(context))
+        .map((thread: ThreadListing) =>
+          completion(thread.id, `${thread.harness} · ${oneLine(thread.title).slice(0, 50)}`),
+        ),
+      ...nativeThreads(context).map((thread) =>
+        completion(thread.id, oneLine(thread.title).slice(0, 50)),
+      ),
+    ],
   }),
   async run(context, args) {
-    let id = args || undefined;
-    if (!id) {
-      const list = (await context.session().listThreads?.()) ?? [];
-      if (list.length === 0) {
-        context.ui.notify("info", "No earlier threads in this folder.");
-        return;
-      }
-      const index = await context.ui.pick(
-        "Threads",
-        list.map((thread) => ({
-          label: oneLine(thread.title).slice(0, 60),
-          tag: new Date(thread.updatedAt).toLocaleString(),
-        })),
-        { filter: true },
-      );
-      id = index === null ? undefined : list[index]?.id;
+    if (args) {
+      await context.openThread({ resume: args });
+      return;
     }
+    context.forget("stored");
+    const stored = await storedThreads(context);
+    const session = liveSession(context);
+    const natives = session?.listThreads ? await session.listThreads().catch(() => []) : [];
+    // A harness's thread a 1harness thread already runs is listed once, as 1harness's.
+    const known = new Set(stored.map((thread) => thread.native));
+    const own = natives.filter((thread) => !known.has(thread.id));
+    if (stored.length === 0 && own.length === 0) {
+      context.ui.notify("info", "No earlier threads in this folder.");
+      return;
+    }
+    const cwd = context.info?.cwd;
+    const harnessTab = context.harnesses().find((entry) => entry.id === context.harness)?.label;
+    const choices = [
+      ...stored.map((thread) => ({
+        id: thread.id,
+        label: oneLine(thread.title || thread.id).slice(0, 60),
+        detail: `${thread.id} · ${thread.harness} · ${thread.status}${thread.cwd === cwd ? "" : ` · ${thread.cwd}`}`,
+        tag: when(thread.updatedAt),
+        group: "1harness",
+      })),
+      ...own.map((thread) => ({
+        id: thread.id,
+        label: oneLine(thread.title).slice(0, 60),
+        detail: "",
+        tag: when(thread.updatedAt),
+        group: harnessTab ?? context.harness,
+      })),
+    ];
+    const index = await context.ui.pick("Threads", choices, { filter: true, tabs: true });
+    const id = index === null ? undefined : choices[index]?.id;
     if (id) await context.openThread({ resume: id });
   },
 };

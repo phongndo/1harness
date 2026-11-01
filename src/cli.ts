@@ -12,10 +12,11 @@ import {
 } from "./core/events.ts";
 import { HostClient } from "./client/client.ts";
 import { LocalConnection, newClientId } from "./client/connection.ts";
-import { configDir } from "./core/paths.ts";
+import { configDir, storeFile } from "./core/paths.ts";
 import { loadSettings } from "./core/settings.ts";
 import { drivers, registerConfiguredAgents } from "./drivers/index.ts";
 import { Host } from "./host/host.ts";
+import { Store, StoreLocked } from "./store/store.ts";
 import { App } from "./tui/app.ts";
 
 const labels = drivers().map((driver) => driver.label);
@@ -202,11 +203,22 @@ try {
         "the interactive UI needs a terminal; use --print to run a prompt without one",
       );
     } else {
+      let store: Store | null = null;
+      try {
+        store = Store.open(storeFile());
+      } catch (error) {
+        // Another 1harness keeps the threads; this one keeps nothing, and leaves those alone.
+        if (!(error instanceof StoreLocked)) throw error;
+        warnings.push(
+          "Another 1harness is keeping threads, so this one keeps none of its own; they end when it exits.",
+        );
+      }
       const host = new Host({
         version: manifest.version,
         cwd: session.cwd,
         extensions,
         warnings,
+        store,
       });
       const id = newClientId();
       const client = new HostClient(

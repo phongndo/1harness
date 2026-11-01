@@ -132,6 +132,7 @@ export type UiRequest =
       entries: PickEntry[];
       initial: number;
       filter: boolean;
+      tabs: boolean;
     }
   | { id: string; method: "progress"; text: string }
   | {

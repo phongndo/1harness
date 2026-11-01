@@ -364,6 +364,45 @@ export class Orchestrator {
     ];
   }
 
+  /** Every task, for a store to keep. */
+  taskRows(): {
+    id: string;
+    parentId: string;
+    requestId: string | null;
+    seen: boolean;
+    delivered: boolean;
+  }[] {
+    return [...this.#tasks.values()].map(({ id, parentId, requestId, seen, delivered }) => ({
+      id,
+      parentId,
+      requestId,
+      seen,
+      delivered,
+    }));
+  }
+
+  /**
+   * Brings back tasks a store kept. A task whose outcome its parent never got
+   * is not sent now: nothing starts by itself after a restart, so the parent
+   * finds out with task_status when it runs again.
+   */
+  restoreTasks(
+    rows: readonly {
+      id: string;
+      parentId: string;
+      requestId: string | null;
+      seen: boolean;
+      delivered: boolean;
+    }[],
+  ): void {
+    for (const row of rows) {
+      const task: Task = { ...row, delivered: row.delivered || !row.seen, waiting: 0 };
+      this.#tasks.set(task.id, task);
+      if (task.requestId)
+        this.#byRequest.set(`${task.parentId}\0${task.requestId}`, Promise.resolve(task));
+    }
+  }
+
   /**
    * Stops a thread and every thread under it, as the user does with esc: each
    * running turn is interrupted and the agents' queued messages are dropped.

@@ -12,11 +12,12 @@ import {
   errorMessage,
   messageText,
   type MessageOrigin,
+  type SavedThread,
   type ThreadEvent,
 } from "../core/thread.ts";
 import { createSession, drivers, findDriver } from "../drivers/index.ts";
 import type { ExtensionHost } from "../extensions/host.ts";
-import type { ToolServer } from "../extensions/tool-server.ts";
+import type { ToolGrant, ToolServer } from "../extensions/tool-server.ts";
 import { handoffText, stripHandoff } from "./handoff.ts";
 
 /**
@@ -69,7 +70,8 @@ export interface ManagedThread {
 }
 
 export type ManagerEvent =
-  | { type: "thread.created"; thread: ManagedThread }
+  /** A new thread, or with `restored`, one brought back parked after a restart. */
+  | { type: "thread.created"; thread: ManagedThread; restored?: boolean }
   /** Status, title, or runs changed. */
   | { type: "thread.updated"; thread: ManagedThread }
   | { type: "thread.event"; threadId: string; event: ThreadEvent }
@@ -103,7 +105,28 @@ export interface ManagerOptions {
    * the process; the next message resumes it. 0 keeps sessions open.
    */
   idleCloseMs?: number;
+  /** Gives each new thread its ID, such as from a store, so IDs are never reused. */
+  nextId?: () => string;
 }
+
+/** A thread as a store kept it, to bring back parked. */
+export interface RestoredThread {
+  id: string;
+  title: string;
+  harness: HarnessId;
+  parentId: string | null;
+  parentCallId: string | null;
+  origin: "user" | "delegated";
+  createdAt: number;
+  error: string | null;
+  runs: RunRecord[];
+  visits: Map<HarnessId, Visit>;
+  seenWithoutHandoff: number | null;
+  thread: SavedThread;
+}
+
+/** What a run that was going when its host stopped says; nobody knows how it ended. */
+export const UNKNOWN_OUTCOME = "1harness stopped while this turn ran, so how it ended is unknown";
 
 /** Thirty minutes. */
 export const IDLE_CLOSE_MS = 30 * 60 * 1000;
@@ -127,7 +150,7 @@ export interface SwitchResult {
 }
 
 /** Where a thread left a harness, so going back resumes that harness's own thread. */
-interface Visit {
+export interface Visit {
   /** The harness's own thread ID, or null when it never assigned one. */
   native: string | null;
   /** How many of the thread's runs that harness's own thread has seen. */
@@ -192,6 +215,8 @@ export class ThreadManager {
   /** Threads being closed, children first, so work no longer goes to them. */
   #closing = new Set<string>();
   #warned = new Set<string>();
+  /** Each thread's grant to the tool server, which its sessions use. */
+  #grants = new Map<string, ToolGrant>();
   #counter = 0;
   /** What each thread looked like when last announced. */
   #keys = new Map<string, string>();
@@ -244,12 +269,7 @@ export class ThreadManager {
    */
   async create(options: CreateThreadOptions): Promise<ManagedThread> {
     const extensions = this.#options.extensions;
-    const mcp = await extensions.sessionServers(this.#options.tools);
-    for (const warning of mcp.warnings) {
-      if (this.#warned.has(warning)) continue;
-      this.#warned.add(warning);
-      this.#options.onWarning?.(`MCP config: ${warning}`);
-    }
+    const mcp = await this.#sessionServers();
     let created: Thread | null = null;
     const toolPolicy = extensions.toolPolicy(() => created);
     const settings = {
@@ -269,7 +289,7 @@ export class ThreadManager {
     created = thread;
     mcp.grant?.bind(thread);
     const managed: ManagedThread = {
-      id: `t${++this.#counter}`,
+      id: this.#options.nextId?.() ?? `t${++this.#counter}`,
       title: options.title ?? "",
       harness: options.harness,
       parentId: options.parentId ?? null,
@@ -282,22 +302,9 @@ export class ThreadManager {
       runs: [],
       error: null,
     };
-    this.#threads.set(managed.id, managed);
-    this.#byThread.set(thread, managed);
     this.#servers.set(managed.id, mcp.servers);
-    const unsubscribe = thread.subscribe((event) => this.#apply(managed, event));
-    thread.setWaker(async () => {
-      await this.wake(managed.id);
-    });
-    const detach = extensions.attach(thread);
-    this.#cleanups.set(managed.id, () => {
-      unsubscribe();
-      detach();
-      mcp.grant?.revoke();
-      this.#servers.delete(managed.id);
-      this.#visits.delete(managed.id);
-      this.#seenWithoutHandoff.delete(managed.id);
-    });
+    if (mcp.grant) this.#grants.set(managed.id, mcp.grant);
+    this.#adopt(managed);
     this.#emit({ type: "thread.created", thread: managed });
     try {
       await thread.start();
@@ -310,6 +317,106 @@ export class ThreadManager {
     }
     this.#refresh(managed);
     return managed;
+  }
+
+  /** The MCP servers a new session gets, reporting problems with the shared config once. */
+  async #sessionServers() {
+    const mcp = await this.#options.extensions.sessionServers(this.#options.tools);
+    for (const warning of mcp.warnings) {
+      if (this.#warned.has(warning)) continue;
+      this.#warned.add(warning);
+      this.#options.onWarning?.(`MCP config: ${warning}`);
+    }
+    return mcp;
+  }
+
+  /** Connects a thread to the manager and the extensions, and lists it. */
+  #adopt(managed: ManagedThread): void {
+    const thread = managed.thread;
+    this.#threads.set(managed.id, managed);
+    this.#byThread.set(thread, managed);
+    const unsubscribe = thread.subscribe((event) => this.#apply(managed, event));
+    thread.setWaker(async () => {
+      await this.wake(managed.id);
+    });
+    const detach = this.#options.extensions.attach(thread);
+    this.#cleanups.set(managed.id, () => {
+      unsubscribe();
+      detach();
+      this.#grants.get(managed.id)?.revoke();
+      this.#grants.delete(managed.id);
+      this.#servers.delete(managed.id);
+      this.#visits.delete(managed.id);
+      this.#seenWithoutHandoff.delete(managed.id);
+    });
+  }
+
+  /**
+   * Brings back threads a store kept, parked: their next message starts a
+   * session. A run that was going when the host stopped is marked
+   * interrupted, its outcome unknown; it is never sent again.
+   */
+  restore(saved: readonly RestoredThread[]): ManagedThread[] {
+    const restored: ManagedThread[] = [];
+    for (const entry of saved) {
+      if (this.#threads.has(entry.id)) continue;
+      const runs = entry.runs.map((run) =>
+        run.status === "running"
+          ? {
+              ...run,
+              status: "interrupted" as const,
+              error: UNKNOWN_OUTCOME,
+              endedAt: run.endedAt ?? Date.now(),
+            }
+          : run,
+      );
+      const managed: ManagedThread = {
+        id: entry.id,
+        title: entry.title,
+        harness: entry.harness,
+        parentId: entry.parentId,
+        parentCallId: entry.parentCallId,
+        origin: entry.origin,
+        openedBy: null,
+        thread: new Thread(null, entry.thread),
+        createdAt: entry.createdAt,
+        status: "parked",
+        runs,
+        error: entry.error,
+      };
+      this.#adopt(managed);
+      if (entry.visits.size > 0) this.#visits.set(entry.id, new Map(entry.visits));
+      if (entry.seenWithoutHandoff !== null)
+        this.#seenWithoutHandoff.set(entry.id, entry.seenWithoutHandoff);
+      restored.push(managed);
+      this.#emit({ type: "thread.created", thread: managed, restored: true });
+      this.#refresh(managed);
+    }
+    return restored;
+  }
+
+  /** The harnesses a thread ran on before, for a store to keep. */
+  visits(id: string): ReadonlyMap<HarnessId, Visit> {
+    return this.#visits.get(id) ?? new Map();
+  }
+
+  /** How many runs its harness's own thread saw without its pending handoff. */
+  seenWithoutHandoff(id: string): number | null {
+    return this.#seenWithoutHandoff.get(id) ?? null;
+  }
+
+  /**
+   * Closes every session but keeps the threads, as when the host stops: each
+   * parks, and a turn still running is interrupted.
+   */
+  async parkAll(): Promise<void> {
+    for (const timer of this.#idleTimers.values()) clearTimeout(timer);
+    this.#idleTimers.clear();
+    await Promise.all(
+      this.list()
+        .filter((managed) => managed.status !== "closed" && managed.thread.session)
+        .map((managed) => managed.thread.park(true).catch(() => {})),
+    );
   }
 
   /**
@@ -446,12 +553,8 @@ export class ThreadManager {
       interactionMode: info.interactionMode,
       resume: null,
     };
-    const servers = this.#servers.get(id) ?? {};
     const toolPolicy = this.#options.extensions.toolPolicy(() => thread);
-    const extras = {
-      ...(Object.keys(servers).length > 0 ? { mcpServers: servers } : {}),
-      ...(toolPolicy ? { toolPolicy } : {}),
-    };
+    let extras: Partial<SessionOptions> = {};
     const plans = [
       ...(earlier?.native ? [{ resume: earlier.native, seen: earlier.runs }] : []),
       { resume: null, seen: 0 },
@@ -470,6 +573,21 @@ export class ThreadManager {
     this.#switching.set(id, harness);
     this.#refresh(managed);
     try {
+      // A thread brought back after a restart connects its servers on first use.
+      let servers = this.#servers.get(id);
+      if (!servers) {
+        const mcp = await this.#sessionServers();
+        servers = mcp.servers;
+        this.#servers.set(id, servers);
+        if (mcp.grant) {
+          mcp.grant.bind(thread);
+          this.#grants.set(id, mcp.grant);
+        }
+      }
+      extras = {
+        ...(Object.keys(servers).length > 0 ? { mcpServers: servers } : {}),
+        ...(toolPolicy ? { toolPolicy } : {}),
+      };
       // One switch tries every plan, so nothing sent meanwhile reaches the old harness.
       const { attempt, failures } = await thread.replaceSession(
         plans.map((plan) => ({

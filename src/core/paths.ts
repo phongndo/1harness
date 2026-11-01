@@ -10,3 +10,8 @@ export function configDir(env: NodeJS.ProcessEnv = process.env): string {
 export function stateDir(env: NodeJS.ProcessEnv = process.env): string {
   return join(env["XDG_STATE_HOME"] || join(homedir(), ".local", "state"), "1harness");
 }
+
+/** Where 1harness keeps its threads across restarts. */
+export function storeFile(env: NodeJS.ProcessEnv = process.env): string {
+  return join(stateDir(env), "1harness.db");
+}
