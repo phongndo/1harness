@@ -530,6 +530,41 @@ describe("Switching harness", () => {
   });
 });
 
+describe("thread_read", () => {
+  it("reads a range of runs in pages that fit, with their commands", async () => {
+    const thread = await manager.create({ harness: "fake", settings: settings() });
+    for (const text of ["one CMD", "two", "three", "four"]) {
+      thread.thread.send({ text });
+      await manager.wait(thread.id, 1000);
+    }
+    const range = await call("thread_read", thread, { threadId: thread.id, fromRun: 1, toRun: 2 });
+    const runs = range["runs"] as { run: number; commands: unknown[] }[];
+    assert.deepEqual(
+      runs.map((run) => run.run),
+      [1, 2],
+    );
+    assert.deepEqual(runs[0]?.commands, [{ command: "pnpm test", exitCode: 1 }]);
+    assert.equal(range["moreRuns"], undefined);
+    await assert.rejects(
+      call("thread_read", thread, { threadId: thread.id, fromRun: 0 }),
+      /fromRun must be a run number/,
+    );
+
+    // Long runs come back newest first, and moreRuns names the rest of the range.
+    const long = await manager.create({ harness: "fake", settings: settings() });
+    for (let index = 0; index < 4; index++) {
+      long.thread.send({ text: `${index}${"x".repeat(20_000)}` });
+      await manager.wait(long.id, 1000);
+    }
+    const page = await call("thread_read", long, { threadId: long.id, runs: 4 });
+    assert.deepEqual(
+      (page["runs"] as { run: number }[]).map((run) => run.run),
+      [3, 4],
+    );
+    assert.deepEqual(page["moreRuns"], { fromRun: 1, toRun: 2 });
+  });
+});
+
 describe("Orchestrator", () => {
   it("delegates a task to a child thread and waits for its result", async () => {
     const parent = await manager.create({ harness: "fake", settings: settings() });

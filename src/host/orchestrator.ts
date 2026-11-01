@@ -19,6 +19,8 @@ export const MAX_OPEN_THREADS = 16;
 const DEFAULT_WAIT_SECONDS = 600;
 const MAX_WAIT_SECONDS = 3000;
 const RESULT_LIMIT = 8000;
+/** About how much one thread_read returns, so reading history cannot flood a context. */
+const READ_LIMIT = 40_000;
 /** How many of a run's commands thread_read shows, the latest ones. */
 const COMMAND_COUNT = 20;
 
@@ -57,6 +59,15 @@ function clip(value: string | null): string | null {
 function seconds(value: unknown, fallback: number): number {
   const number = typeof value === "number" && Number.isFinite(value) ? value : fallback;
   return Math.max(1, Math.min(MAX_WAIT_SECONDS, number)) * 1000;
+}
+
+/** A run number from the input, counted from 1, or undefined when not given. */
+function runNumber(input: Record<string, unknown>, name: string): number | undefined {
+  const value = input[name];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1)
+    throw new OrchestrationError("invalid_request", `${name} must be a run number, from 1`);
+  return value;
 }
 
 function text(input: Record<string, unknown>, name: string): string | undefined {
@@ -231,12 +242,18 @@ export class Orchestrator {
       },
       {
         name: "thread_read",
-        description: "Reads a thread's recent runs: what each was asked and what it answered.",
+        description:
+          "Reads a thread's runs: what each was asked and answered, the commands it ran, and the files it changed. Reads the latest runs, or a range with fromRun and toRun. A long read comes back newest first, and moreRuns names the older runs in the range that did not fit.",
         inputSchema: {
           type: "object",
           properties: {
             threadId: { type: "string" },
-            runs: { type: "number", description: "How many recent runs to read; 5 by default." },
+            runs: {
+              type: "number",
+              description: "How many of the latest runs to read; 5 by default.",
+            },
+            fromRun: { type: "number", description: "The first run to read, counted from 1." },
+            toRun: { type: "number", description: "The last run to read." },
           },
           required: ["threadId"],
         },
@@ -244,10 +261,31 @@ export class Orchestrator {
         execute: (input, context) => {
           this.#caller(context);
           const thread = this.#thread(input);
+          const from = runNumber(input, "fromRun");
+          const to = runNumber(input, "toRun");
           const count = typeof input["runs"] === "number" ? Math.max(1, input["runs"]) : 5;
+          const chosen =
+            from === undefined && to === undefined
+              ? thread.runs.slice(-count)
+              : thread.runs.filter(
+                  (run) => run.index >= (from ?? 1) && run.index <= (to ?? Infinity),
+                );
+          // Newest first until the limit, so a long range comes back in pages.
+          const views: ReturnType<typeof runView>[] = [];
+          let used = 0;
+          for (const run of chosen.toReversed()) {
+            const view = runView(run);
+            const size = JSON.stringify(view).length;
+            if (views.length > 0 && used + size > READ_LIMIT) break;
+            views.unshift(view);
+            used += size;
+          }
+          const left = chosen.slice(0, chosen.length - views.length);
+          const [first, last] = [left[0], left.at(-1)];
           return this.#json({
             ...this.#threadView(thread),
-            runs: thread.runs.slice(-count).map(runView),
+            runs: views,
+            ...(first && last ? { moreRuns: { fromRun: first.index, toRun: last.index } } : {}),
           });
         },
       },
