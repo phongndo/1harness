@@ -8,7 +8,7 @@ import type {
   SessionInfo,
   UserInput,
 } from "./events.ts";
-import { Thread } from "./thread.ts";
+import { Thread, type ThreadEvent } from "./thread.ts";
 
 class FakeSession {
   readonly capabilities = {
@@ -273,6 +273,84 @@ describe("Thread", () => {
       thread.queue.map((message) => message.origin.type),
       ["report"],
     );
+    await thread.close();
+  });
+
+  it("moves to another session, keeping its notices but not the history it replays", async () => {
+    const { session, thread } = await setup();
+    const next = new FakeSession();
+    next.info.harness = "claude";
+    // What a resumed harness sends while starting: the old conversation, and a notice.
+    next.events.push({
+      type: "item.completed",
+      item: { kind: "user_message", id: "old", text: "an old question" },
+    });
+    next.events.push({
+      type: "item.completed",
+      item: { kind: "notice", id: "n", level: "warning", text: "runs in supervised" },
+    });
+    const events: ThreadEvent[] = [];
+    thread.subscribe((event) => events.push(event));
+    await thread.replaceSession(next as unknown as HarnessSession);
+    assert.equal(thread.session, next as unknown as HarnessSession);
+    assert.equal(session.events.ended, true);
+    const shown = events.flatMap((event) =>
+      event.type === "session.replaced"
+        ? [`replaced ${event.previous.harness}`]
+        : event.type === "item.completed"
+          ? [event.item.kind]
+          : [],
+    );
+    assert.deepEqual(shown, ["replaced codex", "notice"]);
+    await thread.close();
+  });
+
+  it("puts the handoff in front of the next message only, after any harness command", async () => {
+    const { thread } = await setup();
+    const next = new FakeSession();
+    await thread.replaceSession(next as unknown as HarnessSession, { handoff: "HANDOFF" });
+    const finish = async (turnId: string) => {
+      next.events.push({ type: "turn.started", turnId });
+      next.events.push({ type: "turn.ended", turnId, status: "completed", error: null });
+      await settle();
+    };
+    thread.send({ text: "/review" });
+    await finish("1");
+    thread.send({ text: "go on" });
+    await finish("2");
+    thread.send({ text: "again" });
+    assert.deepEqual(next.turns, ["/review", "HANDOFF\n\ngo on", "again"]);
+    // The thread keeps the message as it was sent, for transcripts and records.
+    const id = next.sent[1]?.id;
+    assert.ok(id);
+    assert.equal(thread.message(id)?.input.text, "go on");
+    assert.equal(thread.handoff, null);
+    await thread.close();
+  });
+
+  it("refuses to move while working, and stays put when the new session fails", async () => {
+    const { session, thread } = await setup();
+    thread.send({ text: "work" });
+    await assert.rejects(
+      thread.replaceSession(new FakeSession() as unknown as HarnessSession),
+      /working/,
+    );
+    session.events.push({ type: "turn.started", turnId: "1" });
+    session.events.push({ type: "turn.ended", turnId: "1", status: "completed", error: null });
+    await settle();
+    const broken = Object.assign(new FakeSession(), {
+      start: () => Promise.reject(new Error("cannot start")),
+    });
+    const moving = thread.replaceSession(broken as unknown as HarnessSession, { handoff: "H" });
+    // A message sent meanwhile waits to see which session runs the thread.
+    thread.send({ text: "meanwhile" });
+    assert.equal(thread.switching, true);
+    assert.equal(thread.idle, false);
+    assert.deepEqual(session.turns, ["work"]);
+    await assert.rejects(moving, /cannot start/);
+    assert.equal(thread.session, session as unknown as HarnessSession);
+    assert.deepEqual(session.turns, ["work", "meanwhile"]);
+    assert.equal(thread.handoff, null);
     await thread.close();
   });
 });

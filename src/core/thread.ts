@@ -7,6 +7,7 @@ import type {
   Item,
   NativeCommand,
   RequestResponse,
+  SessionInfo,
   TurnStatus,
   Usage,
   UserInput,
@@ -48,6 +49,12 @@ export function messageText(message: Message): string {
 export type ThreadEvent =
   | HarnessEvent
   | { type: "queue.changed"; queue: readonly Message[] }
+  /**
+   * Another session took the thread over, such as another harness's; `previous`
+   * is the one it replaced, as it last stood. The new session's own
+   * `session.updated` follows.
+   */
+  | { type: "session.replaced"; previous: SessionInfo }
   /** `unsent` is set when the error is that a message could not start its turn. */
   | { type: "error"; message: string; unsent?: Message };
 
@@ -73,7 +80,11 @@ const REQUEST_HANDLER_TIMEOUT_MS = 10_000;
  * behave the same everywhere.
  */
 export class Thread {
-  readonly session: HarnessSession;
+  #session: HarnessSession;
+  /** A session starting to take the thread over, and the events it sent so far. */
+  #incoming: { session: HarnessSession; events: HarnessEvent[] } | null = null;
+  /** What the harness is told before the next message, after a new session took over. */
+  #handoff: string | null = null;
   #listeners = new Set<ThreadListener>();
   /** Messages waiting for the next turn, with what the input handlers made of them. */
   #queue: Prepared[] = [];
@@ -95,7 +106,22 @@ export class Thread {
   #allowances = new Set<string>();
 
   constructor(session: HarnessSession) {
-    this.session = session;
+    this.#session = session;
+  }
+
+  /** The session the thread runs on; `replaceSession` changes it. */
+  get session(): HarnessSession {
+    return this.#session;
+  }
+
+  /** Another session is starting to take the thread over. */
+  get switching(): boolean {
+    return this.#incoming !== null;
+  }
+
+  /** What the next message will carry in front of it for the harness, if anything. */
+  get handoff(): string | null {
+    return this.#handoff;
   }
 
   get busy(): boolean {
@@ -108,11 +134,12 @@ export class Thread {
 
   /**
    * Nothing to do: no turn, nothing queued or still passing input handlers,
-   * and no open request.
+   * no open request, and no session taking over.
    */
   get idle(): boolean {
     return (
       !this.#busy &&
+      this.#incoming === null &&
       this.#queue.length === 0 &&
       this.#pending.size === 0 &&
       this.#requests.size === 0
@@ -146,8 +173,63 @@ export class Thread {
   }
 
   async start(): Promise<void> {
-    this.#pumping = this.#pump();
-    await this.session.start();
+    this.#pumping = this.#pump(this.#session);
+    await this.#session.start();
+  }
+
+  /**
+   * Moves the thread onto another session, such as another harness's, keeping
+   * its messages, queue, handlers, and always-allow choices. The new session
+   * starts and passes `prepare` while the current one stays live; only then
+   * does it take over, and the old one closes. Conversation items it sends
+   * while starting, such as a resumed thread's history, are dropped, since the
+   * thread has already shown them; its notices are kept. Messages sent
+   * meanwhile wait for whichever session ends up running the thread.
+   *
+   * `handoff` goes in front of the next message the new session is sent, so its
+   * harness learns what happened before it. The thread must not be working.
+   */
+  async replaceSession(
+    next: HarnessSession,
+    options: { handoff?: string | null; prepare?: () => Promise<void> } = {},
+  ): Promise<void> {
+    if (this.#closed) throw new Error("The thread has ended");
+    if (this.#incoming) throw new Error("The thread is already moving to another session");
+    if (this.#busy || this.#requests.size > 0)
+      throw new Error("The thread is working; wait for the turn to end or stop it first");
+    const incoming = { session: next, events: [] as HarnessEvent[] };
+    this.#incoming = incoming;
+    this.#emitQueue();
+    const pumping = this.#pump(next);
+    try {
+      await next.start();
+      await options.prepare?.();
+      // Events a session queued while starting arrive as microtasks; once they are in,
+      // a resumed thread's history cannot slip through after the session takes over.
+      await new Promise((resolve) => setImmediate(resolve));
+      // Closed meanwhile, such as by the user or because the old session died.
+      if (this.#closed) throw new Error("The thread has ended");
+    } catch (error) {
+      this.#incoming = null;
+      await next.close().catch(() => {});
+      await pumping;
+      if (!this.#busy) this.#drain();
+      this.#emitQueue();
+      throw error;
+    }
+    const previous = this.#session;
+    const previousPump = this.#pumping;
+    this.#session = next;
+    this.#pumping = pumping;
+    this.#incoming = null;
+    this.#usage = null;
+    this.#handoff = options.handoff ?? null;
+    this.#emit({ type: "session.replaced", previous: { ...previous.info } });
+    for (const event of incoming.events) this.#apply(event);
+    if (!this.#busy) this.#drain();
+    this.#emitQueue();
+    await previous.close().catch(() => {});
+    await previousPump;
   }
 
   /** Lets code rewrite or drop each message before it is sent or queued. */
@@ -292,7 +374,7 @@ export class Thread {
 
   /** Queues a message that already passed the input handlers. */
   #enqueue(entry: Prepared): void {
-    if (!this.#busy) {
+    if (!this.#busy && this.#incoming === null) {
       this.#dispatch(entry);
       return;
     }
@@ -333,7 +415,14 @@ export class Thread {
   #dispatch(entry: Prepared): void {
     // Busy is set before the harness confirms so a second send queues instead of racing.
     this.#busy = true;
-    this.session.startTurn(entry.input).catch((error: unknown) => {
+    // A harness command must start the text to run, so the handoff waits for the next message.
+    const handoff = entry.input.text.startsWith("/") ? null : this.#handoff;
+    if (handoff) this.#handoff = null;
+    const input = handoff
+      ? { ...entry.input, text: `${handoff}\n\n${entry.input.text}` }
+      : entry.input;
+    this.session.startTurn(input).catch((error: unknown) => {
+      if (handoff) this.#handoff ??= handoff;
       this.#busy = false;
       this.#emit({ type: "error", message: errorMessage(error), unsent: entry.message });
       this.#drain();
@@ -347,12 +436,19 @@ export class Thread {
     this.#dispatch(next);
   }
 
-  async #pump(): Promise<void> {
+  async #pump(session: HarnessSession): Promise<void> {
     try {
-      for await (const event of this.session.events) this.#apply(event);
+      for await (const event of session.events) this.#receive(session, event);
     } catch (error) {
-      this.#apply({ type: "session.closed", error: errorMessage(error) });
+      this.#receive(session, { type: "session.closed", error: errorMessage(error) });
     }
+  }
+
+  /** Applies the running session's events, holds a starting one's, and drops a replaced one's. */
+  #receive(session: HarnessSession, event: HarnessEvent): void {
+    if (session === this.#session) this.#apply(event);
+    else if (session === this.#incoming?.session && keptWhileStarting(event))
+      this.#incoming.events.push(event);
   }
 
   #apply(event: HarnessEvent): void {
@@ -415,6 +511,26 @@ export class Thread {
 
   #emit(event: ThreadEvent): void {
     for (const listener of this.#listeners) listener(event);
+  }
+}
+
+/**
+ * Whether an event a session sends before it takes a thread over is kept for
+ * then: notices and state, but not conversation, which is a resumed thread's
+ * history that the thread already shows.
+ */
+function keptWhileStarting(event: HarnessEvent): boolean {
+  switch (event.type) {
+    case "item.started":
+    case "item.updated":
+    case "item.completed":
+      return event.item.kind === "notice";
+    case "item.delta":
+    case "turn.started":
+    case "turn.ended":
+      return false;
+    default:
+      return true;
   }
 }
 

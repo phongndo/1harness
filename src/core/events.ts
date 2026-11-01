@@ -387,4 +387,9 @@ export interface HarnessSession {
    * which, or null when it cannot tell.
    */
   mcpCallId?(meta: Record<string, unknown>, tool: string): string | null;
+  /**
+   * Work the harness keeps doing after a turn ends, such as background agents,
+   * which closing the session would stop: one description per task.
+   */
+  backgroundTasks?(): string[];
 }
