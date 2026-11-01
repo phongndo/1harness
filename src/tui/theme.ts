@@ -62,13 +62,29 @@ export function isLightTheme(): boolean {
   return light;
 }
 
+/**
+ * Wraps text in an opener and its closer. A style nested inside that ends
+ * with the same closer would end this one too, so this one opens again after
+ * it: `## Use **foo** now` stays bold after `foo`.
+ */
+function wrapStyle(open: string, close: string, text: string): string {
+  return `${open}${text.replaceAll(close, close + open)}${close}`;
+}
+
+/** A line of a diff's changes in its colors, and any other line in `other`. */
+export function diffLine(line: string, other: (text: string) => string): string {
+  if (line.startsWith("+")) return style.added(line);
+  if (line.startsWith("-")) return style.removed(line);
+  return other(line);
+}
+
 function color(role: keyof Palette): (text: string) => string {
   return (text) =>
-    colorEnabled && text !== "" ? `\x1b[38;5;${palette[role]}m${text}\x1b[39m` : text;
+    colorEnabled && text !== "" ? wrapStyle(`\x1b[38;5;${palette[role]}m`, "\x1b[39m", text) : text;
 }
 
 function attribute(open: number, close: number): (text: string) => string {
-  return (text) => (text !== "" ? `\x1b[${open}m${text}\x1b[${close}m` : text);
+  return (text) => (text !== "" ? wrapStyle(`\x1b[${open}m`, `\x1b[${close}m`, text) : text);
 }
 
 export const style = {

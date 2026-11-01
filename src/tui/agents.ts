@@ -3,6 +3,7 @@ import type { MessageOrigin } from "../core/thread.ts";
 import type { ThreadState } from "../protocol.ts";
 import { inline } from "./markdown.ts";
 import { style } from "./theme.ts";
+import { plainText } from "./text.ts";
 
 // How the terminal names and colors what threads are doing, so agent rows and
 // the thread picker use one word per state.
@@ -137,7 +138,7 @@ export function harnessLabel(thread: ThreadState): string {
 export function plainLine(text: string): string {
   const line = text.split("\n").find((candidate) => candidate.trim() !== "") ?? "";
   const body = line.replace(/^\s*(?:#+\s+|[-*+]\s+|>\s*|\d+\.\s+)/, "");
-  return stripVTControlCharacters(inline(body)).trim();
+  return plainText(stripVTControlCharacters(inline(body)), true);
 }
 
 /**

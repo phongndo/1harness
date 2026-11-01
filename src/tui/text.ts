@@ -16,18 +16,119 @@ export function charWidth(code: number): number {
     (code >= 0xff00 && code <= 0xff60) ||
     (code >= 0xffe0 && code <= 0xffe6) ||
     (code >= 0x1f300 && code <= 0x1faff) ||
-    (code >= 0x20000 && code <= 0x3fffd)
+    (code >= 0x20000 && code <= 0x3fffd) ||
+    WIDE_SYMBOLS.has(code) ||
+    (code >= 0x1f000 && code <= 0x1f2ff && wideEnclosed(code))
   ) {
     return 2;
   }
   return 1;
 }
 
+/**
+ * Symbols below U+3000 that terminals draw two columns wide, as Unicode's
+ * East Asian Width gives them: the ones with an emoji look by default, such
+ * as ✅ ❌ ⚡ ✨ ⭐ ⏳.
+ */
+const WIDE_SYMBOLS = new Set<number>(
+  [
+    [0x231a, 0x231b],
+    [0x2329, 0x232a],
+    [0x23e9, 0x23ec],
+    [0x23f0, 0x23f0],
+    [0x23f3, 0x23f3],
+    [0x25fd, 0x25fe],
+    [0x2614, 0x2615],
+    [0x2648, 0x2653],
+    [0x267f, 0x267f],
+    [0x2693, 0x2693],
+    [0x26a1, 0x26a1],
+    [0x26aa, 0x26ab],
+    [0x26bd, 0x26be],
+    [0x26c4, 0x26c5],
+    [0x26ce, 0x26ce],
+    [0x26d4, 0x26d4],
+    [0x26ea, 0x26ea],
+    [0x26f2, 0x26f3],
+    [0x26f5, 0x26f5],
+    [0x26fa, 0x26fa],
+    [0x26fd, 0x26fd],
+    [0x2705, 0x2705],
+    [0x270a, 0x270b],
+    [0x2728, 0x2728],
+    [0x274c, 0x274c],
+    [0x274e, 0x274e],
+    [0x2753, 0x2755],
+    [0x2757, 0x2757],
+    [0x2795, 0x2797],
+    [0x27b0, 0x27b0],
+    [0x27bf, 0x27bf],
+    [0x2b1b, 0x2b1c],
+    [0x2b50, 0x2b50],
+    [0x2b55, 0x2b55],
+  ].flatMap(([from = 0, to = 0]) => Array.from({ length: to - from + 1 }, (_, at) => from + at)),
+);
+
+/** The wide ones among the mahjong, card, and enclosed symbols before U+1F300. */
+function wideEnclosed(code: number): boolean {
+  return (
+    code === 0x1f004 ||
+    code === 0x1f0cf ||
+    code === 0x1f18e ||
+    (code >= 0x1f191 && code <= 0x1f19a) ||
+    code >= 0x1f200
+  );
+}
+
+/**
+ * Text from outside, such as a command's output or a tool's input, as plain
+ * printable text: escape sequences and control characters would move the
+ * cursor, so they go, and tabs become spaces. `oneLine` joins the lines;
+ * `overwrite` reads `\r` as a terminal does, keeping what a rewritten line
+ * ends as, for a command's output.
+ */
+export function plainText(text: string, oneLine = false, overwrite = false): string {
+  const unified = stripVTControlCharacters(text).replace(/\r\n/g, "\n");
+  // Outside a terminal's output, a lone \r is a line break, as old Mac text has it.
+  const lines = (overwrite ? unified : unified.replace(/\r/g, "\n")).split("\n").map((line) => {
+    const shown = line.includes("\r")
+      ? line.slice(line.lastIndexOf("\r", line.length - 2) + 1)
+      : line;
+    return [...shown.replace(/\t/g, "    ")]
+      .filter((char) => {
+        const code = char.charCodeAt(0);
+        return code >= 0x20 && (code < 0x7f || code >= 0xa0);
+      })
+      .join("");
+  });
+  return oneLine
+    ? lines
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .join(" ")
+    : lines.join("\n");
+}
+
 /** Terminal columns a string occupies, ignoring escape sequences. */
 export function visibleWidth(text: string): number {
   let width = 0;
-  for (const char of stripVTControlCharacters(text)) width += charWidth(char.codePointAt(0) ?? 0);
+  const plain = stripVTControlCharacters(text);
+  for (let index = 0; index < plain.length;) {
+    const code = plain.codePointAt(index) ?? 0;
+    const length = code > 0xffff ? 2 : 1;
+    width += widthBefore(code, plain.codePointAt(index + length));
+    index += length;
+  }
   return width;
+}
+
+/**
+ * A character's width given the one after it: a symbol followed by U+FE0F,
+ * which asks for its emoji look, is drawn two columns wide, as ⚠️ is.
+ */
+function widthBefore(code: number, next: number | undefined): number {
+  const width = charWidth(code);
+  return next === 0xfe0f && width === 1 && code >= 0x2000 ? 2 : width;
 }
 
 /** Length of the CSI sequence at `index`, or 0. Styled text here only contains SGR. */
@@ -57,15 +158,48 @@ function scan(
     }
     const code = text.codePointAt(index) ?? 0;
     const char = String.fromCodePoint(code);
-    if (onChar(char, charWidth(code)) === false) return;
+    if (onChar(char, widthBefore(code, text.codePointAt(index + char.length))) === false) return;
     index += char.length;
   }
 }
 
-/** Tracks the SGR state of styled text so it can be reopened on another row. */
+/**
+ * The styles in effect after an SGR sequence, as the shortest sequence that
+ * sets them again: one entry per kind, so a long styled line does not carry
+ * every code it ever set onto each row.
+ */
 function trackStyle(active: string, sequence: string): string {
   if (!sequence.endsWith("m")) return active;
-  return sequence === RESET || sequence === "\x1b[m" ? "" : active + sequence;
+  const state = new Map<string, string>();
+  // What is in effect is a run of SGR sequences, each `ESC [ params m`.
+  for (const part of active.split("\x1b[").slice(1)) applySgr(state, part.slice(0, -1));
+  applySgr(state, sequence.slice(2, -1));
+  return [...state.values()].map((codes) => `\x1b[${codes}m`).join("");
+}
+
+/** Applies one SGR's parameters to the styles in effect, by kind. */
+function applySgr(state: Map<string, string>, params: string): void {
+  const codes = params === "" ? ["0"] : params.split(";");
+  for (let index = 0; index < codes.length; index++) {
+    const code = Number(codes[index]);
+    if (code === 0) state.clear();
+    else if (code === 38 || code === 48) {
+      // 38;5;n and 38;2;r;g;b set a color; the rest of the sequence is its value.
+      const length = codes[index + 1] === "2" ? 5 : 3;
+      state.set(code === 38 ? "fg" : "bg", codes.slice(index, index + length).join(";"));
+      index += length - 1;
+    } else if (code === 39) state.delete("fg");
+    else if (code === 49) state.delete("bg");
+    else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97))
+      state.set("fg", String(code));
+    else if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107))
+      state.set("bg", String(code));
+    else if (code === 22) {
+      state.delete("1");
+      state.delete("2");
+    } else if (code >= 23 && code <= 29) state.delete(String(code - 20));
+    else if (code >= 1 && code <= 9) state.set(String(code), String(code));
+  }
 }
 
 /** Cuts styled text to at most `width` columns, marking the cut with an ellipsis. */
@@ -112,7 +246,8 @@ export function spread(left: string, right: string, width: number): string {
 export function wrap(line: string, width: number, indent = "", hard = false): string[] {
   if (visibleWidth(line) <= width) return [line];
   const indentWidth = visibleWidth(indent);
-  if (indentWidth >= width) indent = "";
+  // An indent leaves room for a wide character after it.
+  if (indentWidth >= width - 1) indent = "";
   const lead = indent === "" ? 0 : indentWidth;
   const limit = Math.max(1, width);
   const rows: string[] = [];
@@ -142,14 +277,17 @@ export function wrap(line: string, width: number, indent = "", hard = false): st
           newRow();
           return;
         }
-        if (breakAt && !hard) {
+        // A word carried to the next row must fit there, past its indent; one that
+        // would not is broken here instead, so no row runs wider than `width`.
+        if (breakAt && !hard && lead + rowWidth - breakAt.width + size <= limit) {
           const rest = row.slice(breakAt.index);
           close(row.slice(0, breakAt.index).trimEnd(), breakAt.active);
           row = indent + breakAt.active + rest;
           rowWidth = lead + rowWidth - breakAt.width;
           breakAt = null;
         }
-        if (rowWidth + size > limit && rowWidth > lead) newRow();
+        // A row with something on it moves on; the first row has no indent to count.
+        if (rowWidth + size > limit && rowWidth > (rows.length === 0 ? 0 : lead)) newRow();
       }
       row += char;
       rowWidth += size;
@@ -158,4 +296,18 @@ export function wrap(line: string, width: number, indent = "", hard = false): st
   );
   close(row, active);
   return rows;
+}
+
+/** Lines that head a diff: which files, and how; only at the top, before its first change. */
+const DIFF_HEADER =
+  /^(diff --git |index [\da-f]|--- |\+\+\+ |new file mode |deleted file mode |similarity index |rename (from|to) |old mode |new mode )/;
+
+/**
+ * A diff's lines past its header, the changes themselves: a removed line
+ * that reads `--- …` further down is content, not a header.
+ */
+export function diffBody(lines: readonly string[]): readonly string[] {
+  let start = 0;
+  while (start < lines.length && DIFF_HEADER.test(lines[start] ?? "")) start++;
+  return lines.slice(start);
 }

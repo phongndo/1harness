@@ -1,4 +1,4 @@
-import { visibleWidth } from "./text.ts";
+import { truncate, visibleWidth } from "./text.ts";
 
 export interface CursorPosition {
   row: number;
@@ -66,9 +66,11 @@ export class Screen {
     for (let row = 0; row < count; row++) {
       const line = lines[row] ?? "";
       if (line === this.#previous[row]) continue;
-      frame += `\x1b[${row + 1};1H${line}\x1b[0m`;
+      // A row too wide would write over its own last cell, autowrap being off, so it is cut.
+      const width = visibleWidth(line);
+      frame += `\x1b[${row + 1};1H${width > columns ? truncate(line, columns) : line}\x1b[0m`;
       // Erasing after a full-width row would clear its last cell.
-      if (visibleWidth(line) < columns) frame += "\x1b[K";
+      if (width < columns) frame += "\x1b[K";
     }
     const moved = cursor?.row !== this.#cursor?.row || cursor?.column !== this.#cursor?.column;
     if (frame === "" && !moved) return;

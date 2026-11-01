@@ -1,5 +1,5 @@
 import type { Report } from "../commands/registry.ts";
-import type { Item } from "../core/events.ts";
+import type { HarnessRequest, Item } from "../core/events.ts";
 import type { Message } from "../core/thread.ts";
 import { stripHandoff } from "../host/handoff.ts";
 import type { LogEntry, TurnTokens } from "../protocol.ts";
@@ -95,6 +95,12 @@ export class ThreadView {
   #turnStart = 0;
   /** The turn's reasoning so far, by item, for its latest heading. */
   #reasoning = new Map<string, string>();
+  /** Tool groups with calls an open approval is for. */
+  #waiting = new Set<Extract<Block, { kind: "tools" }>>();
+  /** Log entries applied, which the terminal's own lines are placed among. */
+  #applied = 0;
+  /** The terminal's own lines, and how many entries had been applied when each came. */
+  #locals: { at: number; block: Block }[] = [];
 
   constructor(id: string) {
     this.id = id;
@@ -105,6 +111,8 @@ export class ThreadView {
    * shows what showing it live did.
    */
   apply(entry: LogEntry, context: ViewContext): void {
+    // Streamed chunks are not kept for building a view again, so they are not counted.
+    if (entry.type !== "delta") this.#applied++;
     switch (entry.type) {
       case "turn.started":
         this.startTurn(entry.at);
@@ -129,7 +137,118 @@ export class ThreadView {
         if (entry.error)
           this.notice("error", `Session ended: ${entry.error}\nYour next message starts it again.`);
         break;
+      case "decision":
+        this.transcript.add({
+          kind: "decision",
+          request: entry.kind,
+          title: entry.title,
+          answer: entry.answer,
+          outcome: entry.outcome,
+        });
+        break;
     }
+  }
+
+  /**
+   * Marks the tool calls the thread's open approvals are for, which wait for
+   * the user rather than run: a command by its text, an edit by its files, a
+   * tool by its name.
+   */
+  awaiting(requests: readonly HarnessRequest[]): void {
+    const approvals = requests.filter((request) => request.kind === "approval");
+    // Most updates come with nothing asked and nothing marked, and change nothing.
+    if (approvals.length === 0 && this.#waiting.size === 0) return;
+    const waiting = new Set<string>();
+    for (const request of approvals) {
+      const { action } = request;
+      for (const [id, block] of this.blocks) {
+        if (block.kind !== "tools" || block.settled) continue;
+        const item = block.items.find((candidate) => candidate.id === id);
+        if (item?.status !== "running") continue;
+        const matches =
+          (action.type === "command" &&
+            item.kind === "command" &&
+            item.command.trim() === action.command.trim()) ||
+          (action.type === "file_change" &&
+            item.kind === "file_change" &&
+            item.changes.some((change) => action.paths.includes(change.path))) ||
+          (action.type === "tool" &&
+            ((item.kind === "tool_call" &&
+              (item.tool === action.tool || action.tool.endsWith(`__${item.tool}`)) &&
+              (action.server === null || item.server === action.server)) ||
+              (item.kind === "web_search" && action.tool === "WebSearch") ||
+              (item.kind === "agent" && (action.tool === "Agent" || action.tool === "Task"))));
+        if (matches) waiting.add(id);
+      }
+    }
+    const blocks = new Set(this.#waiting);
+    for (const id of waiting) {
+      const block = this.blocks.get(id);
+      if (block?.kind === "tools") blocks.add(block);
+    }
+    this.#waiting.clear();
+    for (const block of blocks) {
+      const before = block.awaiting ?? [];
+      const now = block.items.filter((item) => waiting.has(item.id)).map((item) => item.id);
+      if (now.length > 0) this.#waiting.add(block);
+      if (before.length === now.length && before.every((id) => now.includes(id))) continue;
+      block.awaiting = now;
+      this.transcript.touch(block);
+    }
+  }
+
+  /** Says, at the top, that earlier turns are yet to load. */
+  earlier(text: string): void {
+    this.transcript.add({ kind: "notice", level: "info", text });
+  }
+
+  /**
+   * Shows a line of the terminal's own, such as a notice or a command's
+   * report, and keeps where it goes among the log's entries, for `rebuild`.
+   */
+  local<T extends Block>(block: T): T {
+    this.transcript.add(block);
+    // A banner heads the view, whatever comes before the entries it was shown with.
+    this.#locals.push({ at: block.kind === "banner" ? -1 : this.#applied, block });
+    return block;
+  }
+
+  /** A notice of the terminal's own. */
+  say(level: "info" | "warning" | "error", text: string): Extract<Block, { kind: "notice" }> {
+    return this.local({ kind: "notice", level, text });
+  }
+
+  /**
+   * Shows `entries` from the start, as one log, with the terminal's own lines
+   * of `from` back where they were among them; `shift` entries come before the
+   * ones `from` showed. `earlier` says, under any banner, that more is above.
+   * For a view built again with earlier entries loaded.
+   */
+  rebuild(
+    from: ThreadView,
+    entries: readonly LogEntry[],
+    shift: number,
+    context: ViewContext,
+    earlier: string | null,
+  ): void {
+    const locals = from.#locals.map((local) => ({
+      at: local.at === -1 ? -1 : local.at + shift,
+      block: local.block,
+    }));
+    let next = 0;
+    const place = (upTo: number) => {
+      for (let local = locals[next]; local && local.at <= upTo; local = locals[++next]) {
+        this.transcript.add(local.block);
+        this.#locals.push(local);
+      }
+    };
+    place(-1);
+    if (earlier) this.earlier(earlier);
+    for (const [index, entry] of entries.entries()) {
+      place(index);
+      this.apply(entry, context);
+    }
+    place(Number.POSITIVE_INFINITY);
   }
 
   notice(level: "info" | "warning" | "error", text: string): void {
@@ -137,7 +256,7 @@ export class ThreadView {
   }
 
   report(report: Report): void {
-    this.transcript.add({ kind: "report", ...report });
+    this.local({ kind: "report", ...report });
     this.scroll = 0;
   }
 
@@ -194,14 +313,22 @@ export class ThreadView {
     this.#reasoning.clear();
     const turn = this.turn;
     this.turn = null;
-    if (!turn || status === null) return;
-    // Only commands outlive their turn, so other calls still running were cut off.
-    for (const block of this.transcript.since(this.#turnStart)) {
+    if (status === null) return;
+    // Only commands outlive their turn, so other calls still running were cut off,
+    // even in a group whose command goes on. A turn begun before what the view
+    // loaded settles from the top.
+    for (const block of this.transcript.since(turn ? this.#turnStart : 0)) {
       if (block.kind !== "tools" || block.settled) continue;
-      if (block.items.some((item) => item.kind === "command" && item.status === "running"))
-        continue;
-      block.settled = true;
+      if (block.items.some((item) => item.kind === "command" && item.status === "running")) {
+        block.cut = block.items
+          .filter((item) => item.kind !== "command" && item.status === "running")
+          .map((item) => item.id);
+      } else block.settled = true;
       this.transcript.touch(block);
+    }
+    if (!turn) {
+      if (status === "failed" && error) this.notice("error", error);
+      return;
     }
     // The log's own counts, so a replayed turn reads as it did live.
     const seconds = Math.round(((ended?.at ?? Date.now()) - turn.startedAt) / 1000);
@@ -315,7 +442,11 @@ export class ThreadView {
     const block =
       last?.kind === "tools" && !last.settled
         ? last
-        : this.transcript.add({ kind: "tools", items: [], settled: false });
+        : this.transcript.add<Extract<Block, { kind: "tools" }>>({
+            kind: "tools",
+            items: [],
+            settled: false,
+          });
     block.items.push(item);
     this.blocks.set(item.id, block);
     this.transcript.touch(block);

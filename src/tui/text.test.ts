@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { spread, truncate, visibleWidth, wrap } from "./text.ts";
+import { plainText, spread, truncate, visibleWidth, wrap } from "./text.ts";
 
 const BOLD = "\x1b[1m";
 const RESET = "\x1b[0m";
@@ -38,6 +38,20 @@ describe("wrap", () => {
   it("keeps wide characters whole", () => {
     assert.deepEqual(wrap("日本語", 5), ["日本", "語"]);
   });
+
+  it("never makes a row wider than asked, even when a hanging indent is wider than the lead", () => {
+    // A bullet or detail row whose next rows indent further than its first text.
+    const lines = [
+      "  /tmp/claude-1000/-home-dp-code-1harness/58bb1dde/scratchpad/live/polish/plan-demo.txt",
+      `  • ${BOLD}see https://example.com/a/very/long/path/that/never/has/a/space/in/it${RESET} ok`,
+      "a b c 日本語の長い単語がここにありますそしてまだ続きます end",
+    ];
+    for (const line of lines)
+      for (const indent of ["", "  ", "    ", "      "])
+        for (let width = 8; width <= 90; width++)
+          for (const row of wrap(line, width, indent))
+            assert.ok(visibleWidth(row) <= width, `${width} ${JSON.stringify(indent)}: ${row}`);
+  });
 });
 
 describe("truncate and spread", () => {
@@ -50,5 +64,21 @@ describe("truncate and spread", () => {
     assert.equal(spread("left", "tag", 12), "left     tag");
     assert.equal(spread("left side", "tag", 8), "le…  tag");
     assert.equal(spread("left side", "tag", 4), "lef…");
+  });
+});
+
+describe("plainText and wide symbols", () => {
+  it("keeps only what prints, as a terminal would show it", () => {
+    assert.equal(plainText("a\tb\r\nc\x1b[31mred\x1b[0m"), "a    b\ncred");
+    // A command's output overwrites with \r, as a terminal does; prose breaks the line.
+    assert.equal(plainText("Progress: 10\rProgress: 99", false, true), "Progress: 99");
+    assert.equal(plainText("line one\rline two"), "line one\nline two");
+    assert.equal(plainText("Steps:\n1. open\n2. sign in", true), "Steps: 1. open 2. sign in");
+  });
+
+  it("counts emoji that terminals draw wide as two columns", () => {
+    for (const symbol of ["✅", "❌", "⚡", "✨", "⭐", "⏳", "☕"])
+      assert.equal(visibleWidth(symbol), 2);
+    for (const symbol of ["✓", "✗", "●", "◆", "→"]) assert.equal(visibleWidth(symbol), 1);
   });
 });

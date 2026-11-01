@@ -1,5 +1,6 @@
+import { stripVTControlCharacters } from "node:util";
 import { style } from "./theme.ts";
-import { visibleWidth, wrap } from "./text.ts";
+import { plainText, visibleWidth, wrap } from "./text.ts";
 
 const KEYWORDS = new Set(
   (
@@ -67,30 +68,274 @@ function highlightRest(text: string, language: string): string {
   return text.charAt(0) + highlight(text.slice(1), language);
 }
 
+/** Sets text aside behind a placeholder, as `held` keeps it, for `put` to bring back. */
+function holder(): { hold: (text: string) => string; put: (text: string) => string } {
+  const kept: string[] = [];
+  return {
+    hold: (text) => {
+      kept.push(text);
+      return `${kept.length - 1}`;
+    },
+    put: (text) => text.replace(/(\d+)/g, (_, index: string) => kept[Number(index)] ?? ""),
+  };
+}
+
+/** Whether a character is whitespace, or the start or end of the text. */
+function isBlank(char: string | undefined): boolean {
+  return char === undefined || /\s/.test(char);
+}
+
+function punctuation(char: string | undefined): boolean {
+  return char !== undefined && /[\p{P}\p{S}]/u.test(char);
+}
+
+/**
+ * Emphasis marked with `marker`, as CommonMark reads it: an opener comes
+ * before text and a closer after it, a marker by punctuation counts only
+ * beside space or punctuation, and `_` never opens or closes inside a word.
+ */
+function emphasis(text: string, marker: string, paint: (body: string) => string): string {
+  const size = marker.length;
+  const at = (index: number) => text.slice(index, index + size) === marker;
+  // A marker that is part of a longer run of its character is not this marker.
+  const lone = (index: number) =>
+    at(index) && text[index - 1] !== marker[0] && text[index + size] !== marker[0];
+  const left = (index: number) => {
+    const before = text[index - 1];
+    const after = text[index + size];
+    return !isBlank(after) && (!punctuation(after) || isBlank(before) || punctuation(before));
+  };
+  const right = (index: number) => {
+    const before = text[index - 1];
+    const after = text[index + size];
+    return !isBlank(before) && (!punctuation(before) || isBlank(after) || punctuation(after));
+  };
+  const word = marker[0] === "_";
+  const opens = (index: number) =>
+    lone(index) && left(index) && (!word || !right(index) || punctuation(text[index - 1]));
+  const closes = (index: number) =>
+    lone(index) && right(index) && (!word || !left(index) || punctuation(text[index + size]));
+  // Each closer takes the nearest opener before it, as CommonMark's delimiter stack does.
+  const openers: number[] = [];
+  const pairs: [number, number][] = [];
+  for (let index = 0; index < text.length;) {
+    if (openers.length > 0 && closes(index)) {
+      pairs.push([openers.pop() ?? 0, index]);
+      index += size;
+    } else if (opens(index)) {
+      openers.push(index);
+      index += size;
+    } else index++;
+  }
+  // The outermost pairs are painted; what they hold is read again inside them.
+  pairs.sort((a, b) => a[0] - b[0]);
+  let out = "";
+  let from = 0;
+  for (const [open, close] of pairs) {
+    if (open < from) continue;
+    out += text.slice(from, open) + paint(text.slice(open + size, close));
+    from = close + size;
+  }
+  return out + text.slice(from);
+}
+
+/** Bold, italics, and strikethrough, outermost markers first. */
+function emphasize(text: string): string {
+  let out = emphasis(text, "***", (body) => style.bold(style.italic(emphasize(body))));
+  out = emphasis(out, "**", (body) => style.bold(emphasize(body)));
+  out = emphasis(out, "__", (body) => style.bold(emphasize(body)));
+  out = emphasis(out, "*", (body) => style.italic(emphasis(body, "*", style.italic)));
+  out = emphasis(out, "_", (body) => style.italic(body));
+  return emphasis(out, "~~", (body) => style.strike(body));
+}
+
 /** Inline Markdown: code spans, emphasis, and links. */
 export function inline(text: string): string {
-  const parts = text.split(/(`+[^`]+`+)/);
-  return parts
-    .map((part, index) => {
-      if (index % 2 === 1) return style.strong(part.replace(/^`+|`+$/g, ""));
-      return part
-        .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label: string, url: string) =>
-          label === url ? style.link(url) : `${style.link(label)} ${style.muted(`(${url})`)}`,
-        )
-        .replace(/\*\*([^*]+)\*\*|__([^_]+)__/g, (_, a?: string, b?: string) =>
-          style.bold(a ?? b ?? ""),
-        )
-        .replace(/(^|[^\w*])\*([^*\s][^*]*)\*(?!\*)/g, (_, lead: string, body: string) => {
-          return lead + style.italic(body);
-        })
-        .replace(/~~([^~]+)~~/g, (_, body: string) => style.strike(body));
-    })
-    .join("");
+  // Set aside first, so nothing else reads them: code spans, kept as written,
+  // backslashes and all; then escaped characters, literal; then links, whose
+  // URLs are not emphasis. A backtick after a backslash or in a longer run
+  // opens no code span. Placeholders are private-use characters, which the
+  // text itself gives up.
+  const { hold, put } = holder();
+  const held = text
+    .replace(/[]/g, "�")
+    .replace(/(?<![\\`])(`+)(?!`)([\s\S]*?[^`])\1(?!`)/g, (_, _ticks: string, body: string) =>
+      hold(style.strong(body)),
+    )
+    .replace(/\\([\\`*_~[\]()#|<>!-])/g, (_, char: string) => hold(char))
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label: string, url: string) =>
+      hold(
+        label === url
+          ? style.link(put(url))
+          : `${style.link(emphasize(put(label)))} ${style.muted(`(${put(url)})`)}`,
+      ),
+    );
+  return put(emphasize(held));
 }
 
 function rule(width: number, label = ""): string {
   const head = label ? `─ ${label} ` : "";
   return style.faint(head + "─".repeat(Math.max(0, width - visibleWidth(head))));
+}
+
+type Align = "left" | "center" | "right";
+
+/** A table row's cells: split at pipes outside code spans, with `\|` as a literal pipe. */
+function tableCells(line: string): string[] {
+  const body = line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/(?<!\\)\|$/, "");
+  const cells: string[] = [];
+  let cell = "";
+  let code = 0;
+  for (let index = 0; index < body.length; index++) {
+    const char = body[index] ?? "";
+    if (char === "\\" && body[index + 1] === "|") {
+      cell += "|";
+      index++;
+      continue;
+    }
+    if (char === "\\" && body[index + 1] === "`") {
+      cell += "\\`";
+      index++;
+      continue;
+    }
+    if (char === "`") {
+      let run = 1;
+      while (body[index + run] === "`") run++;
+      const ticks = "`".repeat(run);
+      // A code span closes on a run of the same length; a run with none later is literal.
+      if (code === run) code = 0;
+      else if (code === 0 && new RegExp(`(?<!\`)${ticks}(?!\`)`).test(body.slice(index + run)))
+        code = run;
+      cell += ticks;
+      index += run - 1;
+      continue;
+    }
+    if (char === "|" && code === 0) {
+      cells.push(cell.trim());
+      cell = "";
+      continue;
+    }
+    cell += char;
+  }
+  cells.push(cell.trim());
+  return cells;
+}
+
+/** The alignments a table's divider row sets, or null when the row is not a divider. */
+function divider(line: string): Align[] | null {
+  const cells = tableCells(line);
+  if (!cells.every((cell) => /^:?-+:?$/.test(cell))) return null;
+  return cells.map((cell) =>
+    cell.startsWith(":") && cell.endsWith(":") ? "center" : cell.endsWith(":") ? "right" : "left",
+  );
+}
+
+function place(text: string, width: number, align: Align): string {
+  const missing = Math.max(0, width - visibleWidth(text));
+  if (align === "right") return " ".repeat(missing) + text;
+  if (align === "center") {
+    const left = Math.floor(missing / 2);
+    return " ".repeat(left) + text + " ".repeat(missing - left);
+  }
+  return text + " ".repeat(missing);
+}
+
+/**
+ * Column widths that fit `room`: columns narrower than an even share keep
+ * their width, and the rest split what is left in proportion to theirs.
+ */
+function fitColumns(natural: number[], room: number): number[] {
+  const total = natural.reduce((sum, width) => sum + width, 0);
+  if (total <= room) return natural;
+  const widths = [...natural];
+  let open = natural.map((_, index) => index);
+  let left = room;
+  for (;;) {
+    const share = left / open.length;
+    const fits = open.filter((index) => (natural[index] ?? 0) <= share);
+    if (fits.length === 0) break;
+    for (const index of fits) left -= natural[index] ?? 0;
+    open = open.filter((index) => !fits.includes(index));
+    if (open.length === 0) return widths;
+  }
+  // The columns too wide for a share split what is left evenly, a column at least.
+  const share = Math.max(1, Math.floor(left / open.length));
+  let spare = Math.max(0, left - share * open.length);
+  for (const index of open) {
+    widths[index] = share + (spare > 0 ? 1 : 0);
+    spare--;
+  }
+  return widths;
+}
+
+/** A table too wide for columns: each row as `Header: value` lines, a blank line between rows. */
+function tableRecords(rows: string[][], width: number, indent: string): string[] {
+  const [header = [], ...body] = rows;
+  const out: string[] = [];
+  body.forEach((cells, row) => {
+    if (row > 0) out.push("");
+    cells.forEach((cell, column) => {
+      const name = header[column] ?? "";
+      out.push(
+        ...wrap(`${indent}${style.bold(name)}${name ? ": " : ""}${cell}`, width, `${indent}  `),
+      );
+    });
+  });
+  return out;
+}
+
+/**
+ * A Markdown table as aligned columns under a bold header, with cells
+ * wrapped inside their column when the table is wider than the screen.
+ */
+function renderTable(lines: string[], aligns: Align[], width: number, indent: string): string[] {
+  const rows = lines.map((line) => tableCells(line).map((cell) => inline(cell)));
+  const columns = Math.max(aligns.length, ...rows.map((cells) => cells.length));
+  const natural = Array.from({ length: columns }, (_, column) =>
+    Math.max(1, ...rows.map((cells) => visibleWidth(cells[column] ?? ""))),
+  );
+  const gap = style.faint(" │ ");
+  const room = width - visibleWidth(indent) - (columns - 1) * 3;
+  // Too narrow for columns of a few characters, each row goes as lines of header and value.
+  if (room < columns * 3 && rows.length > 1) return tableRecords(rows, width, indent);
+  const widths = fitColumns(natural, room);
+  // So too when a column would split its words, up to ten characters long, mid-word.
+  const longest = Array.from({ length: columns }, (_, column) =>
+    Math.max(
+      0,
+      ...rows.flatMap((cells) =>
+        stripVTControlCharacters(cells[column] ?? "")
+          .split(/\s+/)
+          .map((word) => visibleWidth(word)),
+      ),
+    ),
+  );
+  const splits = widths.some((size, column) => size < Math.min(longest[column] ?? 0, 10));
+  if (splits && rows.length > 1) return tableRecords(rows, width, indent);
+  const out: string[] = [];
+  rows.forEach((cells, row) => {
+    const wrapped = widths.map((columnWidth, column) => {
+      const text = cells[column] ?? "";
+      return wrap(row === 0 ? style.bold(text) : text, columnWidth);
+    });
+    const height = Math.max(...wrapped.map((parts) => parts.length));
+    for (let line = 0; line < height; line++)
+      out.push(
+        indent +
+          wrapped
+            .map((parts, column) =>
+              place(parts[line] ?? "", widths[column] ?? 1, aligns[column] ?? "left"),
+            )
+            .join(gap)
+            .trimEnd(),
+      );
+    if (row === 0)
+      out.push(indent + style.faint(widths.map((size) => "─".repeat(size)).join("─┼─")));
+  });
+  return out;
 }
 
 /**
@@ -108,9 +353,27 @@ export function renderMarkdown(text: string, width: number, indent = "  "): stri
     blank = false;
   };
 
-  for (const raw of text.replace(/\r\n?/g, "\n").split("\n")) {
+  const lines = plainText(text).split("\n");
+  for (let index = 0; index < lines.length; index++) {
+    const raw = lines[index] ?? "";
+    // A table is a header row, a divider row, and the rows under them.
+    const aligns =
+      !fence && /^\s*\|/.test(raw) && /^\s*\|/.test(lines[index + 1] ?? "")
+        ? divider(lines[index + 1] ?? "")
+        : null;
+    if (aligns) {
+      const body = [raw];
+      index += 2;
+      while (index < lines.length && /^\s*\|/.test(lines[index] ?? "")) body.push(lines[index++]!);
+      index--;
+      rows.push(...renderTable(body, aligns, width, indent));
+      blank = false;
+      continue;
+    }
     if (fence) {
-      if (raw.trim().startsWith(fence.marker)) {
+      // A fence closes on a line of only its marker's character, at least as many.
+      const close = /^\s*(`{3,}|~{3,})\s*$/.exec(raw)?.[1];
+      if (close && close[0] === fence.marker[0] && close.length >= fence.marker.length) {
         push(indent + rule(inner), indent);
         fence = null;
         continue;
@@ -118,9 +381,10 @@ export function renderMarkdown(text: string, width: number, indent = "  "): stri
       push(indent + highlight(raw.replace(/\t/g, "  "), fence.lang), indent, true);
       continue;
     }
-    const open = /^\s*(`{3,}|~{3,})\s*([\w+#.-]*)/.exec(raw);
+    // A backtick fence's info string has no backticks, so inline ```code``` opens none.
+    const open = /^\s*(?:(`{3,})\s*([\w+#.-]*)[^`]*|(~{3,})\s*([\w+#.-]*).*)$/.exec(raw);
     if (open) {
-      fence = { marker: open[1] ?? "```", lang: open[2] ?? "" };
+      fence = { marker: open[1] ?? open[3] ?? "```", lang: open[2] ?? open[4] ?? "" };
       push(indent + rule(inner, fence.lang), indent);
       continue;
     }
@@ -129,7 +393,8 @@ export function renderMarkdown(text: string, width: number, indent = "  "): stri
       blank = true;
       continue;
     }
-    const heading = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/.exec(raw);
+    // Closing #s come after a space, so `C#` keeps its own.
+    const heading = /^\s{0,3}#{1,6}\s+(.*?)(?:\s+#+)?\s*$/.exec(raw);
     if (heading) {
       push(indent + style.bold(inline(heading[1] ?? "")), indent);
       continue;
@@ -161,15 +426,6 @@ export function renderMarkdown(text: string, width: number, indent = "  "): stri
     const quote = /^\s*>\s?(.*)$/.exec(raw);
     if (quote) {
       push(`${indent + style.faint("│")} ${style.soft(inline(quote[1] ?? ""))}`, `${indent}  `);
-      continue;
-    }
-    if (/^\s*\|/.test(raw)) {
-      const cells = raw.trim();
-      if (/^\|[\s:|-]+\|$/.test(cells)) {
-        push(indent + style.faint(cells.replace(/[^|]/g, "─").replace(/\|/g, "┼")), indent, true);
-      } else {
-        push(indent + cells.replace(/\|/g, style.faint("│")), indent, true);
-      }
       continue;
     }
     push(indent + inline(raw.trim()), indent);
