@@ -10,6 +10,7 @@ import type { HarnessId, SessionOptions, Usage, UserInput } from "../core/events
 import { FileIndex, mentionedImages } from "../core/files.ts";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join as joinPath, resolve as resolvePath } from "node:path";
 import { configDir, stateDir } from "../core/paths.ts";
@@ -44,6 +45,8 @@ import {
   type RunRecord,
   type SwitchResult,
 } from "./manager.ts";
+import { LivePages } from "./live.ts";
+import { MAX_HTML_BYTES, Media, runsScripts } from "./media.ts";
 import { Orchestrator } from "./orchestrator.ts";
 
 /** How long streamed text waits to be written, so a long reply is not rewritten on every chunk. */
@@ -129,6 +132,36 @@ function idleFor(ms: number): string {
   const hours = Math.round(minutes / 60);
   return hours < 48 ? `${hours}h ago` : `${Math.round(hours / 24)}d ago`;
 }
+
+/** The largest image `files.image` sends as it is, in bytes. */
+const IMAGE_BYTES = 8 * 1024 * 1024;
+/** The largest image file html2term is given to shrink. */
+const IMAGE_SOURCE_BYTES = 64 * 1024 * 1024;
+/** How wide `html_preview` draws a page when the agent names no width, in CSS pixels. */
+const PREVIEW_WIDTH = 800;
+
+/** The page a page tool was given, which must be some HTML and not too much. */
+/**
+ * A page tool's HTML: given whole as `html`, or as `path`, a file where the
+ * thread runs, such as one a script wrote.
+ */
+async function pageInput(input: Record<string, unknown>, cwd: string): Promise<string> {
+  const given = input["html"];
+  const path = input["path"];
+  let html: string;
+  if (typeof given === "string" && given.trim() !== "") html = given;
+  else if (typeof path === "string" && path.trim() !== "") {
+    const file = resolvePath(cwd, path.trim());
+    const size = (await stat(file)).size;
+    if (size > MAX_HTML_BYTES) throw new Error(`${path} is over ${MAX_HTML_BYTES / 1024} KB`);
+    html = await readFile(file, "utf8");
+    if (html.trim() === "") throw new Error(`${path} is empty`);
+  } else throw new Error("html or path is required");
+  if (Buffer.byteLength(html) > MAX_HTML_BYTES)
+    throw new Error(`html is over ${MAX_HTML_BYTES / 1024} KB`);
+  return html;
+}
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 /**
  * Usage saved before a restart: its context and cost still hold, but its
@@ -217,6 +250,12 @@ export class Host {
   /** Extensions by folder and the modules a client named, each set with its commands. */
   #sets = new Map<string, ExtensionSet>();
   #orchestratorTools: ReadonlyMap<string, { tool: ToolDefinition }> = new Map();
+  /** html2term, for images shrunk to their size on screen and pages drawn as pictures. */
+  readonly media = new Media();
+  /** Pages kept running for clients, through html2term's browser worker. */
+  readonly live = new LivePages(() => this.media.binary);
+  /** The tools that show the user pages, which every session gets with the orchestrator's. */
+  readonly pageTools: ToolDefinition[];
   #listeners = new Set<(event: HostEvent) => void>();
   #recent: HostEvent[] = [];
   #seq = 0;
@@ -267,7 +306,10 @@ export class Host {
       ...(store ? { nextId: () => store.nextThreadId() } : {}),
     });
     this.orchestrator = new Orchestrator(this.manager, options.env);
-    this.#orchestratorTools = new Map(this.orchestrator.tools.map((tool) => [tool.name, { tool }]));
+    this.pageTools = this.#pageTools();
+    this.#orchestratorTools = new Map(
+      [...this.orchestrator.tools, ...this.pageTools].map((tool) => [tool.name, { tool }]),
+    );
     this.manager.subscribe((event) => this.#managerEvent(event));
     this.#handlers = this.#methods();
   }
@@ -527,6 +569,8 @@ export class Host {
     }
     if (left && discard) await this.#discardIfEmpty(left, client);
     if (discard) this.#clients.delete(clientId);
+    // Its live pages ran for it alone.
+    this.live.closeOwned(clientId);
   }
 
   /** How many clients are connected. */
@@ -562,6 +606,7 @@ export class Host {
     if (this.#store) await this.manager.parkAll();
     else await this.manager.closeAll();
     this.#stopped = true;
+    this.live.stop();
     for (const { index } of this.#files.values()) index.close();
     this.#files.clear();
     await this.tools.close();
@@ -856,6 +901,103 @@ export class Host {
     this.#emit({ type: "entry", threadId, entry });
     this.#scheduleFlush();
     return noticeId;
+  }
+
+  /**
+   * The tools that put pages in front of the user: `html_render` shows one in
+   * the transcript, where each client draws it at its own width, and
+   * `html_preview` shows the agent what it will look like.
+   */
+  #pageTools(): ToolDefinition[] {
+    const caller = (thread: Thread): ManagedThread => {
+      const managed = this.manager.byThread(thread);
+      if (!managed) throw new Error("the calling thread is not managed by 1harness");
+      return managed;
+    };
+    const self =
+      "a self-contained HTML document: inline CSS, SVG, and scripts, no network requests";
+    const live = this.live.available
+      ? "Its scripts run, in Chromium where 1harness runs: animations and canvases play in the transcript, controls take the user's clicks there, and opened whole it takes their keys too."
+      : "Scripts do not run where 1harness runs, which has no Chromium: the page is drawn as its HTML and CSS stand.";
+    const source = {
+      html: { type: "string", description: "The page" },
+      path: {
+        type: "string",
+        description:
+          "A file holding the page instead, where the thread runs: one a script wrote, say, building a chart from real data, which keeps the numbers exact and out of your context",
+      },
+    };
+    return [
+      {
+        name: "html_render",
+        description: `Shows HTML to the user in their terminal's transcript, drawn at its width and as tall as the content: a chart, a table, a diagram, a mockup, a small report, a small interactive tool. The page is ${self}, given as html or as a path. ${live} The page's own background is not drawn: the terminal shows through it, so it sits in the transcript as text does; group things with faint translucent fills, such as rgba(127,127,127,0.1), rather than solid ones. It should read well on a dark background (prefers-color-scheme) and at 600 to 900 pixels wide. Call html_preview first to check how it looks.`,
+        inputSchema: {
+          type: "object",
+          properties: {
+            ...source,
+            title: { type: "string", description: "A few words naming it, shown under it" },
+          },
+        },
+        execute: async (input, context) => {
+          const managed = caller(context.thread);
+          const html = await pageInput(input, managed.thread.info.cwd);
+          const title =
+            typeof input["title"] === "string" && input["title"].trim()
+              ? input["title"].trim().slice(0, 120)
+              : "Page";
+          const entry = this.#log(managed.id).html(this.#seq + 1, title, html, Date.now());
+          this.#emit({ type: "entry", threadId: managed.id, entry });
+          this.#scheduleFlush();
+          if (!this.media.binary)
+            return "Shown to the user as text: html2term is not installed where 1harness runs, so the page is not drawn.";
+          if (runsScripts(html))
+            return this.live.available
+              ? "Shown live in the transcript: its scripts run, so it moves, and its controls take the user's clicks; opened whole, it takes their keys too."
+              : "Shown to the user as text: its scripts need a Chromium where 1harness runs, and there is none.";
+          return "Shown to the user in the transcript.";
+        },
+      },
+      {
+        name: "html_preview",
+        description: `Draws HTML as a PNG and returns it to you, without showing the user, to check a page before html_render: its first frame, for one with scripts. The page is ${self}, given as html or as a path.`,
+        inputSchema: {
+          type: "object",
+          properties: {
+            ...source,
+            width: {
+              type: "number",
+              description: `Its width in CSS pixels; ${PREVIEW_WIDTH} by default`,
+            },
+            dark: {
+              type: "boolean",
+              description: "Draw it with a dark color scheme; true by default",
+            },
+          },
+        },
+        readOnly: true,
+        execute: async (input, context) => {
+          const html = await pageInput(input, caller(context.thread).thread.info.cwd);
+          const width = typeof input["width"] === "number" ? input["width"] : PREVIEW_WIDTH;
+          const png = await this.media.html(html, {
+            width: Math.min(1600, Math.max(200, width)),
+            scale: 1,
+            dark: input["dark"] !== false,
+          });
+          return {
+            content: [{ type: "image", data: png.toString("base64"), mimeType: "image/png" }],
+          };
+        },
+      },
+    ];
+  }
+
+  /** A live page's answer, or why it has none, as the client is told. */
+  async #page<T>(work: () => Promise<T>): Promise<T> {
+    try {
+      return await work();
+    } catch (error) {
+      throw new RpcError("render_failed", errorMessage(error));
+    }
   }
 
   /** Something every client shows, such as an extension that failed. */
@@ -1266,6 +1408,7 @@ export class Host {
           pending: [...client.pending.values()],
           warnings,
           store: this.storePath,
+          live: this.live.available,
         };
       },
       "client.bye": async (client) => {
@@ -1626,6 +1769,54 @@ export class Host {
       "commands.complete": async (client, { threadId, name, args }) => {
         const command = (await this.#commandSet(client, threadId)).commands.find(name);
         return command?.complete?.(this.#commandContext(client, threadId), args) ?? null;
+      },
+      "files.image": async (_client, { path, width, height }) => {
+        try {
+          const found = await stat(path);
+          if (!found.isFile()) return null;
+          // Shrunk to the size it shows at, from any format html2term reads.
+          if (this.media.binary && found.size <= IMAGE_SOURCE_BYTES) {
+            const fitted = await this.media.image(path, width, height);
+            if (fitted && fitted.length <= IMAGE_BYTES) return { data: fitted.toString("base64") };
+          }
+          // Else only a PNG, as the terminal shows it, and not one so large it stalls the feed.
+          if (found.size > IMAGE_BYTES) return null;
+          const bytes = await readFile(path);
+          const png = bytes.subarray(0, 8).equals(PNG_SIGNATURE);
+          return png ? { data: bytes.toString("base64") } : null;
+        } catch {
+          return null;
+        }
+      },
+      "page.open": async (client, { html, width, height, scale, dark }) =>
+        this.#page(() =>
+          this.live.open(client.id, html, {
+            width,
+            ...(height ? { height } : {}),
+            scale,
+            dark,
+          }),
+        ),
+      "page.frame": async (_client, { id }) => this.#page(() => this.live.frame(id)),
+      "page.input": async (_client, { id, event }) => this.#page(() => this.live.input(id, event)),
+      "page.resize": async (_client, { id, width, height, scale }) =>
+        this.#page(() => this.live.resize(id, width, height, scale)),
+      "page.close": async (_client, { id }) => {
+        await this.live.close(id);
+        return null;
+      },
+      "media.html": async (_client, { html, width, scale, dark, transparent }) => {
+        try {
+          const png = await this.media.html(html, {
+            width,
+            scale,
+            dark,
+            transparent: transparent === true,
+          });
+          return { data: png.toString("base64") };
+        } catch (error) {
+          throw new RpcError("render_failed", errorMessage(error));
+        }
       },
       "files.search": async (_client, { cwd, query, limit }) => {
         let files = this.#files.get(cwd);

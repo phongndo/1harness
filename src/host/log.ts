@@ -152,6 +152,11 @@ export class ThreadLog {
     return this.#add(seq, entry);
   }
 
+  /** Records a page the agent showed the user. */
+  html(seq: number, title: string, html: string, at: number): LogEntry {
+    return this.#add(seq, { type: "html", title, html, at });
+  }
+
   /** Entries added or changed since the last call. */
   flush(): LoggedEntry[] {
     const dirty = [...this.#dirty];

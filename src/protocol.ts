@@ -103,6 +103,8 @@ export type LogEntry =
       outcome: "allowed" | "declined" | "answered" | "dismissed";
       at: number;
     }
+  /** A page the agent showed the user, through its `html_render` tool. */
+  | { type: "html"; title: string; html: string; at: number }
   | { type: "session.ended"; error: string | null };
 
 export interface LoggedEntry {
@@ -216,7 +218,32 @@ export interface HelloResult {
   warnings: string[];
   /** Where the host keeps its records; null when it keeps none. */
   store: string | null;
+  /** Pages can run live here, with their scripts: the host has html2term and a Chromium. */
+  live?: boolean;
 }
+
+/** A frame of a live page: a base64 PNG and its size, in device and CSS pixels. */
+export interface LiveFrame {
+  data: string;
+  width: number;
+  height: number;
+  cssWidth: number;
+  cssHeight: number;
+}
+
+/** What the user does to a live page, in its CSS pixels. */
+export type PageEvent =
+  | { type: "click"; x: number; y: number }
+  | {
+      type: "mouse";
+      action: "mousePressed" | "mouseMoved" | "mouseReleased";
+      x: number;
+      y: number;
+      buttons?: number;
+    }
+  | { type: "wheel"; x: number; y: number; delta_y: number }
+  | { type: "key"; key: string; modifiers?: number }
+  | { type: "text"; text: string };
 
 export interface OpenParams {
   harness: HarnessId;
@@ -352,6 +379,39 @@ export interface Methods {
   "files.search": {
     params: { cwd: string; query: string; limit: number };
     result: { matches: FileMatch[]; loading: boolean };
+  };
+  /**
+   * An image where the host runs, as a base64 PNG no larger than the box in
+   * pixels, for showing it; null when it is none. Without html2term on the
+   * host, only a PNG comes, at its own size.
+   */
+  "files.image": {
+    params: { path: string; width?: number; height?: number };
+    result: { data: string } | null;
+  };
+  /**
+   * A page kept running, scripts and all, for this client: its first frame,
+   * `width` CSS pixels wide and as tall as its content unless `height` says.
+   */
+  "page.open": {
+    params: { html: string; width: number; height?: number; scale: number; dark: boolean };
+    result: LiveFrame & { id: string };
+  };
+  /** A live page's frame now; null when it shows what was last sent. */
+  "page.frame": { params: { id: string }; result: LiveFrame | null };
+  /** Passes what the user did to a live page; its frame after, or null when nothing changed. */
+  "page.input": { params: { id: string; event: PageEvent }; result: LiveFrame | null };
+  /** Gives a live page a viewport of another size, and with `scale` another density; its frame then. */
+  "page.resize": {
+    params: { id: string; width: number; height: number; scale?: number };
+    result: LiveFrame;
+  };
+  "page.close": { params: { id: string }; result: null };
+  /** HTML as a base64 PNG `width` CSS pixels wide and as tall as its content. */
+  "media.html": {
+    /** `transparent` leaves what the page does not paint clear, so it shows over the terminal. */
+    params: { html: string; width: number; scale: number; dark: boolean; transparent?: boolean };
+    result: { data: string };
   };
   "ui.reply": { params: { id: string; result: number | null }; result: null };
 }

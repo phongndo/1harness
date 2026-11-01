@@ -25,7 +25,8 @@ const settings: SessionOptions = {
   resume: null,
 };
 
-const context = { width: 70, cwd: "/work", blink: true, now: 1_000_000 };
+// In detail, so finished turns show their work, not only its summary.
+const context = { width: 70, cwd: "/work", blink: true, now: 1_000_000, details: true };
 const rows = (view: ThreadView) =>
   view.transcript.view(context, 1000, 0).rows.map((row) => stripVTControlCharacters(row));
 const settle = (ms = 20) => new Promise((done) => setTimeout(done, ms));
@@ -369,6 +370,70 @@ describe("Host", () => {
     await host.disconnect("tui");
     await running;
     assert.equal((globalThis as { waited?: unknown }).waited, null);
+  });
+});
+
+describe("Pages the agent shows", () => {
+  it("puts a page in its thread's log, which the view shows as text without pictures", async () => {
+    newHost();
+    const client = await connect("tui");
+    const opened = await client.call("thread.open", { harness: "scripted", settings });
+    const render = host.pageTools.find((tool) => tool.name === "html_render")!;
+    await render.execute(
+      { html: "<h1>Build times</h1><ul><li>lexer 2s</li><li>parser 5s</li></ul>", title: "Builds" },
+      { thread: host.manager.get(opened.id)!.thread },
+    );
+    const page = await client.call("thread.attach", { threadId: opened.id });
+    const entry = page.entries.find((logged) => logged.entry.type === "html")?.entry;
+    assert.deepEqual(entry && { ...entry, at: 0 }, {
+      type: "html",
+      title: "Builds",
+      html: "<h1>Build times</h1><ul><li>lexer 2s</li><li>parser 5s</li></ul>",
+      at: 0,
+    });
+    const view = new ThreadView(opened.id);
+    for (const logged of page.entries) view.apply(logged.entry, { busy: false, agent: () => null });
+    const shown = rows(view).join("\n");
+    assert.match(shown, /▣ Builds · page/);
+    assert.match(shown, /Build times\n\s+• lexer 2s\n\s+• parser 5s/);
+  });
+
+  it("shows a page from a file where the thread runs, such as one a script wrote", async () => {
+    newHost();
+    const client = await connect("tui");
+    const opened = await client.call("thread.open", {
+      harness: "scripted",
+      settings: { ...settings, cwd: root },
+    });
+    const thread = host.manager.get(opened.id)!.thread;
+    writeFileSync(join(root, "chart.html"), "<h1>From a file</h1>");
+    const render = host.pageTools.find((tool) => tool.name === "html_render")!;
+    await render.execute({ path: "chart.html", title: "Chart" }, { thread });
+    const page = await client.call("thread.attach", { threadId: opened.id });
+    const entry = page.entries.find((logged) => logged.entry.type === "html")?.entry;
+    assert.equal(entry?.type === "html" ? entry.html : null, "<h1>From a file</h1>");
+  });
+
+  it("refuses a page with no HTML, and one from a thread it does not manage", async () => {
+    newHost();
+    const client = await connect("tui");
+    const opened = await client.call("thread.open", { harness: "scripted", settings });
+    const render = host.pageTools.find((tool) => tool.name === "html_render")!;
+    const thread = host.manager.get(opened.id)!.thread;
+    await assert.rejects(
+      async () => render.execute({ html: "  " }, { thread }),
+      /html or path is required/,
+    );
+    await assert.rejects(
+      async () => render.execute({ path: "missing.html" }, { thread }),
+      /ENOENT/,
+    );
+    const other = newHost();
+    const stranger = other.pageTools.find((tool) => tool.name === "html_render")!;
+    await assert.rejects(
+      async () => stranger.execute({ html: "<p>hi</p>" }, { thread }),
+      /not managed by 1harness/,
+    );
   });
 });
 
