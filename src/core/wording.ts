@@ -133,3 +133,8 @@ export function formatTokens(count: number): string {
   if (count < 1_000_000) return `${(count / 1000).toFixed(count < 10_000 ? 1 : 0)}k`;
   return `${(count / 1_000_000).toFixed(1)}M`;
 }
+
+/** A short date and time, such as `10/31/26, 7:50 PM`, for lists of threads. */
+export function shortTime(time: number): string {
+  return new Date(time).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+}

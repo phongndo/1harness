@@ -1,4 +1,5 @@
 import { parseArgs } from "node:util";
+import { shortTime } from "../core/wording.ts";
 import type { LogEntry, ThreadListing } from "../protocol.ts";
 import type { HostClient } from "./client.ts";
 
@@ -9,10 +10,6 @@ Lists 1harness's threads, newest first: this folder's, or every folder's with
 --all. Words search titles and what was said. \`show\` prints a thread's
 transcript. 1harness -r <id> reopens one.
 `;
-
-function when(time: number): string {
-  return new Date(time).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
-}
 
 function oneLine(text: string, width: number): string {
   const line = text.replace(/\s+/g, " ").trim();
@@ -130,7 +127,7 @@ export async function threadsCommand(
     for (const thread of threads) {
       const mark = thread.pinned ? "pinned" : thread.unseen ? "new" : "";
       process.stdout.write(
-        `${thread.id.padEnd(width)}  ${thread.status.padEnd(7)}  ${thread.harness.padEnd(8)}  ${when(thread.updatedAt).padEnd(17)}  ${oneLine(thread.title || "untitled", 60)}${mark ? `  [${mark}]` : ""}${values.all && thread.cwd !== process.cwd() ? `  ${thread.cwd}` : ""}\n`,
+        `${thread.id.padEnd(width)}  ${thread.status.padEnd(7)}  ${thread.harness.padEnd(8)}  ${shortTime(thread.updatedAt).padEnd(17)}  ${oneLine(thread.title || "untitled", 60)}${mark ? `  [${mark}]` : ""}${values.all && thread.cwd !== process.cwd() ? `  ${thread.cwd}` : ""}\n`,
       );
     }
     return 0;

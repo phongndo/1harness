@@ -22,11 +22,13 @@ import type {
 } from "../core/events.ts";
 import type { FileMatch } from "../core/files.ts";
 import { errorMessage } from "../core/thread.ts";
+import { shortTime } from "../core/wording.ts";
 import type { ClientEvent, HostClient } from "../client/client.ts";
 import {
   RpcError,
   SESSION_CALLS,
   type CommandInfo,
+  type HelloResult,
   type LogEntry,
   type ThreadState,
   type UiRequest,
@@ -114,11 +116,6 @@ function sameRequest(a: OpenRequest, threadId: string, requestId: string): boole
 
 function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
-}
-
-/** A short date and time, for lists of threads. */
-function day(time: number): string {
-  return new Date(time).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
 }
 
 /** A command's pick entry as a menu row. */
@@ -862,7 +859,7 @@ export class App {
             thread.title || thread.id,
             `${thread.id} · ${thread.harness} · ${thread.status}${thread.cwd === cwd ? "" : ` · ${thread.cwd}`}`,
             {
-              tag: thread.pinned ? "pinned" : thread.unseen ? "new" : day(thread.updatedAt),
+              tag: thread.pinned ? "pinned" : thread.unseen ? "new" : shortTime(thread.updatedAt),
               group: "Recent",
             },
           ),
@@ -872,7 +869,7 @@ export class App {
         thread.id,
         false,
         entry(thread.title || thread.id, `${thread.id} · ${thread.harness}`, {
-          tag: day(thread.updatedAt),
+          tag: shortTime(thread.updatedAt),
           group: "Archived",
         }),
       );
@@ -1235,7 +1232,7 @@ export class App {
       case "harnesses":
         break;
       case "resync":
-        this.#resynced();
+        this.#resynced(event.hello);
         break;
       case "connection":
         this.#notice(
@@ -1294,8 +1291,10 @@ export class App {
   #commandsSeen = -1;
 
   /** The host caught the terminal up after it missed events; every view is built again. */
-  #resynced(): void {
+  #resynced(hello: HelloResult): void {
     const current = this.#currentId;
+    this.#stored = hello.store !== null;
+    this.#registerHostCommands(hello.commands);
     this.#views.clear();
     this.#paged.clear();
     this.#homeTaken = true;
@@ -1308,6 +1307,9 @@ export class App {
     const shown = current ? this.#client.threads.get(current) : undefined;
     if (shown) void this.#load(shown.id);
     else this.#currentId = null;
+    // The host it caught up with may be a new one, which has to be told what is on screen.
+    void this.#client.call("client.show", { threadId: this.#currentId }).catch(() => {});
+    for (const request of hello.pending) this.#ui(request);
     this.#nextRequest();
   }
 

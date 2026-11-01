@@ -15,10 +15,10 @@ import {
   type SavedThread,
   type ThreadEvent,
 } from "../core/thread.ts";
-import { createSession, drivers, findDriver } from "../drivers/index.ts";
+import { createSession, drivers, findDriver, harnessName as label } from "../drivers/index.ts";
 import type { ExtensionHost } from "../extensions/host.ts";
 import type { ToolGrant, ToolServer } from "../extensions/tool-server.ts";
-import { handoffText, stripHandoff } from "./handoff.ts";
+import { combineHandoffs, handoffText, stripHandoff } from "./handoff.ts";
 
 /**
  * `parked` is a thread whose session ended, as an idle one is closed: it keeps
@@ -63,6 +63,11 @@ export interface ManagedThread {
   openedBy: string | null;
   /** The thread it was forked from, whose turns it started with. */
   readonly forkedFrom: string | null;
+  /**
+   * The handoff of the turns it was forked from, which any harness thread
+   * that has seen none of its runs gets first.
+   */
+  readonly forkContext: string | null;
   readonly thread: Thread;
   readonly createdAt: number;
   status: ThreadStatus;
@@ -130,6 +135,7 @@ export interface RestoredThread {
   parentCallId: string | null;
   origin: "user" | "delegated";
   forkedFrom: string | null;
+  forkContext: string | null;
   createdAt: number;
   error: string | null;
   runs: RunRecord[];
@@ -191,11 +197,6 @@ export class ModeError extends Error {
 }
 
 const TITLE_LENGTH = 48;
-
-/** A harness's name as people know it, such as `Claude Code`. */
-function label(harness: HarnessId): string {
-  return findDriver(harness)?.label ?? harness;
-}
 
 /** A one-line title from the start of a message. */
 export function titleFrom(text: string): string {
@@ -317,6 +318,7 @@ export class ThreadManager {
       origin: options.origin ?? "user",
       openedBy: options.openedBy ?? null,
       forkedFrom: options.fork?.from ?? null,
+      forkContext: options.fork?.handoff ?? null,
       thread,
       createdAt: Date.now(),
       status: "starting",
@@ -416,6 +418,7 @@ export class ThreadManager {
         origin: entry.origin,
         openedBy: null,
         forkedFrom: entry.forkedFrom,
+        forkContext: entry.forkContext,
         thread: new Thread(null, entry.thread),
         createdAt: entry.createdAt,
         status: "parked",
@@ -612,13 +615,17 @@ export class ThreadManager {
       { resume: null, seen: 0 },
     ].map((plan) => {
       const unseen = managed.runs.slice(plan.seen);
-      const handoff = handoffText({
-        threadId: id,
-        to: harness,
-        runs: unseen,
-        resumed: plan.resume !== null,
-        label,
-      });
+      const handoff = combineHandoffs(
+        // A harness thread that saw none of a fork's runs never got the turns it was forked from.
+        plan.seen === 0 ? managed.forkContext : null,
+        handoffText({
+          threadId: id,
+          to: harness,
+          runs: unseen,
+          resumed: plan.resume !== null,
+          label,
+        }),
+      );
       return { ...plan, unseen, handoff, asked: { ...settings, resume: plan.resume } };
     });
 

@@ -194,6 +194,8 @@ export interface HelloParams {
 export interface HelloResult {
   version: string;
   protocol: number;
+  /** This run of the host; a client whose events came from another starts over. */
+  instance: string;
   /** Events after this one follow; earlier ones are in this snapshot. */
   seq: number;
   threads: ThreadState[];
@@ -358,6 +360,8 @@ export interface ServerHello {
   minProtocol: number;
   pid: number;
   startedAt: number;
+  /** This run of the server, which `/v1/events?instance=` names to catch up within it. */
+  instance: string;
   /** Started by a client, so it stops once idle. */
   autostarted: boolean;
   store: string | null;

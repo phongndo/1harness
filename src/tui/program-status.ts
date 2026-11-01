@@ -74,9 +74,16 @@ function safe(char: string): boolean {
 
 /** One line of text, safe to report, cut to at most `bytes` of UTF-8. */
 function line(text: string, bytes: number): string {
-  const chars = [...text.replace(/\s+/g, " ").trim()].filter(safe);
-  while (Buffer.byteLength(chars.join("")) > bytes) chars.pop();
-  return chars.join("").trim();
+  let kept = "";
+  let size = 0;
+  for (const char of text.replace(/\s+/g, " ").trim()) {
+    if (!safe(char)) continue;
+    const length = Buffer.byteLength(char);
+    if (size + length > bytes) break;
+    kept += char;
+    size += length;
+  }
+  return kept.trim();
 }
 
 function base64(text: string): string {

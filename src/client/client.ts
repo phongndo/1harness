@@ -28,6 +28,8 @@ export class HostClient {
   #connection: HostConnection;
   #hello: Omit<HelloParams, "clientId">;
   #seq = 0;
+  /** The host run its events come from. */
+  #instance = "";
   #listeners = new Set<(event: ClientEvent) => void>();
   #unlisten: (() => void) | null = null;
   #closed = false;
@@ -49,7 +51,11 @@ export class HostClient {
       clientId: this.id,
     });
     this.#take(hello);
-    this.#unlisten = this.#connection.listen(hello.seq, (event) => this.#event(event));
+    this.#unlisten = this.#connection.listen(
+      hello.seq,
+      (event) => this.#event(event),
+      hello.instance,
+    );
     return hello;
   }
 
@@ -71,6 +77,7 @@ export class HostClient {
 
   #take(hello: HelloResult): void {
     this.#seq = hello.seq;
+    this.#instance = hello.instance;
     this.threads.clear();
     for (const thread of hello.threads) this.threads.set(thread.id, thread);
     this.harnesses = hello.harnesses;
@@ -114,7 +121,11 @@ export class HostClient {
         clientId: this.id,
       });
       this.#take(hello);
-      this.#unlisten = this.#connection.listen(hello.seq, (event) => this.#event(event));
+      this.#unlisten = this.#connection.listen(
+        hello.seq,
+        (event) => this.#event(event),
+        this.#instance,
+      );
       this.#tell({ type: "resync", hello });
     } catch (error) {
       this.#tell({

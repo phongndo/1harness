@@ -228,4 +228,56 @@ describe("HostServer", () => {
     assert.equal(second.threads.get(thread.id)?.openedBy, "first");
     assert.equal(first.threads.get(thread.id)?.openedBy, "first");
   });
+
+  it("tells a client of the host before a restart to start over, though its count went on", async () => {
+    await start();
+    const client = await connect("a");
+    const resyncs: string[] = [];
+    client.on((event) => {
+      if (event.type === "resync") resyncs.push(event.hello.instance);
+    });
+    const first = host.instance;
+    // A new host on the same socket, which numbers its events past where the client got.
+    await server.close();
+    await host.shutdown();
+    host = new Host({
+      version: "test",
+      cwd: root,
+      configDir: join(root, "config"),
+      stateDir: join(root, "state"),
+      idleCloseMs: 0,
+    });
+    for (let index = 0; index < 50; index++)
+      await host.call("other", "client.show", { threadId: null });
+    await host.call("other", "thread.open", { harness: "scripted", settings });
+    server = new HostServer(host, { version: "test", autostarted: false });
+    await server.listen({ path: socket });
+    for (let tries = 0; tries < 100 && resyncs.length === 0; tries++) await settle(20);
+    assert.equal(resyncs.length, 1);
+    assert.notEqual(resyncs[0], first);
+    assert.equal(resyncs[0], host.instance);
+  });
+
+  it("tells a client it counted as gone to say hello again", async () => {
+    socket = join(root, `s${++count}.sock`);
+    host = new Host({
+      version: "test",
+      cwd: root,
+      configDir: join(root, "config"),
+      stateDir: join(root, "state"),
+      idleCloseMs: 0,
+    });
+    server = new HostServer(host, { version: "test", autostarted: false, leaveGraceMs: 20 });
+    await server.listen({ path: socket });
+    await host.call("raw", "client.hello", {
+      clientId: "raw",
+      cwd: root,
+      version: "test",
+      extensions: [],
+    });
+    await lines(`/v1/events?after=${host.seq}`, 30);
+    await settle(60);
+    assert.equal(host.clients, 0);
+    assert.deepEqual(await lines(`/v1/events?after=${host.seq}`, 100), ['{"type":"resync"}']);
+  });
 });

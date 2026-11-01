@@ -105,12 +105,18 @@ export class JsonStorage implements ExtensionStorage {
   #file: string;
   #values: Record<string, unknown>;
 
-  constructor(file: string) {
+  /** `legacy` is where the values were kept before, read when `file` has none yet. */
+  constructor(file: string, legacy?: string) {
     this.#file = file;
-    try {
-      this.#values = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
-    } catch {
-      this.#values = {};
+    this.#values = {};
+    for (const path of [file, legacy]) {
+      if (!path) continue;
+      try {
+        this.#values = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+        break;
+      } catch {
+        // Not there, or not readable: try the next.
+      }
     }
   }
 
@@ -413,7 +419,13 @@ export class ExtensionHost {
     const extension = record.name;
     return {
       name: extension,
-      storage: new JsonStorage(this.#storageFile(record)),
+      storage: new JsonStorage(
+        this.#storageFile(record),
+        // A project's extensions kept their values by name alone before.
+        record.scope === "project"
+          ? join(this.#options.stateDir, "extensions", `${record.name}.json`)
+          : undefined,
+      ),
       registerCommand: (command) => {
         if (!this.#options.commands) return;
         this.#registrations.get(record)?.undo.push(this.#options.commands.register(command));

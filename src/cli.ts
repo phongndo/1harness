@@ -103,7 +103,13 @@ async function print(
   version: string,
   extensions: string[],
 ): Promise<number> {
-  const host = new Host({ version, cwd: session.cwd, extensions, idleCloseMs: 0 });
+  // Modules named on the command line are where the shell is, not the thread's folder.
+  const host = new Host({
+    version,
+    cwd: session.cwd,
+    extensions: extensions.map((path) => resolve(path)),
+    idleCloseMs: 0,
+  });
   const client = "print";
   let rootId: string | null = null;
   let status = 1;
@@ -182,7 +188,7 @@ async function reach(version: string, spec: string | undefined) {
       `${label} runs 1harness ${hello.version}, which this one cannot talk to${local ? "; stop it with `1harness server stop`" : ""}`,
     );
   // A local server that dies is started again, and picks up its threads parked.
-  const revive = autostart ? () => ensureServer({ target, autostart: true }) : null;
+  const revive = autostart ? () => ensureServer({ target, autostart: true, revive: true }) : null;
   return { target, label, local, hello, revive };
 }
 

@@ -34,6 +34,8 @@ export interface ServerOptions {
   autostarted: boolean;
   /** Called on every request and stream change, so idle exit can tell. */
   onActivity?: () => void;
+  /** How long a client may be gone before it counts as having left. */
+  leaveGraceMs?: number;
 }
 
 interface Answer {
@@ -55,6 +57,8 @@ export class HostServer {
   #streams = new Map<string, Set<ServerResponse>>();
   /** Clients whose streams closed, and the timer that counts them gone. */
   #leaving = new Map<string, NodeJS.Timeout>();
+  /** Clients counted as gone, which say hello again if they come back. */
+  #departed = new Set<string>();
   /** Answers by client and request ID. */
   #answers = new Map<string, Map<string, Promise<Answer>>>();
   #startedAt = Date.now();
@@ -134,6 +138,7 @@ export class HostServer {
         minProtocol: 1,
         pid: process.pid,
         startedAt: this.#startedAt,
+        instance: this.#host.instance,
         autostarted: this.#options.autostarted,
         store: this.#host.storePath,
         identity: decision.identity,
@@ -153,7 +158,11 @@ export class HostServer {
       return;
     }
     if (request.method === "GET" && url.pathname === "/v1/events") {
-      this.#events(client, Number(url.searchParams.get("after") ?? "0"), response);
+      const instance = url.searchParams.get("instance");
+      // Events from another run of the host, or a client counted as gone, start over.
+      const stale =
+        (instance !== null && instance !== this.#host.instance) || this.#departed.delete(client);
+      this.#events(client, stale ? null : Number(url.searchParams.get("after") ?? "0"), response);
       return;
     }
     send(response, 404, { error: { code: "not_found", message: `No ${url.pathname}` } });
@@ -199,8 +208,9 @@ export class HostServer {
     }
   }
 
-  #events(client: string, after: number, response: ServerResponse): void {
-    const backlog = this.#host.since(Number.isFinite(after) ? after : 0);
+  /** A stream of events after `after`; null tells the client to say hello again. */
+  #events(client: string, after: number | null, response: ServerResponse): void {
+    const backlog = after === null ? null : this.#host.since(Number.isFinite(after) ? after : 0);
     response.writeHead(200, {
       "Content-Type": "application/x-ndjson",
       "Cache-Control": "no-cache",
@@ -255,9 +265,11 @@ export class HostServer {
       this.#leaving.delete(client);
       if (this.#streams.has(client)) return;
       this.#forget(client);
-      void this.#host.disconnect(client);
+      this.#departed.add(client);
+      // It may be back: the thread it showed stays, though nothing is in it.
+      void this.#host.disconnect(client, { discard: false });
       this.#options.onActivity?.();
-    }, LEAVE_GRACE_MS);
+    }, this.#options.leaveGraceMs ?? LEAVE_GRACE_MS);
     timer.unref();
     this.#leaving.set(client, timer);
   }

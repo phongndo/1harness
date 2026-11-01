@@ -584,4 +584,64 @@ describe("Managing threads over time", () => {
       Date.now = now;
     }
   });
+
+  it("keeps a fork's starting turns through a park before its first message", async () => {
+    newHost([], store());
+    const client = await connect("tui");
+    const source = await threadWith(client, "the plan");
+    const fork = await client.call("thread.fork", { threadId: source.id });
+    assert.ok(await host.manager.park(fork.id));
+    await client.call("thread.send", { threadId: fork.id, text: "continue" });
+    await idle(client, fork.id);
+    const session = host.manager.get(fork.id)!.thread.session as unknown as ScriptedSession;
+    const prompt = session.prompts[0] ?? "";
+    assert.match(prompt, /starts from thread/);
+    assert.match(prompt, /the plan/);
+  });
+
+  it("forks a stored closed thread without reopening it, and forgets tasks with threads", async () => {
+    const file = join(root, `manage-${++count}.db`);
+    newHost([], Store.open(file));
+    let client = await connect("tui");
+    const source = await threadWith(client, "old idea");
+    await client.call("thread.close", { threadId: source.id });
+    await host.shutdown();
+    newHost([], Store.open(file));
+    client = await connect("tui");
+    await client.call("thread.fork", { threadId: source.id });
+    const listed = await client.call("threads.list", { scope: "recent" });
+    assert.equal(listed.find((thread) => thread.id === source.id)?.status, "closed");
+    assert.equal(host.manager.get(source.id), undefined);
+
+    const parent = await threadWith(client, "delegate");
+    const delegate = host.orchestrator.tools.find((tool) => tool.name === "delegate_task")!;
+    await delegate.execute(
+      { task: "help", wait: true },
+      { thread: host.manager.get(parent.id)!.thread },
+    );
+    assert.equal(host.orchestrator.taskRows().length, 1);
+    await client.call("thread.forget", { threadId: parent.id });
+    assert.deepEqual(host.orchestrator.taskRows(), []);
+  });
+
+  it("does not bring back what a closed thread had queued when it is reopened", async () => {
+    const file = join(root, `manage-${++count}.db`);
+    newHost([], Store.open(file));
+    let client = await connect("tui");
+    const thread = await client.call("thread.open", { harness: "scripted", settings });
+    await client.call("thread.send", { threadId: thread.id, text: "wait ASK" });
+    await client.call("thread.send", { threadId: thread.id, text: "queued" });
+    await settle();
+    await client.call("thread.close", { threadId: thread.id });
+    await host.shutdown();
+    newHost([], Store.open(file));
+    client = await connect("tui");
+    const back = await client.call("thread.resume", {
+      id: thread.id,
+      harness: "scripted",
+      settings,
+    });
+    assert.equal(back.held, false);
+    assert.deepEqual(back.queue, []);
+  });
 });

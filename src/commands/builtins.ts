@@ -1,7 +1,7 @@
 import type { McpAction, McpServer, ModelOption, ThreadSummary } from "../core/events.ts";
 import type { ThreadListing } from "../protocol.ts";
 import { errorMessage } from "../core/thread.ts";
-import { MODE_DESCRIPTIONS } from "../core/wording.ts";
+import { MODE_DESCRIPTIONS, shortTime } from "../core/wording.ts";
 import {
   completion,
   liveSession,
@@ -37,11 +37,19 @@ async function listModels(context: CommandContext): Promise<ModelOption[]> {
   return session.listModels ? await session.listModels() : [];
 }
 
+/**
+ * A list a completion offers, kept for the thread; none while the thread is
+ * parked, whose harness is not started just to complete a word.
+ */
+function listed<T>(context: CommandContext, key: string, load: () => Promise<T[]>): T[] {
+  return context.thread?.parked ? [] : context.lookup(key, load);
+}
+
 /** The harness's own earlier threads in this folder, where it lists them. */
 function nativeThreads(context: CommandContext): ThreadSummary[] {
   const session = liveSession(context);
   if (!session?.listThreads) return [];
-  return context.lookup("threads", async () => (await session.listThreads?.()) ?? []);
+  return listed(context, "threads", async () => (await session.listThreads?.()) ?? []);
 }
 
 /** 1harness's threads, this folder's first, newest first, without the one on screen. */
@@ -51,10 +59,6 @@ async function storedThreads(context: CommandContext): Promise<ThreadListing[]> 
   return all
     .filter((thread) => thread.id !== context.thread?.id && thread.parentId === null)
     .toSorted((a, b) => Number(b.cwd === cwd) - Number(a.cwd === cwd) || b.updatedAt - a.updatedAt);
-}
-
-function when(time: number): string {
-  return new Date(time).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
 }
 
 async function mcpServers(context: CommandContext): Promise<McpServer[]> {
@@ -139,7 +143,11 @@ const resume: CommandDefinition = {
     context.forget("stored");
     const stored = await storedThreads(context);
     const session = liveSession(context);
-    const natives = session?.listThreads ? await session.listThreads().catch(() => []) : [];
+    // A parked thread's harness is not started just to list its own threads.
+    const natives =
+      session?.listThreads && !context.thread?.parked
+        ? await session.listThreads().catch(() => [])
+        : [];
     // A harness's thread a 1harness thread already runs is listed once, as 1harness's.
     const known = new Set(stored.map((thread) => thread.native));
     const own = natives.filter((thread) => !known.has(thread.id));
@@ -154,14 +162,14 @@ const resume: CommandDefinition = {
         id: thread.id,
         label: oneLine(thread.title || thread.id).slice(0, 60),
         detail: `${thread.id} · ${thread.harness} · ${thread.status}${thread.cwd === cwd ? "" : ` · ${thread.cwd}`}`,
-        tag: when(thread.updatedAt),
+        tag: shortTime(thread.updatedAt),
         group: "1harness",
       })),
       ...own.map((thread) => ({
         id: thread.id,
         label: oneLine(thread.title).slice(0, 60),
         detail: "",
-        tag: when(thread.updatedAt),
+        tag: shortTime(thread.updatedAt),
         group: harnessTab ?? context.harness,
       })),
     ];
@@ -251,9 +259,9 @@ const model: CommandDefinition = {
   available: (context) => liveSession(context)?.setModel !== undefined,
   complete: (context) => ({
     start: 0,
-    items: context
-      .lookup("models", () => listModels(context))
-      .map((option: ModelOption) => completion(option.id, option.label)),
+    items: listed(context, "models", () => listModels(context)).map((option: ModelOption) =>
+      completion(option.id, option.label),
+    ),
   }),
   async run(context, args) {
     const session = context.session();
@@ -293,7 +301,7 @@ const effort: CommandDefinition = {
   complete(context) {
     const option = currentModel(
       context,
-      context.lookup("models", () => listModels(context)),
+      listed(context, "models", () => listModels(context)),
     );
     return {
       start: 0,
@@ -405,9 +413,9 @@ const mcp: CommandDefinition = {
     if (action !== "show" && !(action in MCP_ACTIONS)) return null;
     return {
       start: space + 1,
-      items: context
-        .lookup("mcp", () => mcpServers(context))
-        .map((server: McpServer) => completion(server.name, describeMcpServer(server))),
+      items: listed(context, "mcp", () => mcpServers(context)).map((server: McpServer) =>
+        completion(server.name, describeMcpServer(server)),
+      ),
     };
   },
   async run(context, args) {

@@ -21,8 +21,9 @@ export interface ThreadRow {
   parentId: string | null;
   parentCallId: string | null;
   origin: "user" | "delegated";
-  /** The thread it was forked from. */
+  /** The thread it was forked from, and the handoff of that thread's turns it started with. */
   forkedFrom: string | null;
+  forkContext: string | null;
   /** `open` has a session, `parked` had one and will again, `closed` was ended. */
   state: "open" | "parked" | "closed";
   info: SessionInfo;
@@ -88,6 +89,7 @@ CREATE TABLE IF NOT EXISTS threads (
   seen_runs INTEGER NOT NULL DEFAULT 0,
   native TEXT,
   forked_from TEXT,
+  fork_context TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -228,6 +230,8 @@ export class Store {
     );
     if (!columns.has("forked_from"))
       this.#db.exec("ALTER TABLE threads ADD COLUMN forked_from TEXT");
+    if (!columns.has("fork_context"))
+      this.#db.exec("ALTER TABLE threads ADD COLUMN fork_context TEXT");
     const version = this.#meta("schema");
     if (version === null) this.#setMeta("schema", String(SCHEMA_VERSION));
     else if (Number(version) > SCHEMA_VERSION)
@@ -304,8 +308,8 @@ export class Store {
     this.#run(
       `INSERT INTO threads (id, title, cwd, harness, parent_id, parent_call_id, origin, state, info,
          capabilities, methods, handoff, seen_without_handoff, generation, error, pinned, archived,
-         seen_runs, native, forked_from, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         seen_runs, native, forked_from, fork_context, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET title = excluded.title, cwd = excluded.cwd,
          harness = excluded.harness, state = excluded.state, info = excluded.info,
          capabilities = excluded.capabilities, methods = excluded.methods,
@@ -333,6 +337,7 @@ export class Store {
       row.seenRuns,
       row.info.threadId,
       row.forkedFrom,
+      row.forkContext,
       row.createdAt,
       row.updatedAt,
     );
@@ -351,6 +356,10 @@ export class Store {
         row["forked_from"] === null || row["forked_from"] === undefined
           ? null
           : String(row["forked_from"]),
+      forkContext:
+        row["fork_context"] === null || row["fork_context"] === undefined
+          ? null
+          : String(row["fork_context"]),
       state: String(row["state"]) as ThreadRow["state"],
       info: json(row["info"]),
       capabilities: json(row["capabilities"]),
@@ -570,18 +579,6 @@ export class Store {
       },
       sent: json<UserInput>(row["sent"]),
     }));
-  }
-
-  /** Every message a thread was sent, for matching the harness's echoes. */
-  messages(threadId: string): Message[] {
-    return this.#all("SELECT * FROM messages WHERE thread_id = ? ORDER BY position", threadId).map(
-      (row) => ({
-        id: String(row["id"]),
-        input: json<UserInput>(row["input"]),
-        origin: json<MessageOrigin>(row["origin"]),
-        ...(Number(row["command"]) === 1 ? { command: true } : {}),
-      }),
-    );
   }
 
   /** The message a client's request ID already sent to a thread. */

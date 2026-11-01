@@ -2,7 +2,7 @@ import { createReadStream, existsSync, readFileSync, statSync, watch } from "nod
 import { parseArgs } from "node:util";
 import { serverHello } from "../client/socket.ts";
 import { serverLog, socketFile } from "../core/paths.ts";
-import { answering, runServer, spawnServer } from "./lifecycle.ts";
+import { answering, markStopped, runServer, spawnServer } from "./lifecycle.ts";
 
 export const SERVER_HELP = `Usage: 1harness server <command>
 
@@ -147,6 +147,8 @@ export async function serverCommand(args: string[], version: string): Promise<nu
         line("No 1harness server is running.");
         return 0;
       }
+      // Clients that lose it leave it stopped, until the next 1harness starts it.
+      markStopped(socket);
       process.kill(hello.pid, "SIGTERM");
       const gone = await waitFor(async () => (await answering(socket)) === null, 20_000);
       line(gone ? `Stopped 1harness (pid ${hello.pid})` : `pid ${hello.pid} is still stopping`);

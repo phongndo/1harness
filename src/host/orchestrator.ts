@@ -380,6 +380,15 @@ export class Orchestrator {
     }));
   }
 
+  /** Forgets the tasks of threads that are gone for good, and the ones they gave. */
+  forgetTasks(threadIds: Iterable<string>): void {
+    const gone = new Set(threadIds);
+    for (const [id, task] of this.#tasks)
+      if (gone.has(id) || gone.has(task.parentId)) this.#tasks.delete(id);
+    for (const key of this.#byRequest.keys())
+      if (gone.has(key.split("\0")[0] ?? "")) this.#byRequest.delete(key);
+  }
+
   /**
    * Brings back tasks a store kept. A task whose outcome its parent never got
    * is not sent now: nothing starts by itself after a restart, so the parent

@@ -114,6 +114,11 @@ export function findDriver(id: HarnessId): DriverDefinition | undefined {
   return registry.get(id);
 }
 
+/** A harness's name as people know it, such as `Claude Code`. */
+export function harnessName(id: HarnessId): string {
+  return registry.get(id)?.label ?? id;
+}
+
 export function createSession(
   harness: HarnessId,
   options: SessionOptions,

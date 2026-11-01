@@ -185,7 +185,7 @@ export class SocketConnection implements HostConnection {
     }
   }
 
-  listen(after: number, listener: (event: ConnectionEvent) => void): () => void {
+  listen(after: number, listener: (event: ConnectionEvent) => void, instance?: string): () => void {
     let cursor = after;
     let stopped = false;
     let failures = 0;
@@ -204,7 +204,7 @@ export class SocketConnection implements HostConnection {
       if (stopped || this.#closed) return;
       const outgoing = open(this.#target, {
         method: "GET",
-        path: `/v1/events?after=${cursor}`,
+        path: `/v1/events?after=${cursor}${instance ? `&instance=${encodeURIComponent(instance)}` : ""}`,
         headers: { [CLIENT_HEADER]: this.#clientId },
       });
       current = outgoing;

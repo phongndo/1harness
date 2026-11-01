@@ -6,8 +6,10 @@ import {
   mkdirSync,
   openSync,
   renameSync,
+  rmSync,
   statSync,
   unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
@@ -135,9 +137,8 @@ export async function runServer(options: RunOptions): Promise<RunningServer | nu
     chmodSync(socket, 0o600);
     ownSocket = true;
   }
-  for (const listener of options.extraListen ?? [])
-    log((await listen(server, listener, options.listeners ?? {})).message);
-
+  // Running again, it is no longer stopped on purpose.
+  rmSync(stoppedMark(socket), { force: true });
   let stopping: Promise<void> | null = null;
   let finished!: () => void;
   const stopped = new Promise<void>((resolve) => {
@@ -170,6 +171,14 @@ export async function runServer(options: RunOptions): Promise<RunningServer | nu
   };
   const onSignal = () => void stop();
   for (const signal of SIGNALS) process.on(signal, onSignal);
+  // A listener that cannot start stops the server, rather than leave it half running.
+  try {
+    for (const listener of options.extraListen ?? [])
+      log((await listen(server, listener, options.listeners ?? {})).message);
+  } catch (error) {
+    await stop();
+    throw error;
+  }
   log(
     `1harness ${options.version} listening on ${inherited ? "the socket systemd passed" : socket} (pid ${process.pid})`,
   );
@@ -181,6 +190,7 @@ export async function runServer(options: RunOptions): Promise<RunningServer | nu
       minProtocol: 1,
       pid: process.pid,
       startedAt: Date.now(),
+      instance: host.instance,
       autostarted: options.autostarted,
       store: host.storePath,
       identity: null,
@@ -237,13 +247,30 @@ export function spawnServer(options: {
   return child.pid ?? 0;
 }
 
+/** The mark `server stop` leaves, so clients do not start the server again behind the user's back. */
+export function stoppedMark(socket: string): string {
+  return `${socket}.stopped`;
+}
+
+/** Marks the server as stopped on purpose. */
+export function markStopped(socket: string): void {
+  try {
+    writeFileSync(stoppedMark(socket), `${Date.now()}\n`, { mode: 0o600 });
+  } catch {
+    // Without the mark, a client may start it again.
+  }
+}
+
 /**
  * Finds the server, starting one in the background when `autostart` allows
- * and nothing answers; resolves once it answers.
+ * and nothing answers; resolves once it answers. `revive` is a client that
+ * lost its server: it starts one only if the last one was not stopped on
+ * purpose. Anything else starting it clears that mark.
  */
 export async function ensureServer(options: {
   target: ServerTarget;
   autostart: boolean;
+  revive?: boolean;
   env?: NodeJS.ProcessEnv;
 }): Promise<ServerHello> {
   const target = options.target;
@@ -252,7 +279,10 @@ export async function ensureServer(options: {
     return await serverHello(target, 5_000);
   } catch (error) {
     if (!options.autostart || !("socket" in target)) throw error;
+    if (options.revive && existsSync(stoppedMark(target.socket)))
+      throw new Error("The server was stopped; run 1harness again to start it", { cause: error });
   }
+  rmSync(stoppedMark(target.socket), { force: true });
   spawnServer({ autostarted: true, ...(options.env ? { env: options.env } : {}) });
   const deadline = Date.now() + START_TIMEOUT_MS;
   while (Date.now() < deadline) {

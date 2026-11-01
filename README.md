@@ -139,7 +139,10 @@ running, an agent keeps going, and reopening the thread shows what it did. A
 server started this way stops about ten seconds after its last terminal quits
 and nothing is working; `1harness server start` starts one that stays.
 `1harness server status`, `logs`, and `stop` look after it. When the terminal
-loses the server, it says so and reconnects, catching up on what it missed.
+loses the server, it says so and reconnects, catching up on what it missed. A
+server that dies is started again by the terminals using it, with its threads
+back where they were; one you stop with `1harness server stop` stays stopped
+until the next `1harness` starts it.
 
 Each thread gets its folder's extensions: the user's, plus the folder's own once
 trusted. Extensions named with `-x` load for the threads that terminal opens.

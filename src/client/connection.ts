@@ -16,8 +16,11 @@ export type ConnectionEvent =
  */
 export interface HostConnection {
   call<M extends Method>(method: M, params: Params<M>): Promise<Result<M>>;
-  /** Live events after `after`, the newest one the client has. */
-  listen(after: number, listener: (event: ConnectionEvent) => void): () => void;
+  /**
+   * Live events after `after`, the newest one the client has, from the host
+   * run `instance` names; a host that is another run says to resync.
+   */
+  listen(after: number, listener: (event: ConnectionEvent) => void, instance?: string): () => void;
   close(): Promise<void>;
 }
 

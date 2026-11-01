@@ -129,6 +129,21 @@ function select(blocks: readonly string[], pinFirst: boolean): Set<number> {
   return kept;
 }
 
+/** What is inside a handoff's tags. */
+function inner(handoff: string): string {
+  const end = handoff.lastIndexOf(`\n${CLOSE}`);
+  return handoff.slice(OPEN.length + 1, end === -1 ? undefined : end);
+}
+
+/**
+ * Two handoffs as one, the first's history before the second's, such as a
+ * forked thread's start and the turns it ran since.
+ */
+export function combineHandoffs(first: string | null, second: string | null): string | null {
+  if (!first || !second) return first ?? second;
+  return `${[OPEN, inner(first), "", inner(second), CLOSE].join("\n")}${TRAILER.trimEnd()}`;
+}
+
 /**
  * What a harness taking a thread over is told before the next message: the
  * turns it has not seen, as history rather than requests. Null when it missed
