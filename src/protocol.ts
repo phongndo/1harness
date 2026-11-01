@@ -257,6 +257,8 @@ export interface Methods {
   "client.hello": { params: HelloParams; result: HelloResult };
   /** The thread the client shows, or null; extensions' UI goes to the client showing a thread. */
   "client.show": { params: { threadId: string | null }; result: null };
+  /** The client is leaving; its threads keep working. */
+  "client.bye": { params: Record<string, never>; result: null };
   "threads.list": {
     params: { scope: "open" | "recent" | "archived"; cwd?: string; query?: string; limit?: number };
     result: ThreadListing[];
@@ -324,6 +326,22 @@ export interface Methods {
 export type Method = keyof Methods;
 export type Params<M extends Method> = Methods[M]["params"];
 export type Result<M extends Method> = Methods[M]["result"];
+
+/** What `GET /v1/hello` says about a server, before any client says hello. */
+export interface ServerHello {
+  name: "1harness";
+  version: string;
+  protocol: number;
+  /** The oldest protocol it still speaks. */
+  minProtocol: number;
+  pid: number;
+  startedAt: number;
+  /** Started by a client, so it stops once idle. */
+  autostarted: boolean;
+  store: string | null;
+  /** Who the server takes the caller to be, on listeners that tell. */
+  identity: string | null;
+}
 
 /** A request the host refused, with a stable code a client can act on. */
 export class RpcError extends Error {

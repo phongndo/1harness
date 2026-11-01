@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { BUILTIN_COMMANDS } from "../commands/builtins.ts";
 import {
   CommandRegistry,
@@ -1816,7 +1817,13 @@ export class App {
     }
     // The host finds `@` mentioned images where the thread runs.
     this.#client
-      .call("thread.send", { threadId: thread.id, text, steer: steer && thread.busy })
+      .call("thread.send", {
+        threadId: thread.id,
+        text,
+        steer: steer && thread.busy,
+        // A send retried after a dropped connection is sent once.
+        requestId: randomUUID(),
+      })
       .catch((error: unknown) => this.#notice("error", errorMessage(error)));
   }
 

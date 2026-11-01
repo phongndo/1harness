@@ -94,9 +94,17 @@ export interface CreateThreadOptions {
   openedBy?: string | null;
 }
 
+/**
+ * The extensions a thread gets: one set for every thread, or a set chosen by
+ * the thread's folder and the client that opened it.
+ */
+export type Extensions =
+  | ExtensionHost
+  | ((cwd: string, client: string | null) => Promise<ExtensionHost>);
+
 export interface ManagerOptions {
   version: string;
-  extensions: ExtensionHost;
+  extensions: Extensions;
   tools: ToolServer;
   /** Problems with the shared MCP config, reported once each. */
   onWarning?: (text: string) => void;
@@ -123,6 +131,8 @@ export interface RestoredThread {
   visits: Map<HarnessId, Visit>;
   seenWithoutHandoff: number | null;
   thread: SavedThread;
+  /** Its extensions, already loaded; the manager's own when it has one set. */
+  extensions?: ExtensionHost;
 }
 
 /** What a run that was going when its host stopped says; nobody knows how it ended. */
@@ -217,6 +227,8 @@ export class ThreadManager {
   #warned = new Set<string>();
   /** Each thread's grant to the tool server, which its sessions use. */
   #grants = new Map<string, ToolGrant>();
+  /** Each thread's extensions. */
+  #extensions = new Map<string, ExtensionHost>();
   #counter = 0;
   /** What each thread looked like when last announced. */
   #keys = new Map<string, string>();
@@ -268,8 +280,11 @@ export class ThreadManager {
    * once, so clients can show it while the harness comes up.
    */
   async create(options: CreateThreadOptions): Promise<ManagedThread> {
-    const extensions = this.#options.extensions;
-    const mcp = await this.#sessionServers();
+    // An agent's thread gets the extensions of the thread that started it.
+    const parent = options.parentId ? this.#extensions.get(options.parentId) : undefined;
+    const extensions =
+      parent ?? (await this.#extensionsFor(options.settings.cwd, options.openedBy ?? null));
+    const mcp = await this.#sessionServers(extensions);
     let created: Thread | null = null;
     const toolPolicy = extensions.toolPolicy(() => created);
     const settings = {
@@ -304,7 +319,7 @@ export class ThreadManager {
     };
     this.#servers.set(managed.id, mcp.servers);
     if (mcp.grant) this.#grants.set(managed.id, mcp.grant);
-    this.#adopt(managed);
+    this.#adopt(managed, extensions);
     this.#emit({ type: "thread.created", thread: managed });
     try {
       await thread.start();
@@ -319,9 +334,19 @@ export class ThreadManager {
     return managed;
   }
 
+  async #extensionsFor(cwd: string, client: string | null): Promise<ExtensionHost> {
+    const extensions = this.#options.extensions;
+    return typeof extensions === "function" ? extensions(cwd, client) : extensions;
+  }
+
+  /** The extensions a thread runs with. */
+  extensionsOf(id: string): ExtensionHost | undefined {
+    return this.#extensions.get(id);
+  }
+
   /** The MCP servers a new session gets, reporting problems with the shared config once. */
-  async #sessionServers() {
-    const mcp = await this.#options.extensions.sessionServers(this.#options.tools);
+  async #sessionServers(extensions: ExtensionHost) {
+    const mcp = await extensions.sessionServers(this.#options.tools);
     for (const warning of mcp.warnings) {
       if (this.#warned.has(warning)) continue;
       this.#warned.add(warning);
@@ -331,15 +356,16 @@ export class ThreadManager {
   }
 
   /** Connects a thread to the manager and the extensions, and lists it. */
-  #adopt(managed: ManagedThread): void {
+  #adopt(managed: ManagedThread, extensions: ExtensionHost): void {
     const thread = managed.thread;
+    this.#extensions.set(managed.id, extensions);
     this.#threads.set(managed.id, managed);
     this.#byThread.set(thread, managed);
     const unsubscribe = thread.subscribe((event) => this.#apply(managed, event));
     thread.setWaker(async () => {
       await this.wake(managed.id);
     });
-    const detach = this.#options.extensions.attach(thread);
+    const detach = extensions.attach(thread);
     this.#cleanups.set(managed.id, () => {
       unsubscribe();
       detach();
@@ -384,7 +410,11 @@ export class ThreadManager {
         runs,
         error: entry.error,
       };
-      this.#adopt(managed);
+      const extensions =
+        entry.extensions ??
+        (typeof this.#options.extensions === "function" ? undefined : this.#options.extensions);
+      if (!extensions) throw new Error(`No extensions loaded for ${entry.id}`);
+      this.#adopt(managed, extensions);
       if (entry.visits.size > 0) this.#visits.set(entry.id, new Map(entry.visits));
       if (entry.seenWithoutHandoff !== null)
         this.#seenWithoutHandoff.set(entry.id, entry.seenWithoutHandoff);
@@ -497,6 +527,7 @@ export class ThreadManager {
     this.#threads.delete(id);
     this.#byThread.delete(managed.thread);
     this.#keys.delete(id);
+    this.#extensions.delete(id);
     this.#emit({ type: "thread.forgotten", threadId: id });
   }
 
@@ -553,7 +584,8 @@ export class ThreadManager {
       interactionMode: info.interactionMode,
       resume: null,
     };
-    const toolPolicy = this.#options.extensions.toolPolicy(() => thread);
+    const extensions = this.#extensions.get(id)!;
+    const toolPolicy = extensions.toolPolicy(() => thread);
     let extras: Partial<SessionOptions> = {};
     const plans = [
       ...(earlier?.native ? [{ resume: earlier.native, seen: earlier.runs }] : []),
@@ -576,7 +608,7 @@ export class ThreadManager {
       // A thread brought back after a restart connects its servers on first use.
       let servers = this.#servers.get(id);
       if (!servers) {
-        const mcp = await this.#sessionServers();
+        const mcp = await this.#sessionServers(extensions);
         servers = mcp.servers;
         this.#servers.set(id, servers);
         if (mcp.grant) {

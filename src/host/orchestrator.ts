@@ -111,8 +111,8 @@ export class Orchestrator {
   #tasks = new Map<string, Task>();
   /** Tasks by caller and request ID, set before the task starts so retries find it. */
   #byRequest = new Map<string, Promise<Task>>();
-  /** Tasks being started, counted against the limits before their threads exist. */
-  #reserved = 0;
+  /** Tasks being started in each tree, counted against its limits before their threads exist. */
+  #reserved = new Map<string, number>();
 
   constructor(manager: ThreadManager, env: NodeJS.ProcessEnv = process.env) {
     this.#manager = manager;
@@ -229,14 +229,14 @@ export class Orchestrator {
       {
         name: "thread_list",
         description:
-          "Lists the threads in this 1harness, with their harness, status, and which thread started them.",
+          "Lists the threads in your tree: the user's thread at its root and every thread started under it, with their harness, status, and which thread started them.",
         inputSchema: { type: "object", properties: {} },
         readOnly: true,
         execute: (_input, context) => {
           const caller = this.#caller(context);
           return this.#json({
             you: caller.id,
-            threads: this.#manager.list().map((thread) => this.#threadView(thread)),
+            threads: this.#tree(caller).map((thread) => this.#threadView(thread)),
           });
         },
       },
@@ -259,8 +259,7 @@ export class Orchestrator {
         },
         readOnly: true,
         execute: (input, context) => {
-          this.#caller(context);
-          const thread = this.#thread(input);
+          const thread = this.#thread(this.#caller(context), input);
           const from = runNumber(input, "fromRun");
           const to = runNumber(input, "toRun");
           const count = typeof input["runs"] === "number" ? Math.max(1, input["runs"]) : 5;
@@ -332,7 +331,7 @@ export class Orchestrator {
         readOnly: true,
         execute: async (input, context) => {
           const caller = this.#caller(context);
-          const thread = this.#thread(input);
+          const thread = this.#thread(caller, input);
           if (thread.id === caller.id)
             throw new OrchestrationError("invalid_request", "a thread cannot wait on itself");
           const { timedOut } = await this.#manager.wait(
@@ -428,21 +427,38 @@ export class Orchestrator {
     await Promise.all([...stopping.map((done) => done.catch(() => {})), thread.thread.interrupt()]);
   }
 
+  /** The user's thread at the root of a thread's tree. */
+  #root(thread: ManagedThread): ManagedThread {
+    const parent = thread.parentId ? this.#manager.get(thread.parentId) : undefined;
+    return parent ? this.#root(parent) : thread;
+  }
+
   /**
-   * Threads with a harness running, and the ones among them with work, counting
-   * tasks still starting. A parked thread holds no harness, so it is not counted.
+   * The threads an agent may see and act on: its tree, from the user's thread
+   * at its root down. Other trees, such as another terminal's, are not its own.
    */
-  #counts(): { open: number; running: number } {
-    const open = this.#manager
-      .list()
-      .filter((thread) => !this.#manager.closing(thread.id) && thread.status !== "parked");
+  #tree(caller: ManagedThread): ManagedThread[] {
+    const root = this.#root(caller);
+    return [root, ...this.#manager.descendants(root.id)];
+  }
+
+  /**
+   * Threads in the caller's tree with a harness running, and the ones among
+   * them with work, counting tasks it is still starting. A parked thread holds
+   * no harness, so it is not counted.
+   */
+  #counts(caller: ManagedThread): { open: number; running: number } {
+    const reserved = this.#reserved.get(this.#root(caller).id) ?? 0;
+    const open = this.#tree(caller).filter(
+      (thread) => !this.#manager.closing(thread.id) && thread.status !== "parked",
+    );
     const running = open.filter((thread) => thread.status === "starting" || !thread.thread.idle);
-    return { open: open.length + this.#reserved, running: running.length + this.#reserved };
+    return { open: open.length + reserved, running: running.length + reserved };
   }
 
   #capabilities(caller: ManagedThread) {
     const info = caller.thread.info;
-    const counts = this.#counts();
+    const counts = this.#counts(caller);
     return {
       you: {
         threadId: caller.id,
@@ -535,7 +551,7 @@ export class Orchestrator {
       throw new OrchestrationError("invalid_request", `no role ${role}`);
     const sameHarness = harness === caller.harness;
 
-    const counts = this.#counts();
+    const counts = this.#counts(caller);
     if (counts.running >= MAX_RUNNING_THREADS)
       throw new OrchestrationError(
         "thread_limit",
@@ -547,7 +563,8 @@ export class Orchestrator {
         `${counts.open} threads are open; close finished tasks with task_cancel first`,
       );
     // Held until the task is sent, when its thread counts as working.
-    this.#reserved++;
+    const root = this.#root(caller).id;
+    this.#reserved.set(root, (this.#reserved.get(root) ?? 0) + 1);
     try {
       let child: ManagedThread;
       try {
@@ -586,7 +603,9 @@ export class Orchestrator {
       );
       return task;
     } finally {
-      this.#reserved--;
+      const left = (this.#reserved.get(root) ?? 1) - 1;
+      if (left > 0) this.#reserved.set(root, left);
+      else this.#reserved.delete(root);
     }
   }
 
@@ -714,16 +733,18 @@ export class Orchestrator {
     return task;
   }
 
-  #thread(input: Record<string, unknown>): ManagedThread {
+  /** A thread in the caller's tree; another tree's is not found. */
+  #thread(caller: ManagedThread, input: Record<string, unknown>): ManagedThread {
     const id = text(input, "threadId") ?? "";
     const thread = this.#manager.get(id);
-    if (!thread) throw new OrchestrationError("thread_not_found", `no thread ${id}`);
+    if (!thread || this.#root(thread) !== this.#root(caller))
+      throw new OrchestrationError("thread_not_found", `no thread ${id} in your tree`);
     return thread;
   }
 
   /** Another open thread the caller may act on: never one allowed more than the caller. */
   #target(caller: ManagedThread, input: Record<string, unknown>): ManagedThread {
-    const target = this.#thread(input);
+    const target = this.#thread(caller, input);
     if (target.id === caller.id)
       throw new OrchestrationError("invalid_request", "use your own turn for your own thread");
     if (target.status === "closed")

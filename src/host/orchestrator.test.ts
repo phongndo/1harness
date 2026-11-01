@@ -934,4 +934,24 @@ describe("Orchestrator", () => {
     const harnesses = capabilities["harnesses"] as { id: string; available: boolean }[];
     assert.ok(harnesses.some((harness) => harness.id === "fake" && harness.available));
   });
+
+  it("keeps each tree of threads to itself", async () => {
+    const mine = await manager.create({ harness: "fake", settings: settings() });
+    const theirs = await manager.create({ harness: "fake", settings: settings() });
+    const task = await call("delegate_task", mine, { task: "help", wait: true });
+    const listing = await call("thread_list", mine, {});
+    assert.deepEqual(
+      (listing["threads"] as { threadId: string }[]).map((thread) => thread.threadId),
+      [mine.id, task["taskId"]],
+    );
+    // The task's thread sees its own tree too.
+    const child = manager.get(String(task["taskId"]))!;
+    await assert.rejects(call("thread_read", child, { threadId: theirs.id }), /thread_not_found/);
+    await assert.rejects(
+      call("thread_send", mine, { threadId: theirs.id, message: "hi" }),
+      /thread_not_found/,
+    );
+    const read = await call("thread_read", child, { threadId: mine.id });
+    assert.equal(read["threadId"], mine.id);
+  });
 });

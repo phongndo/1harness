@@ -8,6 +8,8 @@ import {
 } from "../commands/registry.ts";
 import type { HarnessId, SessionOptions, UserInput } from "../core/events.ts";
 import { FileIndex, mentionedImages } from "../core/files.ts";
+import { realpathSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 import { configDir, stateDir } from "../core/paths.ts";
 import { errorMessage, type Thread, type ThreadEvent } from "../core/thread.ts";
 import { formatTokens } from "../core/wording.ts";
@@ -70,13 +72,23 @@ interface Client {
   lookups: Map<string, unknown[] | Promise<unknown[]>>;
   /** Message IDs by the client's request IDs, so a retried send sends nothing. */
   sent: Map<string, string>;
+  /** Extension modules it named, which load for the threads it opens. */
+  extensions: string[];
+}
+
+/** One folder's extensions, with a set of named modules, and the commands they register. */
+interface ExtensionSet {
+  key: string;
+  host: ExtensionHost;
+  commands: CommandRegistry;
+  ready: Promise<void>;
 }
 
 export interface HostOptions {
   version: string;
-  /** The folder whose own extensions load once trusted. */
+  /** The folder a client starts in when it says no other, as `--print` does. */
   cwd: string;
-  /** Extension modules named on the command line. */
+  /** Extension modules for clients that name none, as `--print` passes them. */
   extensions?: readonly string[];
   /** Problems with config files, shown to each client once. */
   warnings?: readonly string[];
@@ -176,10 +188,11 @@ export class Host {
   readonly version: string;
   readonly manager: ThreadManager;
   readonly orchestrator: Orchestrator;
-  readonly extensions: ExtensionHost;
+
   readonly tools: ToolServer;
   #options: HostOptions;
-  #commands = new CommandRegistry();
+  /** Extensions by folder and the modules a client named, each set with its commands. */
+  #sets = new Map<string, ExtensionSet>();
   #orchestratorTools: ReadonlyMap<string, { tool: ToolDefinition }> = new Map();
   #listeners = new Set<(event: HostEvent) => void>();
   #recent: HostEvent[] = [];
@@ -213,20 +226,11 @@ export class Host {
     this.#store = options.store ?? null;
     const store = this.#store;
     if (store) this.#seq = store.maxSeq();
-    this.extensions = new ExtensionHost({
-      cwd: options.cwd,
-      configDir: options.configDir ?? configDir(),
-      stateDir: options.stateDir ?? stateDir(),
-      commands: this.#commands,
-      ui: (thread) => this.#extensionUi(thread),
-    });
-    this.tools = new ToolServer(
-      () => new Map([...this.extensions.tools, ...this.#orchestratorTools]),
-      options.version,
-    );
+    // Every session gets the orchestrator's tools; its folder's extensions add theirs.
+    this.tools = new ToolServer(() => this.#orchestratorTools, options.version);
     this.manager = new ThreadManager({
       version: options.version,
-      extensions: this.extensions,
+      extensions: (cwd, client) => this.#extensionsFor(cwd, client),
       tools: this.tools,
       onWarning: (text) => this.#broadcast("warning", text),
       ...(options.idleCloseMs === undefined ? {} : { idleCloseMs: options.idleCloseMs }),
@@ -238,13 +242,63 @@ export class Host {
     this.#handlers = this.#methods();
   }
 
-  /** Loads extensions and brings back stored threads; calls after the first wait for it. */
+  /** Brings back stored threads, with their folders' extensions; calls after the first wait for it. */
   start(): Promise<void> {
-    this.#started ??= (async () => {
-      await this.extensions.loadAll(this.#options.extensions ?? []);
-      this.#restore();
-    })();
+    this.#started ??= this.#restore();
     return this.#started;
+  }
+
+  /**
+   * The extensions for a folder and the modules a client named: the user's,
+   * the folder's own once trusted, and those modules. Loaded once per folder,
+   * by its real path, and set of modules.
+   */
+  #set(cwd: string, modules: readonly string[]): ExtensionSet {
+    let folder = resolvePath(cwd);
+    try {
+      folder = realpathSync(folder);
+    } catch {
+      // A folder that is gone still names its set.
+    }
+    const flags = modules.map((path) => resolvePath(cwd, path)).toSorted();
+    const key = [folder, ...flags].join("\0");
+    let set = this.#sets.get(key);
+    if (!set) {
+      const commands = new CommandRegistry();
+      const host = new ExtensionHost({
+        cwd: folder,
+        configDir: this.#options.configDir ?? configDir(),
+        stateDir: this.#options.stateDir ?? stateDir(),
+        commands,
+        ui: (thread) => this.#extensionUi(thread),
+      });
+      set = { key, host, commands, ready: host.loadAll(flags) };
+      this.#sets.set(key, set);
+    }
+    return set;
+  }
+
+  /** The modules a client named with `-x`, which load only for the threads it opens. */
+  #modules(clientId: string | null): readonly string[] {
+    const client = clientId ? this.#clients.get(clientId) : undefined;
+    return client?.extensions ?? (clientId === null ? [] : (this.#options.extensions ?? []));
+  }
+
+  async #extensionsFor(cwd: string, clientId: string | null): Promise<ExtensionHost> {
+    const set = this.#set(cwd, this.#modules(clientId));
+    await set.ready;
+    return set.host;
+  }
+
+  /** The set whose commands a client sees: the thread's when it has one, else its folder's. */
+  async #commandSet(client: Client, threadId: string | null): Promise<ExtensionSet> {
+    const thread = threadId ? this.manager.extensionsOf(threadId) : undefined;
+    const set = thread
+      ? [...this.#sets.values()].find((candidate) => candidate.host === thread)
+      : undefined;
+    const chosen = set ?? this.#set(client.cwd, client.extensions);
+    await chosen.ready;
+    return chosen;
   }
 
   /** Where the store is, or null when the host keeps nothing. */
@@ -257,16 +311,20 @@ export class Host {
    * started: a run that was going is marked interrupted, and a queue waits
    * for the user.
    */
-  #restore(): void {
+  async #restore(): Promise<void> {
     const store = this.#store;
     if (!store) return;
     const rows = store.liveThreads();
     const interrupted = new Set<string>();
-    const saved = rows.map((row) => {
+    const saved: RestoredThread[] = [];
+    for (const row of rows) {
       const runs = store.runs(row.id);
       if (runs.some((run) => run.status === "running")) interrupted.add(row.id);
-      return this.#restored(row, runs);
-    });
+      saved.push({
+        ...this.#restored(row, runs),
+        extensions: await this.#extensionsFor(row.cwd, null),
+      });
+    }
     for (const managed of this.manager.restore(saved)) {
       if (interrupted.has(managed.id)) {
         const run = managed.runs.at(-1);
@@ -319,7 +377,7 @@ export class Host {
   }
 
   /** Brings a stored thread back into memory, parked, such as a closed one reopened. */
-  #reopen(id: string): ManagedThread | null {
+  async #reopen(id: string): Promise<ManagedThread | null> {
     const store = this.#store;
     const row = store?.thread(id);
     if (!store || !row) return null;
@@ -330,7 +388,10 @@ export class Host {
       this.manager.forget(id);
     }
     const [managed] = this.manager.restore([
-      this.#restored({ ...row, state: "parked" }, store.runs(id)),
+      {
+        ...this.#restored({ ...row, state: "parked" }, store.runs(id)),
+        extensions: await this.#extensionsFor(row.cwd, null),
+      },
     ]);
     if (!managed) return null;
     this.#dirty.add(id);
@@ -388,6 +449,23 @@ export class Host {
   }
 
   /**
+   * Whether any thread has work going, which stopping would cut off: a turn,
+   * a request, a session starting, a queue that is not held, or background
+   * work its harness runs.
+   */
+  get busy(): boolean {
+    return this.manager.list().some((managed) => {
+      if (managed.status === "closed" || managed.status === "parked") return false;
+      const thread = managed.thread;
+      return (
+        managed.status === "starting" ||
+        !thread.idle ||
+        (thread.session?.backgroundTasks?.() ?? []).length > 0
+      );
+    });
+  }
+
+  /**
    * Stops what the host started. With a store, every thread parks to be
    * brought back next time, and a running turn is interrupted; without one,
    * threads end.
@@ -401,7 +479,7 @@ export class Host {
     for (const { index } of this.#files.values()) index.close();
     this.#files.clear();
     await this.tools.close();
-    await this.extensions.close();
+    for (const set of this.#sets.values()) await set.host.close();
     if (this.#store) {
       this.#flush();
       this.#store.close();
@@ -676,6 +754,7 @@ export class Host {
         pending: new Map(),
         lookups: new Map(),
         sent: new Map(),
+        extensions: [...(this.#options.extensions ?? [])],
       };
       this.#clients.set(id, client);
     }
@@ -871,9 +950,10 @@ export class Host {
     };
   }
 
-  #commandList(client: Client, threadId: string | null): CommandInfo[] {
+  async #commandList(client: Client, threadId: string | null): Promise<CommandInfo[]> {
     const context = this.#commandContext(client, threadId);
-    return this.#commands.list().map((command) => this.#commandInfo(command, context));
+    const set = await this.#commandSet(client, threadId);
+    return set.commands.list().map((command) => this.#commandInfo(command, context));
   }
 
   // Threads
@@ -1037,9 +1117,12 @@ export class Host {
     return {
       "client.hello": async (client, params) => {
         client.cwd = params.cwd;
+        client.extensions = params.extensions.map((path) => resolvePath(params.cwd, path));
         client.connected = true;
         const warnings = [...(this.#options.warnings ?? [])];
-        const waiting = this.extensions.untrusted.length;
+        const set = this.#set(client.cwd, client.extensions);
+        await set.ready;
+        const waiting = set.host.untrusted.length;
         if (waiting > 0)
           warnings.push(
             `This folder has ${waiting} ${waiting === 1 ? "extension" : "extensions"} of its own; /extensions trust loads them.`,
@@ -1050,11 +1133,15 @@ export class Host {
           seq: this.#seq,
           threads: this.manager.list().map((managed) => this.#state(managed)),
           harnesses: this.#harnesses(),
-          commands: this.#commandList(client, null),
+          commands: await this.#commandList(client, null),
           pending: [...client.pending.values()],
           warnings,
           store: this.storePath,
         };
+      },
+      "client.bye": async (client) => {
+        await this.disconnect(client.id);
+        return null;
       },
       "client.show": async (client, { threadId }) => {
         const previous = client.showing;
@@ -1116,7 +1203,7 @@ export class Host {
         const own = this.manager.get(id);
         if (own && own.status !== "closed") return this.#state(own);
         // A stored one, closed or not, comes back parked.
-        const reopened = this.#reopen(id);
+        const reopened = await this.#reopen(id);
         if (reopened) return this.#state(reopened);
         if (own) throw new RpcError("thread_closed", `${id} is closed`);
         // A native thread a 1harness thread runs, or ran, opens that thread.
@@ -1125,7 +1212,7 @@ export class Host {
           .find((managed) => managed.status !== "closed" && managed.thread.info.threadId === id);
         if (running) return this.#state(running);
         const stored = this.#store?.threadByNative(id);
-        const again = stored ? this.#reopen(stored.id) : null;
+        const again = stored ? await this.#reopen(stored.id) : null;
         if (again) return this.#state(again);
         return this.#handlers["thread.open"](client, {
           harness,
@@ -1218,7 +1305,7 @@ export class Host {
       "harnesses.list": async () => this.#harnesses(),
       "commands.list": async (client, { threadId }) => this.#commandList(client, threadId),
       "commands.run": async (client, { threadId, name, args }) => {
-        const command = this.#commands.find(name);
+        const command = (await this.#commandSet(client, threadId)).commands.find(name);
         if (!command) throw new RpcError("command_not_found", `No command /${name}`);
         const context = this.#commandContext(client, threadId);
         if (!this.#commandInfo(command, context).available)
@@ -1227,7 +1314,7 @@ export class Host {
         return null;
       },
       "commands.complete": async (client, { threadId, name, args }) => {
-        const command = this.#commands.find(name);
+        const command = (await this.#commandSet(client, threadId)).commands.find(name);
         return command?.complete?.(this.#commandContext(client, threadId), args) ?? null;
       },
       "files.search": async (_client, { cwd, query, limit }) => {

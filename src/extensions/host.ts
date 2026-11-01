@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { registerHooks } from "node:module";
@@ -233,7 +234,7 @@ export class ExtensionHost {
     warnings: string[];
   }> {
     const config = loadMcpConfig(this.#options.configDir, this.trusted ? this.#options.cwd : null);
-    const grant = await tools.grant();
+    const grant = await tools.grant(() => this.tools);
     const servers = { ...config.servers, ...(grant ? { "1harness": grant.config } : {}) };
     return { servers, grant, warnings: config.warnings };
   }
@@ -396,11 +397,23 @@ export class ExtensionHost {
     return { title: "Extensions", lines };
   }
 
+  /**
+   * Where an extension keeps its values: the user's and named ones by name, a
+   * project's under its folder, so two projects' extensions of one name keep
+   * their own.
+   */
+  #storageFile(record: LoadedExtension): string {
+    const folder = join(this.#options.stateDir, "extensions");
+    if (record.scope !== "project") return join(folder, `${record.name}.json`);
+    const project = createHash("sha256").update(this.#options.cwd).digest("hex").slice(0, 16);
+    return join(folder, "projects", project, `${record.name}.json`);
+  }
+
   #api(record: LoadedExtension): ExtensionAPI {
     const extension = record.name;
     return {
       name: extension,
-      storage: new JsonStorage(join(this.#options.stateDir, "extensions", `${extension}.json`)),
+      storage: new JsonStorage(this.#storageFile(record)),
       registerCommand: (command) => {
         if (!this.#options.commands) return;
         this.#registrations.get(record)?.undo.push(this.#options.commands.register(command));

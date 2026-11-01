@@ -12,10 +12,14 @@ import {
 } from "./core/events.ts";
 import { HostClient } from "./client/client.ts";
 import { LocalConnection, newClientId } from "./client/connection.ts";
-import { configDir, storeFile } from "./core/paths.ts";
+import { SocketConnection } from "./client/socket.ts";
+import { configDir, socketFile, storeFile } from "./core/paths.ts";
 import { loadSettings } from "./core/settings.ts";
 import { drivers, registerConfiguredAgents } from "./drivers/index.ts";
 import { Host } from "./host/host.ts";
+import { PROTOCOL_VERSION } from "./protocol.ts";
+import { serverCommand } from "./server/cli.ts";
+import { ensureServer } from "./server/lifecycle.ts";
 import { Store, StoreLocked } from "./store/store.ts";
 import { App } from "./tui/app.ts";
 
@@ -24,6 +28,10 @@ const help = `1harness
 One terminal UI for ${labels.length > 1 ? `${labels.slice(0, -1).join(", ")}, and ${labels.at(-1)}` : labels.join("")}.
 
 Usage: 1harness [options] [prompt]
+       1harness server <command>   run, start, stop, or check the server
+
+Threads run in the 1harness server, which keeps them working after the
+terminal quits; it starts in the background when none is running.
 
 Options:
   -H, --harness <name>   ${drivers()
@@ -35,7 +43,7 @@ Options:
                          in ~/.config/1harness/settings.json, else ${DEFAULT_RUNTIME_MODE})
       --plan             start in plan mode
   -C, --cwd <dir>        working folder (default: current folder)
-  -r, --resume <id>      resume a native thread or session
+  -r, --resume <id>      reopen a thread: 1harness's, such as t42, or a harness's own
   -x, --extension <path> load an extension module (repeatable); others load from
                          ~/.config/1harness/extensions and a trusted .1harness/extensions
   -p, --print            run the prompt once without the UI and print the reply;
@@ -44,6 +52,8 @@ Options:
   -v, --version          show the version
 
 Environment:
+  ONEHARNESS_AUTOSTART=0    run in this one process, with no server
+  ONEHARNESS_SOCKET         the server's socket (default: $XDG_RUNTIME_DIR/1harness/server.sock)
   ONEHARNESS_CLAUDE_PATH    claude executable (default: claude on PATH, else the SDK's copy)
   ONEHARNESS_CODEX_PATH     codex executable (default: codex on PATH)
   ONEHARNESS_OPENCODE_PATH  opencode executable (default: opencode on PATH)
@@ -145,7 +155,94 @@ async function print(
   return status;
 }
 
+/**
+ * Runs the terminal UI: through the 1harness server, started in the
+ * background when none is running, so threads keep working after it quits;
+ * or all in this process with ONEHARNESS_AUTOSTART=0.
+ */
+async function interactive(options: {
+  harness: HarnessId;
+  session: SessionOptions;
+  prompt: string | null;
+  version: string;
+  extensions: string[];
+  warnings: string[];
+}): Promise<void> {
+  const { session, version } = options;
+  const extensions = options.extensions.map((path) => resolve(path));
+  const id = newClientId();
+  let client: HostClient;
+  const warnings: string[] = [];
+  if (process.env["ONEHARNESS_AUTOSTART"] === "0") {
+    let store: Store | null = null;
+    try {
+      store = Store.open(storeFile());
+    } catch (error) {
+      // Another 1harness keeps the threads; this one keeps nothing, and leaves those alone.
+      if (!(error instanceof StoreLocked)) throw error;
+      options.warnings.push(
+        "Another 1harness is keeping threads, so this one keeps none of its own; they end when it exits.",
+      );
+    }
+    const host = new Host({
+      version,
+      cwd: session.cwd,
+      extensions,
+      warnings: options.warnings,
+      store,
+    });
+    client = new HostClient(
+      new LocalConnection(host, id, { owns: true }),
+      { cwd: session.cwd, version, extensions },
+      id,
+    );
+  } else {
+    const socket = socketFile();
+    const hello = await ensureServer({ target: { socket }, autostart: true });
+    if (hello.minProtocol > PROTOCOL_VERSION || hello.protocol < PROTOCOL_VERSION)
+      throw new Error(
+        `the running server is 1harness ${hello.version}, which this one cannot talk to; stop it with \`1harness server stop\``,
+      );
+    // The server reports problems with the config it read itself.
+    if (hello.version !== version)
+      warnings.push(
+        `The running server is 1harness ${hello.version}; \`1harness server stop\` lets the next one start as ${version}.`,
+      );
+    client = new HostClient(
+      new SocketConnection({ socket }, id),
+      { cwd: session.cwd, version, extensions },
+      id,
+    );
+  }
+  await new App({
+    client,
+    harness: options.harness,
+    session,
+    version,
+    prompt: options.prompt,
+    warnings,
+  }).run();
+}
+
 try {
+  const manifestVersion = (
+    JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+      version: string;
+    }
+  ).version;
+  const [command, ...rest] = process.argv.slice(2);
+  if (command === "server") {
+    process.exitCode = await serverCommand(rest, manifestVersion);
+  } else {
+    await main();
+  }
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  process.stderr.write(`1harness: ${message}\n`);
+  process.exitCode = 2;
+}
+
+async function main(): Promise<void> {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: {
@@ -203,41 +300,14 @@ try {
         "the interactive UI needs a terminal; use --print to run a prompt without one",
       );
     } else {
-      let store: Store | null = null;
-      try {
-        store = Store.open(storeFile());
-      } catch (error) {
-        // Another 1harness keeps the threads; this one keeps nothing, and leaves those alone.
-        if (!(error instanceof StoreLocked)) throw error;
-        warnings.push(
-          "Another 1harness is keeping threads, so this one keeps none of its own; they end when it exits.",
-        );
-      }
-      const host = new Host({
-        version: manifest.version,
-        cwd: session.cwd,
-        extensions,
-        warnings,
-        store,
-      });
-      const id = newClientId();
-      const client = new HostClient(
-        new LocalConnection(host, id, { owns: true }),
-        { cwd: session.cwd, version: manifest.version, extensions },
-        id,
-      );
-      await new App({
-        client,
+      await interactive({
         harness,
         session,
-        version: manifest.version,
         prompt,
-        warnings: [],
-      }).run();
+        version: manifest.version,
+        extensions,
+        warnings,
+      });
     }
   }
-} catch (error) {
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`1harness: ${message}\n`);
-  process.exitCode = 2;
 }

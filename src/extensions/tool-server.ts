@@ -24,29 +24,36 @@ export interface ToolGrant {
   revoke(): void;
 }
 
+type Tools = () => ReadonlyMap<string, { tool: ToolDefinition }>;
+
 /**
- * Serves extensions' tools to every harness as one MCP server over streamable
- * HTTP on localhost. Each session gets its own bearer token, which also tells
- * a tool which thread called it.
+ * Serves tools to every harness as one MCP server over streamable HTTP on
+ * localhost: the ones every session gets, such as the orchestrator's, and
+ * each grant's own, such as its folder's extensions'. Each session gets its
+ * own bearer token, which also tells a tool which thread called it.
  */
 export class ToolServer {
-  #tools: () => ReadonlyMap<string, { tool: ToolDefinition }>;
+  #tools: Tools;
   #version: string;
   #server: Server | null = null;
   #url: Promise<string> | null = null;
-  #grants = new Map<string, { thread: Thread | null }>();
+  #grants = new Map<string, { thread: Thread | null; tools: Tools }>();
 
   constructor(tools: () => ReadonlyMap<string, { tool: ToolDefinition }>, version: string) {
     this.#tools = tools;
     this.#version = version;
   }
 
-  /** A grant for a new session, or null when no extension has a tool to serve. */
-  async grant(): Promise<ToolGrant | null> {
-    if (this.#tools().size === 0) return null;
+  /**
+   * A grant for a new session, serving the shared tools and `own`; null when
+   * there is no tool to serve.
+   */
+  async grant(own: Tools = () => new Map()): Promise<ToolGrant | null> {
+    const tools: Tools = () => new Map([...own(), ...this.#tools()]);
+    if (tools().size === 0) return null;
     const url = await this.#listen();
     const token = randomBytes(24).toString("base64url");
-    const grant: { thread: Thread | null } = { thread: null };
+    const grant: { thread: Thread | null; tools: Tools } = { thread: null, tools };
     this.#grants.set(token, grant);
     return {
       // Tools such as delegate_task wait on other work, so calls may take long.
@@ -135,7 +142,10 @@ export class ToolServer {
   }
 
   /** The reply to one message, or null for a notification. */
-  async #reply(message: JsonRpcMessage, grant: { thread: Thread | null }): Promise<unknown> {
+  async #reply(
+    message: JsonRpcMessage,
+    grant: { thread: Thread | null; tools: Tools },
+  ): Promise<unknown> {
     if (message.id === undefined || message.id === null) return null;
     const id = message.id;
     const params = message.params ?? {};
@@ -160,7 +170,7 @@ export class ToolServer {
           jsonrpc: "2.0",
           id,
           result: {
-            tools: [...this.#tools().values()].map(({ tool }) => ({
+            tools: [...grant.tools().values()].map(({ tool }) => ({
               name: tool.name,
               description: tool.description,
               inputSchema: tool.inputSchema,
@@ -170,7 +180,7 @@ export class ToolServer {
         };
       case "tools/call": {
         const name = String(params["name"] ?? "");
-        const entry = this.#tools().get(name);
+        const entry = grant.tools().get(name);
         if (!entry) return rpcError(id, -32602, `No tool named ${name}`);
         if (!grant.thread) return toolError(id, "The session is still starting");
         try {

@@ -7,10 +7,10 @@ sessions, cross-harness orchestration over MCP, and a programmable interface for
 custom clients and shared tools.
 
 Implemented so far: one terminal UI for Claude Code, Codex, OpenCode, and agents
-that speak the Agent Client Protocol (such as fx), with shared MCP servers and a layered
-extension system. It runs in a single process on the local
-machine. The persistent host, remote connections, and a public programming
-interface are not implemented yet.
+that speak the Agent Client Protocol (such as fx), with shared MCP servers and a
+layered extension system. Threads run in a background server that keeps them
+working while no terminal is open, and keeps them across restarts. A public
+programming interface is not implemented yet.
 
 ## Use
 
@@ -108,9 +108,9 @@ when it finishes; `task_status` and `task_cancel` follow it up; `thread_list`,
 `thread_wait`, and `thread_interrupt` work on any thread; `orchestrator_capabilities` lists the harnesses and limits. A task never
 gets a broader permission mode than the thread that started it, or leaves plan
 mode, and a harness that cannot run it that narrowly is refused. A task goes by
-its thread's ID, such as `t2`, and a retried `requestId` returns the same task. Delegation stops at three levels deep, eight
-threads working, and sixteen open; `task_cancel` on a finished task closes its
-thread.
+its thread's ID, such as `t2`, and a retried `requestId` returns the same task. Delegation stops at three levels deep, and, within one tree of threads, at
+eight threads working and sixteen with a harness running; `task_cancel` on a
+finished task closes its thread.
 
 A thread an agent starts appears as a row in its parent's conversation, with its
 status, a timer, and what it found; on Claude Code and Codex the row takes the
@@ -128,6 +128,28 @@ next message resumes the harness's own thread, or starts a new one with a
 handoff when it cannot. A harness running background work, such as Claude
 Code's background agents, stays open.
 
+### The server
+
+Threads run in the 1harness server, not in the terminal. The first `1harness`
+starts one in the background, listening on
+`$XDG_RUNTIME_DIR/1harness/server.sock` (only you can open it), and every later
+one connects to it, so several terminals share their threads, each showing the
+ones it opens. Quitting a terminal leaves its threads working: a turn keeps
+running, an agent keeps going, and reopening the thread shows what it did. A
+server started this way stops about ten seconds after its last terminal quits
+and nothing is working; `1harness server start` starts one that stays.
+`1harness server status`, `logs`, and `stop` look after it. When the terminal
+loses the server, it says so and reconnects, catching up on what it missed.
+
+Each thread gets its folder's extensions: the user's, plus the folder's own once
+trusted. Extensions named with `-x` load for the threads that terminal opens.
+An agent sees and acts on only its own tree of threads, from the user's thread
+at its root; another terminal's threads are not its own, and the limits on
+delegation count per tree.
+
+`ONEHARNESS_AUTOSTART=0` runs everything in the terminal's own process, with no
+server, as `--print` always does.
+
 ### Threads that last
 
 1harness keeps every thread in `~/.local/state/1harness/1harness.db` (SQLite,
@@ -143,8 +165,9 @@ once you send that thread something. A task an agent delegated reports nothing
 after a restart; the agent can ask with `task_status`. Text still streaming when
 1harness crashes is kept up to the last write, a moment before.
 
-Only one 1harness keeps threads at a time. A second one started meanwhile says
-so and keeps none of its own, leaving the first one's alone.
+Only one 1harness keeps threads at a time, normally the server. A second one
+started with `ONEHARNESS_AUTOSTART=0` meanwhile says so and keeps none of its
+own, leaving the first one's alone.
 
 ### Status in your terminal
 
@@ -203,8 +226,12 @@ harness's agent shares.
   and manage other threads. Clients reach it only through the requests and
   event feed in `src/protocol.ts`, the same in-process as over a socket; each
   thread's transcript is a log that a client replays to show it.
-- `src/client` is a client's side of that: a connection, and every thread's
-  state kept current from the feed.
+- `src/client` is a client's side of that: a connection, in-process or over the
+  server's socket, and every thread's state kept current from the feed.
+- `src/server` serves the host over HTTP/1.1 on a Unix socket: `GET /v1/hello`,
+  `POST /v1/rpc`, and `GET /v1/events?after=<seq>`, the feed as lines of JSON.
+  It starts, stops when idle, and hands over to the next server.
+- `src/store` keeps threads in SQLite.
 - `src/tui` is a full-screen terminal UI on the alternate screen, styled after
   [fx](https://github.com/vercel-labs/fx). Each block's rows are cached by width,
   and each frame rewrites only the rows that changed.
