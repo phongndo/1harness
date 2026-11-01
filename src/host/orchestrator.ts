@@ -243,7 +243,7 @@ export class Orchestrator {
       {
         name: "thread_read",
         description:
-          "Reads a thread's runs: what each was asked and answered, the commands it ran, and the files it changed. Reads the latest runs, or a range with fromRun and toRun. A long read comes back newest first, and moreRuns names the older runs in the range that did not fit.",
+          "Reads a thread's runs: what each was asked and answered, the commands it ran, and the files it changed. Reads the latest runs, or a range with fromRun and toRun. Runs come back oldest first; a long read keeps the newest runs that fit, and moreRuns names the older runs in the range that were left out.",
         inputSchema: {
           type: "object",
           properties: {
@@ -275,7 +275,8 @@ export class Orchestrator {
           let used = 0;
           for (const run of chosen.toReversed()) {
             const view = runView(run);
-            const size = JSON.stringify(view).length;
+            // Measured as it is sent, indented.
+            const size = JSON.stringify(view, null, 2).length;
             if (views.length > 0 && used + size > READ_LIMIT) break;
             views.unshift(view);
             used += size;

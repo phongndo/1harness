@@ -1,6 +1,7 @@
 import type { Report } from "../commands/registry.ts";
 import type { Item } from "../core/events.ts";
 import type { Message, Thread, ThreadEvent } from "../core/thread.ts";
+import { stripHandoff } from "../host/handoff.ts";
 import { reportStatus, type AgentRow } from "./agents.ts";
 import { Transcript, formatTokens, isToolItem, type Block } from "./transcript.ts";
 
@@ -29,7 +30,7 @@ function reasoningHeading(text: string): string | null {
 
 /** How a message shows: the user's own, a task or message with who sent it, or a task's result. */
 function messageBlock(echo: string, message: Message | undefined): Block {
-  if (!message) return { kind: "user", text: echo };
+  if (!message) return { kind: "user", text: stripHandoff(echo) };
   const { origin } = message;
   switch (origin.type) {
     case "user":

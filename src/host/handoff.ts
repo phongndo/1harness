@@ -22,8 +22,27 @@ export interface HandoffOptions {
   label(harness: HarnessId): string;
 }
 
+const OPEN = "<1harness-handoff>";
+const CLOSE = "</1harness-handoff>";
+const TRAILER = "\n\nThe next message follows.\n\n";
+
+/** Quoted text with the handoff's own tags defused, so it cannot close the block early. */
+function defuse(text: string): string {
+  return text.replace(/<(\/?)1harness-handoff>/g, "‹$11harness-handoff›");
+}
+
+/**
+ * A message as it was written, without a handoff in front of it, for a harness
+ * that echoes what it was sent rather than which message it was.
+ */
+export function stripHandoff(text: string): string {
+  if (!text.startsWith(OPEN)) return text;
+  const end = text.indexOf(`${CLOSE}${TRAILER}`);
+  return end === -1 ? text : text.slice(end + CLOSE.length + TRAILER.length);
+}
+
 function clip(text: string): string {
-  const trimmed = text.trim();
+  const trimmed = defuse(text.trim());
   if (trimmed.length <= FIELD_LIMIT) return trimmed;
   return `${trimmed.slice(0, FIELD_LIMIT)}… (${trimmed.length - FIELD_LIMIT} more characters)`;
 }
@@ -48,7 +67,7 @@ function sender(run: RunRecord): string {
 function describeCommands(commands: RunRecord["commands"]): string | null {
   if (commands.length === 0) return null;
   const shown = commands.slice(-COMMAND_COUNT).map(({ command, exitCode }) => {
-    const line = command.replace(/\s+/g, " ").trim();
+    const line = defuse(command.replace(/\s+/g, " ").trim());
     const cut = line.length > COMMAND_LIMIT ? `${line.slice(0, COMMAND_LIMIT)}…` : line;
     return `\`${cut}\` → ${exitCode === null ? "no exit code" : `exit ${exitCode}`}`;
   });
@@ -66,7 +85,7 @@ function describeRun(run: RunRecord, label: (harness: HarnessId) => string): str
   ];
   const commands = describeCommands(run.commands);
   if (commands) lines.push(commands);
-  if (run.files.length > 0) lines.push(`Files changed: ${run.files.join(", ")}`);
+  if (run.files.length > 0) lines.push(`Files changed: ${defuse(run.files.join(", "))}`);
   return lines.join("\n");
 }
 
@@ -83,9 +102,10 @@ function gap(threadId: string, from: number, to: number): string {
 }
 
 /**
- * Which turns fit: always the latest, then the original request when the
- * harness never saw it, then as many of the newest as the budget allows. Kept
- * turns stay whole but for long fields, so the left-out ones form one range.
+ * Which turns fit: always the latest, then the thread's first turn when it is
+ * among them, since the harness never saw the original request, then as many
+ * of the newest as the budget allows. Kept turns stay whole but for long
+ * fields, so the left-out ones form one range.
  */
 function select(blocks: readonly string[], pinFirst: boolean): Set<number> {
   const kept = new Set<number>();
@@ -118,7 +138,8 @@ export function handoffText(options: HandoffOptions): string | null {
   const runs = options.runs.filter((run) => run.status !== "running");
   if (runs.length === 0) return null;
   const blocks = runs.map((run) => describeRun(run, options.label));
-  const kept = select(blocks, !options.resumed);
+  // A resumed thread may have seen nothing, such as one whose handoff never went out.
+  const kept = select(blocks, runs[0]?.index === 1);
   const others = list([
     ...new Set(
       runs.filter((run) => run.harness !== options.to).map((run) => options.label(run.harness)),
@@ -146,13 +167,5 @@ export function handoffText(options: HandoffOptions): string | null {
     body.push(blocks[index] ?? "");
   });
   closeGap();
-  return [
-    "<1harness-handoff>",
-    intro,
-    "",
-    body.join("\n\n"),
-    "</1harness-handoff>",
-    "",
-    "The next message follows.",
-  ].join("\n");
+  return `${[OPEN, intro, "", body.join("\n\n"), CLOSE].join("\n")}${TRAILER.trimEnd()}`;
 }
