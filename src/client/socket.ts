@@ -130,10 +130,30 @@ export class SocketConnection implements HostConnection {
   #agent = new Agent({ keepAlive: true });
   #count = 0;
   #closed = false;
+  /** Starts the server again when nothing answers, as for the local one. */
+  #revive: (() => Promise<unknown>) | null;
+  #reviving: Promise<unknown> | null = null;
 
-  constructor(target: ServerTarget, clientId: string) {
+  constructor(
+    target: ServerTarget,
+    clientId: string,
+    options: { revive?: () => Promise<unknown> } = {},
+  ) {
     this.#target = target;
     this.#clientId = clientId;
+    this.#revive = options.revive ?? null;
+  }
+
+  /** Nothing is listening: a server that can be started again is, once at a time. */
+  #gone(error: unknown, failures: number): void {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (!this.#revive || this.#reviving || failures < 2) return;
+    if (code !== "ECONNREFUSED" && code !== "ENOENT") return;
+    this.#reviving = this.#revive()
+      .catch(() => {})
+      .finally(() => {
+        this.#reviving = null;
+      });
   }
 
   async call<M extends Method>(method: M, params: Params<M>): Promise<Result<M>> {
@@ -151,6 +171,7 @@ export class SocketConnection implements HostConnection {
         });
       } catch (error) {
         if (this.#closed || attempt >= ATTEMPTS || !unreachable(error)) throw error;
+        this.#gone(error, attempt);
         await new Promise((resolve) => setTimeout(resolve, backoff(attempt)));
         continue;
       }
@@ -170,10 +191,11 @@ export class SocketConnection implements HostConnection {
     let failures = 0;
     let current: ClientRequest | null = null;
     let timer: NodeJS.Timeout | null = null;
-    const retry = (error: string) => {
+    const retry = (error: string, cause?: unknown) => {
       if (stopped || this.#closed) return;
       current = null;
       failures++;
+      this.#gone(cause, failures);
       if (failures === 1) listener({ type: "connection", state: "reconnecting", error });
       timer = setTimeout(connect, backoff(failures));
     };
@@ -186,7 +208,7 @@ export class SocketConnection implements HostConnection {
         headers: { [CLIENT_HEADER]: this.#clientId },
       });
       current = outgoing;
-      outgoing.on("error", (error) => retry(error.message));
+      outgoing.on("error", (error) => retry(error.message, error));
       outgoing.on("response", (response) => {
         if (response.statusCode !== 200) {
           response.resume();

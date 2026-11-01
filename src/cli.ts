@@ -181,7 +181,9 @@ async function reach(version: string, spec: string | undefined) {
     throw new Error(
       `${label} runs 1harness ${hello.version}, which this one cannot talk to${local ? "; stop it with `1harness server stop`" : ""}`,
     );
-  return { target, label, local, hello };
+  // A local server that dies is started again, and picks up its threads parked.
+  const revive = autostart ? () => ensureServer({ target, autostart: true }) : null;
+  return { target, label, local, hello, revive };
 }
 
 /** A client of the server `spec` names; it says hello when connected. */
@@ -190,10 +192,10 @@ async function connectClient(
   extensions: string[],
   spec: string | undefined,
 ): Promise<HostClient> {
-  const { target, local } = await reach(version, spec);
+  const { target, local, revive } = await reach(version, spec);
   const id = newClientId();
   return new HostClient(
-    new SocketConnection(target, id),
+    new SocketConnection(target, id, revive ? { revive } : {}),
     // On another machine, this folder is not there; threads start in its home.
     { cwd: local ? process.cwd() : "~", version, extensions: local ? extensions : [] },
     id,
@@ -247,7 +249,7 @@ async function interactive(options: {
       id,
     );
   } else {
-    const { target, label, local, hello } = await reach(version, options.server);
+    const { target, label, local, hello, revive } = await reach(version, options.server);
     // The server reports problems with the config it read itself.
     if (hello.version !== version)
       warnings.push(
@@ -265,7 +267,7 @@ async function interactive(options: {
       notes.push(`Connected to ${label}${hello.identity ? ` as ${hello.identity}` : ""}.`);
     }
     client = new HostClient(
-      new SocketConnection(target, id),
+      new SocketConnection(target, id, revive ? { revive } : {}),
       { cwd: session.cwd, version, extensions: local ? extensions : [] },
       id,
     );

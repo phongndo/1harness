@@ -342,6 +342,20 @@ export class Host {
       if (interrupted.has(managed.id)) {
         const run = managed.runs.at(-1);
         if (run) store.saveRun(managed.id, run);
+        // Its transcript ends the turn and the session, as a client showing it saw neither.
+        const log = this.#log(managed.id);
+        for (const event of [
+          {
+            type: "turn.ended" as const,
+            turnId: run?.turnId ?? "",
+            status: "interrupted" as const,
+            error: null,
+          },
+          { type: "session.closed" as const, error: null },
+        ]) {
+          const entry = log.apply(event, this.#seq + 1, () => undefined);
+          if (entry) this.#emit({ type: "entry", threadId: managed.id, entry });
+        }
         this.#notice(
           managed.id,
           "warning",
@@ -423,9 +437,14 @@ export class Host {
     return () => this.#listeners.delete(listener);
   }
 
-  /** The events after `after`, or null when some are no longer kept. */
+  /**
+   * The events after `after`, or null when some are no longer kept, or the
+   * client has events this host never sent, as after a crash lost the last
+   * ones: it starts over from a snapshot.
+   */
   since(after: number): HostEvent[] | null {
-    if (after >= this.#seq) return [];
+    if (after === this.#seq) return [];
+    if (after > this.#seq) return null;
     const first = this.#recent[0];
     if (!first || first.seq > after + 1) return null;
     return this.#recent.filter((event) => event.seq > after);
