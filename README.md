@@ -59,6 +59,26 @@ settings rule it out (Claude Code's settings, or a sandbox Codex will not grant)
 runs the broadest mode it has below it and says so; one with nothing that narrow
 does not start.
 
+`/harness <name>` moves the thread on screen to another harness without
+starting over. The thread keeps its ID, queue, agents, approvals you chose to
+always allow, and permission and plan modes. The new harness's next message
+carries a handoff of the turns it has not seen, marked as history rather than
+requests: each turn's message, reply, commands with their exit codes (not their
+output), and changed files. When they do not all fit, the original request and
+the newest turns stay, and the handoff names the `thread_read` call for the
+ones left out. It never carries reasoning.
+
+Going back to a harness the thread used before resumes that harness's own
+thread, so it hears only what happened since; the notice says how much context
+that thread holds and when it was last used, since its next message pays for
+all of it again. `/harness <name> fresh` starts a new thread there instead, and
+on the current harness starts it over with a handoff. A thread moves only
+between turns, and not while its harness runs background work that closing it
+would stop, such as Claude Code's background agents. A harness that cannot
+start, cannot resume its thread, or cannot run as narrowly as the thread leaves
+the thread where it was or starts it a new thread, and says which.
+`/new <name>` starts a fresh thread on another harness.
+
 Approvals, plan prompts, and notices use the same words whichever harness asks.
 The harness's own commands and skills appear beside 1harness's, less those that
 only drive its own terminal. Typing after a command offers its
@@ -83,8 +103,8 @@ manage them through tools on the `1harness` MCP server every session has:
 `delegate_task` hands a task to a new thread on any available harness and
 waits for its result, or returns at once and sends the result back as a message
 when it finishes; `task_status` and `task_cancel` follow it up; `thread_list`,
-`thread_read`, `thread_send`, `thread_wait`, and `thread_interrupt` work on any
-thread; `orchestrator_capabilities` lists the harnesses and limits. A task never
+`thread_read` (the latest runs or a range, in pages that fit), `thread_send`,
+`thread_wait`, and `thread_interrupt` work on any thread; `orchestrator_capabilities` lists the harnesses and limits. A task never
 gets a broader permission mode than the thread that started it, or leaves plan
 mode, and a harness that cannot run it that narrowly is refused. A task goes by
 its thread's ID, such as `t2`, and a retried `requestId` returns the same task. Delegation stops at three levels deep, eight
