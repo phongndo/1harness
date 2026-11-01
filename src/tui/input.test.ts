@@ -73,11 +73,22 @@ describe("InputDecoder", () => {
     ]);
   });
 
-  it("reports wheel scrolling and ignores clicks", () => {
+  it("reports the wheel, and presses, drags, and releases at cells counted from 0", () => {
     const decoder = new InputDecoder();
-    assert.deepEqual(decoder.feed("\x1b[<64;10;5M\x1b[<65;10;5M\x1b[<0;1;1M\x1b[<0;1;1m"), [
-      { type: "wheel", delta: -1 },
-      { type: "wheel", delta: 1 },
+    assert.deepEqual(
+      decoder.feed(
+        "\x1b[<64;10;5M\x1b[<65;10;5M\x1b[<66;10;5M\x1b[<0;1;1M\x1b[<32;4;2M\x1b[<0;4;2m",
+      ),
+      [
+        { type: "wheel", delta: -1 },
+        { type: "wheel", delta: 1 },
+        { type: "mouse", action: "press", button: 0, row: 0, column: 0 },
+        { type: "mouse", action: "drag", button: 0, row: 1, column: 3 },
+        { type: "mouse", action: "release", button: 0, row: 1, column: 3 },
+      ],
+    );
+    assert.deepEqual(decoder.feed("\x1b[<2;7;3M"), [
+      { type: "mouse", action: "press", button: 2, row: 2, column: 6 },
     ]);
   });
 

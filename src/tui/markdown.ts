@@ -343,11 +343,43 @@ function renderTable(lines: string[], aligns: Align[], width: number, indent: st
  * list markers and code rules, bold headings, and code in its own grays.
  * Returns rows already wrapped to `width`.
  */
-export function renderMarkdown(text: string, width: number, indent = "  "): string[] {
+/** A code block or a drawn diagram, by the rows it takes, from `start` to before `end`. */
+export type MarkdownRegion =
+  | { kind: "code"; start: number; end: number; code: string; lang: string }
+  | { kind: "diagram"; start: number; end: number; source: string };
+
+/** What Markdown can hand back to whoever shows it: a Mermaid diagram, as its own rows. */
+export interface MarkdownOptions {
+  /**
+   * The rows for a diagram `columns` wide, without the indent, or null to
+   * show its source as code.
+   */
+  diagram?: (source: string, columns: number) => string[] | null;
+  /** Told where each code block and diagram is, so a click on one can copy or enlarge it. */
+  region?: (region: MarkdownRegion) => void;
+}
+
+export function renderMarkdown(
+  text: string,
+  width: number,
+  indent = "  ",
+  options: MarkdownOptions = {},
+): string[] {
   const rows: string[] = [];
   const inner = Math.max(10, width - visibleWidth(indent));
-  let fence: { marker: string; lang: string } | null = null;
+  let fence: { marker: string; lang: string; start: number; lines: string[] } | null = null;
   let blank = true;
+  const closeFence = () => {
+    if (fence)
+      options.region?.({
+        kind: "code",
+        start: fence.start,
+        end: rows.length,
+        code: fence.lines.join("\n"),
+        lang: fence.lang,
+      });
+    fence = null;
+  };
   const push = (line: string, hanging: string, hard = false) => {
     rows.push(...wrap(line, width, hanging, hard));
     blank = false;
@@ -375,16 +407,48 @@ export function renderMarkdown(text: string, width: number, indent = "  "): stri
       const close = /^\s*(`{3,}|~{3,})\s*$/.exec(raw)?.[1];
       if (close && close[0] === fence.marker[0] && close.length >= fence.marker.length) {
         push(indent + rule(inner), indent);
-        fence = null;
+        closeFence();
         continue;
       }
+      fence.lines.push(raw);
       push(indent + highlight(raw.replace(/\t/g, "  "), fence.lang), indent, true);
       continue;
     }
     // A backtick fence's info string has no backticks, so inline ```code``` opens none.
     const open = /^\s*(?:(`{3,})\s*([\w+#.-]*)[^`]*|(~{3,})\s*([\w+#.-]*).*)$/.exec(raw);
+    // A Mermaid diagram, once its fence has closed, shows as a diagram; still
+    // streaming, or one that cannot be drawn, it shows as code.
+    const fenceMarker = open?.[1] ?? open?.[3] ?? "";
+    if (open && (open[2] ?? open[4]) === "mermaid" && options.diagram) {
+      const end = lines.findIndex(
+        (line, at) =>
+          at > index && (/^\s*(`{3,}|~{3,})\s*$/.exec(line)?.[1] ?? "").startsWith(fenceMarker),
+      );
+      const drawn =
+        end === -1 ? null : options.diagram(lines.slice(index + 1, end).join("\n"), inner);
+      if (drawn) {
+        if (!blank && rows.at(-1) !== "") rows.push("");
+        const start = rows.length;
+        rows.push(...drawn.map((row) => indent + row));
+        options.region?.({
+          kind: "diagram",
+          start,
+          end: rows.length,
+          source: lines.slice(index + 1, end).join("\n"),
+        });
+        rows.push("");
+        blank = true;
+        index = end;
+        continue;
+      }
+    }
     if (open) {
-      fence = { marker: open[1] ?? open[3] ?? "```", lang: open[2] ?? open[4] ?? "" };
+      fence = {
+        marker: open[1] ?? open[3] ?? "```",
+        lang: open[2] ?? open[4] ?? "",
+        start: rows.length,
+        lines: [],
+      };
       push(indent + rule(inner, fence.lang), indent);
       continue;
     }
@@ -430,6 +494,8 @@ export function renderMarkdown(text: string, width: number, indent = "  "): stri
     }
     push(indent + inline(raw.trim()), indent);
   }
+  // A block still streaming is one too, so far.
+  closeFence();
   while (rows.at(-1) === "") rows.pop();
   return rows;
 }

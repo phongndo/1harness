@@ -271,13 +271,12 @@ describe("ThreadView", () => {
     );
     view.endTurn("interrupted", null);
     assert.equal(view.transcript.running, true);
-    assert.deepEqual(plain(view.transcript.view(context, 10, 0).rows).slice(0, 5), [
-      "● Stopped handing off a task",
-      "",
-      "  Starting the server",
-      "",
-      "● Running npm run dev",
-    ]);
+    // Folded, the turn's work is its summary; the command still running stays in view.
+    assert.equal(plain(view.transcript.view(context, 10, 0).rows)[0], "● Used 1 tool");
+    assert.deepEqual(
+      plain(view.transcript.view({ ...context, details: true }, 10, 0).rows).slice(2, 7),
+      ["● Stopped handing off a task", "", "  Starting the server", "", "● Running npm run dev"],
+    );
   });
 
   it("shows a brief as its task and a report as a result, by who sent them", () => {
@@ -691,7 +690,7 @@ describe("loading earlier turns", () => {
     assert.equal(newest.transcript.running, false);
     const view = new ThreadView("t1");
     view.rebuild(newest, entries, 1, replay, null);
-    const rows = plain(view.transcript.view(context, 20, 0).rows);
+    const rows = plain(view.transcript.view({ ...context, details: true }, 20, 0).rows);
     assert.ok(
       rows.some((line) => line.includes("Stopped read a.ts")),
       rows.join("\n"),
@@ -847,5 +846,93 @@ describe("reports", () => {
       ),
     );
     assert.deepEqual(rows, ["● MCP servers", "  github  connected  error: boom    here"]);
+  });
+});
+
+describe("finished turns", () => {
+  it("fold their work into a line over the files they changed, all of it in detail", () => {
+    const view = new ThreadView("t1");
+    view.startTurn(0);
+    view.item({ kind: "reasoning", id: "r", text: "**Planning** the fix" }, true, true);
+    view.item(
+      {
+        kind: "command",
+        id: "c",
+        command: "npm test",
+        output: "ok",
+        exitCode: 0,
+        status: "completed",
+      },
+      true,
+      true,
+    );
+    view.item(
+      {
+        kind: "file_change",
+        id: "e",
+        changes: [
+          { path: "/work/src/a.ts", kind: "update", diff: "@@ -1 +1 @@\n-old\n+new\n+more" },
+        ],
+        status: "completed",
+      },
+      true,
+      true,
+    );
+    view.item({ kind: "assistant_message", id: "a", text: "Fixed it." }, true, true);
+    view.endTurn("completed", null, { up: 1, down: 2, at: 4000 });
+    assert.deepEqual(plain(view.transcript.view(context, 20, 0).rows), [
+      "● Changed 1 file and ran 1 command",
+      "└ src/a.ts +2 −1",
+      "",
+      "  Fixed it.",
+      "",
+      "  4s (↑1 ↓2)",
+    ]);
+    const detailed = plain(view.transcript.view({ ...context, details: true }, 30, 0).rows);
+    assert.ok(
+      detailed.some((line) => line.includes("◦ Planning the fix")),
+      detailed.join("\n"),
+    );
+    assert.ok(
+      detailed.some((line) => line.includes("Ran npm test")),
+      detailed.join("\n"),
+    );
+  });
+});
+
+describe("what a click on the transcript does", () => {
+  it("marks a reply's code blocks with their code, and the rows between with nothing", () => {
+    const regions: unknown[] = [];
+    const rows = renderMarkdown(
+      "Look:\n\n```ts\nconst a = 1;\nconst b = 2;\n```\n\nAfter.",
+      60,
+      "  ",
+      {
+        region: (region) => regions.push(region),
+      },
+    );
+    assert.deepEqual(regions, [
+      { kind: "code", start: 2, end: 6, code: "const a = 1;\nconst b = 2;", lang: "ts" },
+    ]);
+    assert.match(stripVTControlCharacters(rows[3] ?? ""), /const a = 1/);
+    const transcript = new Transcript();
+    transcript.add({ kind: "assistant", text: "Look:\n\n```ts\nconst a = 1;\n```" });
+    const view = transcript.view({ width: 60, cwd: "/", blink: true, now: 0 }, 20, 0);
+    assert.equal(view.targets.length, view.rows.length);
+    assert.equal(view.targets[0], null);
+    assert.deepEqual(view.targets[3], {
+      target: { kind: "code", code: "const a = 1;", lang: "ts" },
+      row: 1,
+    });
+    assert.equal(view.top, 0);
+  });
+
+  it("counts a code block still streaming as one so far", () => {
+    const regions: { kind: string; code?: string }[] = [];
+    renderMarkdown("```py\nprint(1)", 60, "  ", { region: (region) => regions.push(region) });
+    assert.deepEqual(
+      regions.map(({ kind, code }) => [kind, code]),
+      [["code", "print(1)"]],
+    );
   });
 });

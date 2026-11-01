@@ -118,6 +118,8 @@ export class Menu {
   #index = 0;
   /** Entries the last render had room for, which sets a page. */
   #shown = 8;
+  /** Where the last render put its entries: the row of the first, and which entry that is. */
+  #drawn = { row: 0, start: 0, count: 0 };
   /** Where a bare list's rows start: the column of the word being completed. */
   indent = 0;
 
@@ -171,6 +173,19 @@ export class Menu {
 
   selected(): MenuEntry | undefined {
     return this.#visible()[this.#index]?.entry;
+  }
+
+  /**
+   * Selects the entry the last render drew on row `row` of its rows, as a
+   * click on it does; says whether there was one to select.
+   */
+  entryAt(row: number): boolean {
+    const offset = row - this.#drawn.row;
+    if (offset < 0 || offset >= this.#drawn.count) return false;
+    const index = this.#drawn.start + offset;
+    if (this.#visible()[index]?.entry.inert !== false) return false;
+    this.#index = index;
+    return true;
   }
 
   move(delta: number): void {
@@ -302,6 +317,7 @@ export class Menu {
       0,
       Math.min(this.#index - Math.floor(shown / 2), visible.length - shown),
     );
+    this.#drawn = { row: rows.length, start, count: Math.min(shown, visible.length - start) };
     for (const [offset, { entry: item }] of visible.slice(start, start + shown).entries()) {
       const current = start + offset === this.#index && !item.inert;
       const paint = (text: string) =>
@@ -348,6 +364,7 @@ export class Menu {
       Math.min(this.#index - Math.floor(this.#shown / 2), visible.length - this.#shown),
     );
     const rows = [rule(width)];
+    this.#drawn = { row: 1, start, count: Math.min(this.#shown, visible.length - start) };
     for (const [offset, { entry: item }] of visible.slice(start, start + this.#shown).entries()) {
       const label = pad(item.label, labelWidth);
       const current = start + offset === this.#index;

@@ -328,3 +328,24 @@ describe("Menu paste", () => {
     assert.equal(new Menu({ title: "Modes", entries: [entry("a")] }).paste("x"), false);
   });
 });
+
+describe("Menu clicks", () => {
+  it("selects the entry drawn on a clicked row, and nothing on the rest", () => {
+    const picker = new Menu({
+      title: "Pick",
+      entries: [
+        entry("alpha", "first"),
+        entry("note", "", { inert: true }),
+        entry("gamma", "third"),
+      ],
+    });
+    const rows = picker.render(60, 8);
+    const at = (label: string) =>
+      rows.findIndex((row) => stripVTControlCharacters(row).trim().startsWith(label));
+    assert.equal(picker.entryAt(at("gamma")), true);
+    assert.equal(picker.selected()?.label, "gamma");
+    assert.equal(picker.entryAt(at("note")), false, "an informational row is not chosen");
+    assert.equal(picker.entryAt(0), false, "the rule above the entries");
+    assert.equal(picker.selected()?.label, "gamma");
+  });
+});

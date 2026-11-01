@@ -2,11 +2,25 @@ import { stripVTControlCharacters } from "node:util";
 
 const RESET = "\x1b[0m";
 
+/** Characters that combine with the one before them, taking no column of their own. */
+const COMBINING = /^[\p{Mn}\p{Me}]$/u;
+const combining = new Map<number, boolean>();
+
+function isCombining(code: number): boolean {
+  let known = combining.get(code);
+  if (known === undefined) {
+    known = COMBINING.test(String.fromCodePoint(code));
+    combining.set(code, known);
+  }
+  return known;
+}
+
 export function charWidth(code: number): number {
   if (code < 0x20 || (code >= 0x7f && code < 0xa0)) return 0;
-  // Combining marks and zero-width joiners and selectors.
-  if ((code >= 0x300 && code <= 0x36f) || code === 0x200d || (code >= 0xfe00 && code <= 0xfe0f))
-    return 0;
+  if (code < 0x300) return 1;
+  // Combining marks, such as the ones Kitty's image placeholders carry, and
+  // zero-width joiners and selectors.
+  if (code === 0x200d || (code >= 0xfe00 && code <= 0xfe0f) || isCombining(code)) return 0;
   if (
     (code >= 0x1100 && code <= 0x115f) ||
     (code >= 0x2e80 && code <= 0xa4cf) ||
@@ -222,6 +236,63 @@ export function truncate(text: string, width: number): string {
     },
   );
   return `${result}…${styled ? RESET : ""}`;
+}
+
+/**
+ * Styled text with columns `from` to before `to` shown selected, in reverse
+ * video kept through any style the text sets inside them; past the text's
+ * end the selection goes on over blank cells.
+ */
+export function selectColumns(text: string, from: number, to: number): string {
+  if (to <= from) return text;
+  const on = "\x1b[7m";
+  const off = "\x1b[27m";
+  let result = "";
+  let column = 0;
+  let inside = false;
+  scan(
+    text,
+    (sequence) => {
+      result += sequence;
+      // A reset inside the selection would end its look.
+      if (inside && sequence.endsWith("m")) result += on;
+    },
+    (char, size) => {
+      if (!inside && column >= from && column < to && size > 0) {
+        result += on;
+        inside = true;
+      } else if (inside && column >= to && size > 0) {
+        result += off;
+        inside = false;
+      }
+      result += char;
+      column += size;
+    },
+  );
+  if (column < to) {
+    const start = Math.max(column, from);
+    result += " ".repeat(start - column);
+    if (!inside) result += on;
+    result += " ".repeat(to - start);
+    inside = true;
+  }
+  return inside ? result + off : result;
+}
+
+/** The plain text in columns `from` to before `to` of styled text; a wide character goes where it starts. */
+export function columnsText(text: string, from: number, to = Infinity): string {
+  let result = "";
+  let column = 0;
+  scan(
+    text,
+    () => {},
+    (char, size) => {
+      if (column >= to) return false;
+      if (column >= from) result += char;
+      column += size;
+    },
+  );
+  return result;
 }
 
 /** Pads styled text with spaces to `width` columns. */

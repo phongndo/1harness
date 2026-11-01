@@ -10,7 +10,9 @@ import {
   type AgentRow,
   type AgentStatus,
 } from "./agents.ts";
-import { renderMarkdown } from "./markdown.ts";
+import { htmlText } from "./html.ts";
+import { fit, placeholderRow, type MediaContext, type Picture, type Shown } from "./images.ts";
+import { renderMarkdown, type MarkdownOptions } from "./markdown.ts";
 import { diffLine, style } from "./theme.ts";
 import { diffBody, plainText, spread, truncate, visibleWidth, wrap } from "./text.ts";
 
@@ -22,10 +24,12 @@ export type ToolItem = Extract<
 export type Block =
   | { kind: "banner"; title: string; subtitle: string }
   /** A message for the agent; `label` says who sent it when the user did not, such as `Task from t1`. */
-  | { kind: "user"; text: string; label?: string }
+  | { kind: "user"; text: string; label?: string; images?: string[] }
   /** A task's result, as it reached the thread that delegated it. */
   | { kind: "result"; from: string; status: AgentStatus; text: string }
   | { kind: "assistant"; text: string }
+  /** What the model thought, as the harness summarizes it: a line, or all of it in detail. */
+  | { kind: "thinking"; text: string; folded?: boolean }
   | { kind: "plan"; text: string }
   /**
    * Consecutive tool items, shown as one tree. Settled once their turn has
@@ -38,8 +42,15 @@ export type Block =
       awaiting?: string[];
       /** Calls cut off when their turn ended, in a group a command outlives. */
       cut?: string[];
+      /** Folded into its finished turn's summary, shown only in detail. */
+      folded?: boolean;
     }
-  | { kind: "todos"; steps: TodoStep[] }
+  | { kind: "todos"; steps: TodoStep[]; folded?: boolean }
+  /**
+   * What a finished turn did, in place of its work: a sentence, and the files
+   * it changed with their lines added and removed.
+   */
+  | { kind: "worked"; text: string; files: { path: string; added: number; removed: number }[] }
   | { kind: "notice"; level: "info" | "warning" | "error"; text: string }
   /** A 1harness command's output, such as /mcp: a heading over aligned lines. */
   | { kind: "report"; title: string; lines: ReportSpan[][] }
@@ -47,6 +58,11 @@ export type Block =
   | { kind: "agents"; rows: AgentRow[] }
   /** The muted line that closes a turn: duration and token estimate. */
   | { kind: "summary"; text: string }
+  /** A picture, shown where the terminal can, with a caption under it. */
+  /** An image; with its file's `path`, drawn again from the file for other cells. */
+  | { kind: "image"; picture: Picture; title: string; path?: string }
+  /** A page the agent showed, drawn as a picture where the terminal shows them. */
+  | { kind: "html"; title: string; html: string }
   /** How the user answered a request, as the thread's log recorded it. */
   | {
       kind: "decision";
@@ -55,6 +71,37 @@ export type Block =
       answer: string;
       outcome: "allowed" | "declined" | "answered" | "dismissed";
     };
+
+/**
+ * What a row does when it is clicked: a picture opens on the whole screen,
+ * where it can be drawn sharper (from its file, page, or diagram source);
+ * a code block is copied; tool calls show whole, or in brief again.
+ */
+export type Target =
+  | {
+      kind: "picture";
+      picture: Picture;
+      title: string;
+      path?: string;
+      html?: string;
+      source?: string;
+    }
+  | { kind: "code"; code: string; lang: string }
+  /** Tool calls and the work a turn folded away, which show whole or in brief. */
+  | { kind: "details" };
+
+/** What a row in view does when clicked, and which of the target's rows it is. */
+export interface Hit {
+  target: Target;
+  row: number;
+}
+
+/** A target over rows `start` to before `end` of a block. */
+interface Spot {
+  start: number;
+  end: number;
+  target: Target;
+}
 
 export interface RenderContext {
   width: number;
@@ -65,6 +112,36 @@ export interface RenderContext {
   now: number;
   /** Shows tool calls whole: full commands, their output, and diffs. */
   details?: boolean;
+  /** Whether images show, and the cells they are laid out in; without it, captions only. */
+  media?: MediaContext;
+  /**
+   * A Mermaid diagram's rows at a width: placeholder rows and the picture
+   * they show, or characters; null to show its source as code.
+   */
+  diagram?: (source: string, columns: number) => { rows: string[]; picture?: Shown } | null;
+  /** Takes the pictures a block's rows show, for the screen to send ahead of them. */
+  collect?: (shown: Shown) => void;
+  /** Takes what rows `start` to before `end` of the block do when clicked. */
+  mark?: (target: Target, start: number, end: number) => void;
+  /** An image file's picture, fetched where the thread runs; undefined until it arrives. */
+  image?: (path: string) => Picture | null | undefined;
+  /**
+   * A page's rows at a width: placeholder rows and the picture they show, or
+   * a line saying it is being drawn; null to show its text instead.
+   */
+  html?: (
+    html: string,
+    columns: number,
+  ) => { rows: string[]; picture?: Shown; live?: boolean } | null;
+}
+
+/** Columns kept on each side of an image, as prose has. */
+export const IMAGE_INDENT = 2;
+
+function mediaKey(media: MediaContext | undefined): string {
+  return media && media.graphics
+    ? `${media.cell.width}x${media.cell.height}:${media.maxRows}`
+    : "text";
 }
 
 interface Entry {
@@ -75,7 +152,12 @@ interface Entry {
     version: number;
     blink: boolean;
     details: boolean;
+    media: string;
     rows: string[];
+    /** The pictures its rows show. */
+    pictures: Shown[];
+    /** What its rows do when clicked. */
+    spots: Spot[];
   } | null;
 }
 
@@ -118,6 +200,17 @@ export class Transcript {
       if (block && !skip(block)) return block;
     }
     return undefined;
+  }
+
+  /** Puts a block in just before another, which must be in the transcript. */
+  insertBefore<T extends Block>(block: T, before: Block): T {
+    const at = this.#entries.findIndex((entry) => entry.block === before);
+    this.#entries.splice(at === -1 ? this.#entries.length : at, 0, {
+      block,
+      version: 0,
+      cache: null,
+    });
+    return block;
   }
 
   add<T extends Block>(block: T): T {
@@ -164,51 +257,99 @@ export class Transcript {
    * Rows for a viewport of `height` rows that ends `scroll` rows above the
    * bottom. `total` counts every row, for clamping the scroll position.
    */
-  view(context: RenderContext, height: number, scroll: number): { rows: string[]; total: number } {
-    const blocks: string[][] = [];
+  /**
+   * The rows in view, `height` of them ending `scroll` rows above the last,
+   * with the pictures they show and what each does when clicked; `top` is
+   * the first one's place among all `total` rows.
+   */
+  view(
+    context: RenderContext,
+    height: number,
+    scroll: number,
+  ): {
+    rows: string[];
+    total: number;
+    pictures: Shown[];
+    targets: (Hit | null)[];
+    top: number;
+  } {
+    const blocks: { rows: string[]; pictures: Shown[]; spots: Spot[] }[] = [];
     let total = 0;
     for (const entry of this.#entries) {
-      const rows = this.#rows(entry, context);
-      if (rows.length === 0) continue;
-      total += rows.length + (blocks.length > 0 ? 1 : 0);
-      blocks.push(rows);
+      const rendered = this.#rows(entry, context);
+      if (rendered.rows.length === 0) continue;
+      total += rendered.rows.length + (blocks.length > 0 ? 1 : 0);
+      blocks.push(rendered);
     }
     const end = Math.max(0, total - Math.max(0, scroll));
     const start = Math.max(0, end - height);
     const rows: string[] = [];
+    const targets: (Hit | null)[] = [];
+    const pictures: Shown[] = [];
     let position = 0;
-    for (const [index, block] of blocks.entries()) {
+    for (const [index, { rows: block, pictures: used, spots }] of blocks.entries()) {
       const separated = index > 0;
       const size = block.length + (separated ? 1 : 0);
       if (position + size > start && position < end) {
-        if (separated && position >= start) rows.push("");
+        if (separated && position >= start) {
+          rows.push("");
+          targets.push(null);
+        }
         const from = Math.max(0, start - position - (separated ? 1 : 0));
         const to = Math.min(block.length, end - position - (separated ? 1 : 0));
-        for (let row = from; row < to; row++) rows.push(block[row] ?? "");
+        // The pictures of a block in view go to the terminal ahead of the text showing them.
+        for (const shown of used)
+          if (!pictures.some((other) => other.picture.id === shown.picture.id))
+            pictures.push(shown);
+        for (let row = from; row < to; row++) {
+          rows.push(block[row] ?? "");
+          const spot = spots.find((one) => row >= one.start && row < one.end);
+          targets.push(spot ? { target: spot.target, row: row - spot.start } : null);
+        }
       }
       position += size;
       if (position >= end) break;
     }
-    return { rows, total };
+    return { rows, total, pictures, targets, top: start };
   }
 
-  #rows(entry: Entry, context: RenderContext): string[] {
+  #rows(
+    entry: Entry,
+    context: RenderContext,
+  ): { rows: string[]; pictures: Shown[]; spots: Spot[] } {
     // A live block renders again on each blink, which also moves its timers on.
     const blink = isAnimated(entry.block) && context.blink;
     const details = context.details === true;
+    const media = mediaKey(context.media);
     const cache = entry.cache;
     if (
       cache &&
       cache.width === context.width &&
       cache.version === entry.version &&
       cache.blink === blink &&
-      cache.details === details
+      cache.details === details &&
+      cache.media === media
     ) {
-      return cache.rows;
+      return cache;
     }
-    const rows = renderBlock(entry.block, context);
-    entry.cache = { width: context.width, version: entry.version, blink, details, rows };
-    return rows;
+    const pictures: Shown[] = [];
+    const spots: Spot[] = [];
+    const rows = renderBlock(entry.block, {
+      ...context,
+      collect: (shown) => pictures.push(shown),
+      mark: (target, start, end) => spots.push({ start, end, target }),
+    });
+    entry.cache = {
+      width: context.width,
+      version: entry.version,
+      blink,
+      details,
+      media,
+      rows,
+      pictures,
+      spots,
+    };
+    return entry.cache;
   }
 }
 
@@ -227,24 +368,32 @@ function isRunningGroup(block: Block): boolean {
 
 export function renderBlock(block: Block, context: RenderContext): string[] {
   const { width } = context;
+  // A finished turn's work shows as its summary; in detail, all of it.
+  if ("folded" in block && block.folded && !context.details) return [];
   switch (block.kind) {
     case "banner":
       return [
         truncate(`${style.bold(style.strong(block.title))} ${style.muted(block.subtitle)}`, width),
       ];
     case "user":
-      return userRows(block, width);
+      return userRows(block, context);
     case "result":
       return resultRows(block, width);
+    case "thinking":
+      return thinkingRows(block.text, context);
+    case "worked":
+      return marked(workedRows(block, context), { kind: "details" }, context);
     case "assistant":
-      return block.text.trim() === "" ? [] : renderMarkdown(block.text, width);
+      return block.text.trim() === ""
+        ? []
+        : renderMarkdown(block.text, width, "  ", markdownOptions(context, 0));
     case "plan":
       return [
         truncate(`${style.strong("●")} ${style.bold("Proposed plan")}`, width),
-        ...renderMarkdown(block.text, width),
+        ...renderMarkdown(block.text, width, "  ", markdownOptions(context, 1)),
       ];
     case "tools":
-      return toolRows(block, context);
+      return marked(toolRows(block, context), { kind: "details" }, context);
     case "todos":
       return todoRows(block.steps, width);
     case "notice":
@@ -257,7 +406,202 @@ export function renderBlock(block: Block, context: RenderContext): string[] {
       return [truncate(style.muted(`  ${block.text}`), width)];
     case "decision":
       return decisionRows(block, width);
+    case "image":
+      return imageRows(block, context);
+    case "html":
+      return htmlRows(block, context);
   }
+}
+
+/** Lines of a page's text shown where it is not drawn, until ctrl+x shows them all. */
+const PAGE_TEXT_LINES = 12;
+
+/**
+ * A page's rows: its picture, drawn where the thread runs at the
+ * transcript's width, over a caption; or, where it cannot be drawn, its text.
+ */
+function htmlRows(block: Extract<Block, { kind: "html" }>, context: RenderContext): string[] {
+  const { width } = context;
+  const title = plainText(block.title, true);
+  const drawn = context.html?.(block.html, width - IMAGE_INDENT * 2);
+  const indent = " ".repeat(IMAGE_INDENT);
+  if (drawn) {
+    if (drawn.picture) {
+      context.collect?.(drawn.picture);
+      context.mark?.(
+        { kind: "picture", picture: drawn.picture.picture, title, html: block.html },
+        0,
+        drawn.rows.length + 1,
+      );
+    }
+    // A live page takes clicks itself; its caption is what opens it whole.
+    const caption = drawn.live
+      ? `${title} · live page · click here to open it whole`
+      : `${title} · page`;
+    return [
+      ...drawn.rows.map((row) => indent + row),
+      truncate(`${indent}${style.muted(caption)}`, width),
+    ];
+  }
+  const lines = htmlText(block.html);
+  const shown = context.details ? lines : lines.slice(0, PAGE_TEXT_LINES);
+  const rows = [
+    truncate(`${style.strong("▣")} ${style.text(title)} ${style.muted("· page")}`, width),
+  ];
+  for (const line of shown)
+    rows.push(...wrap(indent + style.soft(plainText(line, true)), width, indent));
+  if (lines.length > shown.length)
+    rows.push(
+      truncate(
+        `${indent}${style.muted(`… ${lines.length - shown.length} more lines · ctrl+x shows them`)}`,
+        width,
+      ),
+    );
+  return rows;
+}
+
+/** Changed files a turn's summary lists before saying how many more. */
+const WORKED_FILES = 6;
+
+/** A finished turn's work in a line, over the files it changed. */
+function workedRows(block: Extract<Block, { kind: "worked" }>, context: RenderContext): string[] {
+  const rows = [truncate(`${style.strong("●")} ${style.muted(block.text)}`, context.width)];
+  const files = block.files.slice(0, WORKED_FILES);
+  const more = block.files.length - files.length;
+  files.forEach((file, index) => {
+    const last = index === files.length - 1 && more === 0;
+    const counts = [
+      file.added > 0 ? style.added(`+${file.added}`) : "",
+      file.removed > 0 ? style.removed(`−${file.removed}`) : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    rows.push(
+      truncate(
+        `${style.muted(last ? "└ " : "├ ")}${style.text(displayPath(plainText(file.path, true), context.cwd))} ${counts}`,
+        context.width,
+      ),
+    );
+  });
+  if (more > 0) rows.push(style.muted(`└ ${plural(more, "more file")}`));
+  return rows;
+}
+
+/** Rows of thinking shown before the rest waits for details. */
+const THINKING_LINES = 1;
+
+/**
+ * Thinking, quietly: its first line, or every line in detail, under a hollow
+ * mark. A heading the model gave it, as **Planning the fix**, leads.
+ */
+function thinkingRows(text: string, context: RenderContext): string[] {
+  const lines = plainText(text)
+    .split("\n")
+    .map((line) => line.replace(/\*\*([^*]+)\*\*/g, "$1").trim())
+    .filter(Boolean);
+  if (lines.length === 0) return [];
+  const shown = context.details ? lines : lines.slice(0, THINKING_LINES);
+  const more = lines.length - shown.length;
+  const rows = shown.flatMap((line, index) =>
+    wrap(
+      `${index === 0 ? style.faint("◦ ") : "  "}${style.muted(style.italic(line))}`,
+      context.width,
+      "  ",
+    ),
+  );
+  // Collapsed, one line, cut to the width, with how much more there is.
+  if (!context.details) {
+    const head = rows[0] ?? "";
+    return [truncate(more > 0 ? `${head} ${style.faint(`+${more}`)}` : head, context.width)];
+  }
+  return rows;
+}
+
+/** A block's rows, all marked as doing `target` when clicked. */
+function marked(rows: string[], target: Target, context: RenderContext): string[] {
+  if (rows.length > 0) context.mark?.(target, 0, rows.length);
+  return rows;
+}
+
+/**
+ * Markdown's options for a block whose Markdown starts `offset` rows in:
+ * diagrams drawn by the context, with their pictures collected, and code
+ * blocks and diagrams marked as what a click on them does.
+ */
+function markdownOptions(context: RenderContext, offset: number): MarkdownOptions {
+  const draw = context.diagram;
+  const drawn = new Map<string, Shown>();
+  return {
+    ...(draw
+      ? {
+          diagram: (source: string, columns: number) => {
+            const result = draw(source, columns);
+            if (result?.picture) {
+              context.collect?.(result.picture);
+              drawn.set(source, result.picture);
+            }
+            return result?.rows ?? null;
+          },
+        }
+      : {}),
+    region: (region) => {
+      if (!context.mark) return;
+      if (region.kind === "code")
+        context.mark(
+          { kind: "code", code: region.code, lang: region.lang },
+          region.start + offset,
+          region.end + offset,
+        );
+      else {
+        const shown = drawn.get(region.source);
+        if (shown)
+          context.mark(
+            { kind: "picture", picture: shown.picture, title: "Diagram", source: region.source },
+            region.start + offset,
+            region.end + offset,
+          );
+      }
+    },
+  };
+}
+
+/**
+ * An image's rows: placeholder characters the terminal draws its picture in,
+ * then a caption. A terminal that shows no images gets the caption alone,
+ * saying so.
+ */
+function imageRows(block: Extract<Block, { kind: "image" }>, context: RenderContext): string[] {
+  // The file drawn for these cells once it comes; the picture it was first shown with until then.
+  const fresh = block.path && context.media?.graphics ? context.image?.(block.path) : undefined;
+  const image = fresh ?? block.picture;
+  const title = plainText(block.title, true);
+  const size = `${image.pixelWidth}×${image.pixelHeight}`;
+  const media = context.media;
+  if (!media?.graphics)
+    return [
+      truncate(
+        `${style.strong("▣")} ${style.text(title)} ${style.muted(`· ${size} · this terminal shows no images`)}`,
+        context.width,
+      ),
+    ];
+  const { columns, rows } = fit(image, context.width - IMAGE_INDENT * 2, media);
+  context.collect?.({ picture: image, columns, rows });
+  context.mark?.(
+    { kind: "picture", picture: image, title, ...(block.path ? { path: block.path } : {}) },
+    0,
+    rows + 1,
+  );
+  // Placeholder characters, which the terminal draws the picture in, row by row.
+  const indent = " ".repeat(IMAGE_INDENT);
+  const picture = Array.from(
+    { length: rows },
+    (_, row) => indent + placeholderRow(image, row, columns),
+  );
+  const caption = truncate(
+    `${" ".repeat(IMAGE_INDENT)}${style.muted(`${title} · ${size}`)}`,
+    context.width,
+  );
+  return [...picture, caption];
 }
 
 /** What the user chose: a mark for how it went, what was asked, and the answer. */
@@ -278,7 +622,8 @@ function decisionRows(block: Extract<Block, { kind: "decision" }>, width: number
   return wrap(`${mark} ${style.soft(title)} ${style.muted("→")} ${answer}`, width, "  ");
 }
 
-function userRows(block: Extract<Block, { kind: "user" }>, width: number): string[] {
+function userRows(block: Extract<Block, { kind: "user" }>, context: RenderContext): string[] {
+  const { width } = context;
   const marker = `${style.strong("┃")} `;
   const lines = plainText(block.text).replace(/\s+$/, "").split("\n");
   const shown = lines.slice(0, USER_LINES);
@@ -286,8 +631,29 @@ function userRows(block: Extract<Block, { kind: "user" }>, width: number): strin
   rows.push(...shown.flatMap((line) => wrap(marker + style.bold(line), width, marker)));
   if (lines.length > shown.length)
     rows.push(truncate(marker + style.muted(`… ${lines.length - shown.length} more lines`), width));
+  // Images sent with the message, small, under it; their names where they cannot show.
+  for (const path of block.images ?? []) {
+    const name = path.split("/").at(-1) ?? path;
+    const shownImage = context.media?.graphics ? context.image?.(path) : undefined;
+    if (shownImage && context.media) {
+      const media = { ...context.media, maxRows: Math.min(context.media.maxRows, THUMBNAIL_ROWS) };
+      const size = fit(shownImage, width - 2, media);
+      context.collect?.({ picture: shownImage, ...size });
+      context.mark?.(
+        { kind: "picture", picture: shownImage, title: name, path },
+        rows.length,
+        rows.length + size.rows,
+      );
+      for (let row = 0; row < size.rows; row++)
+        rows.push(marker + placeholderRow(shownImage, row, size.columns));
+    }
+    rows.push(truncate(`${marker}${style.muted(`▣ ${plainText(name, true)}`)}`, width));
+  }
   return rows;
 }
+
+/** The most rows an image sent with a message takes, as a thumbnail. */
+const THUMBNAIL_ROWS = 12;
 
 /** Who a result is from and how the task ended, over its first line. */
 function resultRows(block: Extract<Block, { kind: "result" }>, width: number): string[] {
@@ -417,7 +783,7 @@ function category(item: ToolItem): Category {
 }
 
 /** One sentence for a group: its top two phrases, and a count of the rest. */
-function groupSummary(items: readonly ToolItem[]): string {
+export function groupSummary(items: readonly ToolItem[]): string {
   const counts = new Map<Category, number>();
   // The sentence counts files changed, however many edits it took.
   const files = new Set<string>();
@@ -548,6 +914,17 @@ export function highlightCommand(command: string): string {
       })
       .join("") + more
   );
+}
+
+/** Lines a change adds and removes, past its diff's header. */
+export function changeCounts(change: FileChange): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const line of diffBody(change.diff.split("\n"))) {
+    if (line.startsWith("+")) added++;
+    else if (line.startsWith("-")) removed++;
+  }
+  return { added, removed };
 }
 
 function diffCounts(changes: readonly FileChange[]): string {

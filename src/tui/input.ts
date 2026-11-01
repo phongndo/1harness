@@ -15,6 +15,17 @@ export type InputEvent =
   | { type: "paste"; text: string }
   /** Mouse wheel: negative scrolls up. */
   | { type: "wheel"; delta: number }
+  /**
+   * A mouse button pressed, moved while held, or let go, at a cell counted
+   * from 0 at the top left; `button` is 0 for the left one, 1 middle, 2 right.
+   */
+  | {
+      type: "mouse";
+      action: "press" | "drag" | "release";
+      button: number;
+      row: number;
+      column: number;
+    }
   /** The terminal's reply to a background color query. */
   | { type: "background"; light: boolean }
   /** The terminal's reply to a device attributes query, which every terminal answers. */
@@ -22,7 +33,11 @@ export type InputEvent =
   /** The terminal supports the Program Status Protocol (OSC 7501). */
   | { type: "programStatus" }
   /** The terminal gained or lost focus, reported once focus reporting is on. */
-  | { type: "focus"; focused: boolean };
+  | { type: "focus"; focused: boolean }
+  /** The terminal's reply to a Kitty graphics query: whether it shows images. */
+  | { type: "graphics"; ok: boolean }
+  /** The size of a character cell in pixels, which images are sized by. */
+  | { type: "cellSize"; width: number; height: number };
 
 const PASTE_END = "\x1b[201~";
 
@@ -180,6 +195,14 @@ export class InputDecoder {
         events.push({ type: "programStatus" });
       return end - index + (end === bell ? 1 : 2);
     }
+    if (next === "_") {
+      // An APC reply, such as the Kitty graphics protocol's `ESC _ G i=31;OK ESC \`.
+      const end = data.indexOf("\x1b\\", index);
+      if (end === -1) return 0;
+      const body = data.slice(index + 2, end);
+      if (body.startsWith("G")) events.push({ type: "graphics", ok: body.endsWith(";OK") });
+      return end - index + 2;
+    }
     if (next === "O") {
       const final = data[index + 2];
       if (final === undefined) return 0;
@@ -222,10 +245,20 @@ export class InputDecoder {
     const final = data[end] ?? "";
     const raw = data.slice(index + 2, end);
     if (raw.startsWith("<") && (final === "M" || final === "m")) {
-      const [button = 0] = raw.slice(1).split(";").map(Number);
-      if (final === "M" && (button & 64) !== 0 && (button & 2) === 0) {
-        events.push({ type: "wheel", delta: (button & 1) === 0 ? -1 : 1 });
+      const [button = 0, column = 1, row = 1] = raw.slice(1).split(";").map(Number);
+      if ((button & 64) !== 0) {
+        // Up and down; sideways, which sets bit 2 as well, does nothing here.
+        if (final === "M" && (button & 2) === 0)
+          events.push({ type: "wheel", delta: (button & 1) === 0 ? -1 : 1 });
+        return length;
       }
+      events.push({
+        type: "mouse",
+        action: final === "m" ? "release" : (button & 32) !== 0 ? "drag" : "press",
+        button: button & 3,
+        row: row - 1,
+        column: column - 1,
+      });
       return length;
     }
     if (raw.startsWith("?") && final === "c") {
@@ -234,6 +267,12 @@ export class InputDecoder {
     }
     if (raw === "" && (final === "I" || final === "O")) {
       events.push({ type: "focus", focused: final === "I" });
+      return length;
+    }
+    // The reply to CSI 16 t: CSI 6 ; height ; width t.
+    if (final === "t" && raw.startsWith("6;")) {
+      const [, height = 0, width = 0] = raw.split(";").map(Number);
+      if (height > 0 && width > 0) events.push({ type: "cellSize", width, height });
       return length;
     }
     const params = raw.split(";").map((part) => Number.parseInt(part, 10) || 0);

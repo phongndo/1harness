@@ -4,7 +4,14 @@ import type { Message } from "../core/thread.ts";
 import { stripHandoff } from "../host/handoff.ts";
 import type { LogEntry, TurnTokens } from "../protocol.ts";
 import { reportStatus, type AgentRow } from "./agents.ts";
-import { Transcript, formatTokens, isToolItem, type Block } from "./transcript.ts";
+import {
+  Transcript,
+  changeCounts,
+  formatTokens,
+  groupSummary,
+  isToolItem,
+  type Block,
+} from "./transcript.ts";
 
 /** What the view needs from the client to show an entry. */
 export interface ViewContext {
@@ -43,7 +50,11 @@ function messageBlock(echo: string, message: Message | undefined): Block {
   const { origin } = message;
   switch (origin.type) {
     case "user":
-      return { kind: "user", text: message.input.text };
+      return {
+        kind: "user",
+        text: message.input.text,
+        ...(message.input.images?.length ? { images: message.input.images } : {}),
+      };
     case "task":
       return { kind: "user", text: origin.task, label: `Task from ${origin.from}` };
     case "message":
@@ -131,6 +142,9 @@ export class ThreadView {
         if (row) this.agent(row);
         break;
       }
+      case "html":
+        this.transcript.add({ kind: "html", title: entry.title, html: entry.html });
+        break;
       case "session.ended":
         this.endTurn(null, null);
         this.settle();
@@ -326,6 +340,7 @@ export class ThreadView {
       } else block.settled = true;
       this.transcript.touch(block);
     }
+    this.#fold(this.transcript.since(turn ? this.#turnStart : 0));
     if (!turn) {
       if (status === "failed" && error) this.notice("error", error);
       return;
@@ -339,6 +354,55 @@ export class ThreadView {
       status === "interrupted" ? "Interrupted · " : status === "failed" ? "Failed · " : "";
     this.transcript.add({ kind: "summary", text: `${label}${seconds}s ${tokens}` });
     if (status === "failed" && error) this.notice("error", error);
+  }
+
+  /**
+   * Folds a finished turn's work, its tool calls, thoughts, and todo lists, into
+   * one line where the work began, with the files it changed. Calls still running,
+   * as a command the turn left going, stay in view; so do agents and answers.
+   */
+  #fold(blocks: readonly Block[]): void {
+    const work = blocks.filter(
+      (block) =>
+        !("folded" in block && block.folded) &&
+        ((block.kind === "tools" && block.settled && block.items.length > 0) ||
+          block.kind === "thinking" ||
+          block.kind === "todos"),
+    );
+    const items = work.flatMap((block) => (block.kind === "tools" ? block.items : []));
+    if (items.length === 0) {
+      // A turn of thought alone folds it away, with no line to say so.
+      for (const block of work)
+        if (block.kind === "thinking") {
+          block.folded = true;
+          this.transcript.touch(block);
+        }
+      return;
+    }
+    const files = new Map<string, { path: string; added: number; removed: number }>();
+    for (const item of items) {
+      if (item.kind !== "file_change") continue;
+      for (const change of item.changes) {
+        const path = change.movePath ?? change.path;
+        const counts = changeCounts(change);
+        const known = files.get(path) ?? { path, added: 0, removed: 0 };
+        known.added += counts.added;
+        known.removed += counts.removed;
+        files.set(path, known);
+      }
+    }
+    const [first] = work;
+    if (!first) return;
+    this.transcript.insertBefore<Extract<Block, { kind: "worked" }>>(
+      { kind: "worked", text: groupSummary(items), files: [...files.values()] },
+      first,
+    );
+    for (const block of work) {
+      if (block.kind === "tools" || block.kind === "thinking" || block.kind === "todos") {
+        block.folded = true;
+        this.transcript.touch(block);
+      }
+    }
   }
 
   /** Takes a call that started an agent out of its tool group, now and when it updates. */
@@ -391,13 +455,25 @@ export class ThreadView {
         if (completed && this.turn) this.turn.phase = "Thinking";
         return;
       }
-      case "reasoning":
+      case "reasoning": {
         this.#reasoning.set(item.id, item.text);
         if (this.turn) {
           this.turn.phase = "Thinking";
           this.turn.heading = reasoningHeading(item.text) ?? this.turn.heading;
         }
+        // A thought shows where it came, as a quiet line.
+        const block =
+          existing?.kind === "thinking"
+            ? existing
+            : this.transcript.add<Extract<Block, { kind: "thinking" }>>({
+                kind: "thinking",
+                text: "",
+              });
+        this.blocks.set(item.id, block);
+        block.text = item.text;
+        this.transcript.touch(block);
         return;
+      }
       case "plan": {
         const block =
           existing?.kind === "plan" ? existing : this.transcript.add({ kind: "plan", text: "" });
@@ -465,6 +541,10 @@ export class ThreadView {
     if (reasoning === undefined) return;
     const text = reasoning + chunk;
     this.#reasoning.set(itemId, text);
+    if (block?.kind === "thinking") {
+      block.text = text;
+      this.transcript.touch(block);
+    }
     if (this.turn) {
       this.turn.phase = "Thinking";
       this.turn.heading = reasoningHeading(text) ?? this.turn.heading;
