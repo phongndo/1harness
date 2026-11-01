@@ -530,6 +530,9 @@ export class ClaudeSession implements HarnessSession {
       );
       return;
     }
+    // An unknown session reads as empty, and Claude would only fail on the first message.
+    if (messages.length === 0)
+      throw new Error(`Claude Code has no conversation ${sessionId} in ${this.info.cwd}`);
     const replay = new ClaudeTranslator({ replay: true });
     for (const message of messages.slice(-HISTORY_MESSAGES)) {
       // Compaction summaries and other entries Claude Code keeps out of the transcript.
