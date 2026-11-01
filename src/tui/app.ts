@@ -1,4 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { basename, resolve as resolvePath } from "node:path";
 import { BUILTIN_COMMANDS } from "../commands/builtins.ts";
 import {
   CommandRegistry,
@@ -32,7 +34,9 @@ import {
   SESSION_CALLS,
   type CommandInfo,
   type HelloResult,
+  type LiveFrame,
   type LogEntry,
+  type PageEvent,
   type ThreadState,
   type UiRequest,
 } from "../protocol.ts";
@@ -49,9 +53,36 @@ import {
   threadStatusInput,
   type ThreadStatusInput,
 } from "./program-status.ts";
-import { setLightTheme, style } from "./theme.ts";
+import { isLightTheme, setLightTheme, style } from "./theme.ts";
 import { spread, truncate, visibleWidth, wrap } from "./text.ts";
-import { formatTokens } from "./transcript.ts";
+import { IMAGE_INDENT, formatTokens, type Hit, type Target } from "./transcript.ts";
+import {
+  ordered,
+  pageKey,
+  paintSelection,
+  selectedText,
+  viewerFrame,
+  wordAt,
+  type Point,
+  type Selection,
+} from "./pointer.ts";
+import { runsScripts } from "../host/media.ts";
+import { Diagrams } from "./diagrams.ts";
+import {
+  CELL_QUERY,
+  DEFAULT_CELL,
+  GRAPHICS_QUERY,
+  PLACEHOLDER_LIMIT,
+  fit,
+  maxImageRows,
+  picture,
+  placeholderRow,
+  pngSize,
+  type CellSize,
+  type MediaContext,
+  type Picture,
+  type Shown,
+} from "./images.ts";
 import { ThreadView, queuedText, type ViewContext } from "./view.ts";
 
 export interface AppOptions {
@@ -73,6 +104,38 @@ export interface AppOptions {
    * another; `check` resolves once the named one answers, or throws why not.
    */
   connect?: { hosts: () => Record<string, string>; check: (spec: string) => Promise<void> };
+}
+
+/** A picture shown on the whole screen: what was clicked, and the picture drawn for the screen. */
+interface Viewer {
+  target: Extract<Target, { kind: "picture" }>;
+  picture: Picture;
+  /** A page running live, which takes the mouse and keys while open. */
+  live?: LivePage;
+  /** Where the picture was last drawn, to put the mouse on the page. */
+  layout?: { left: number; top: number; columns: number; rows: number; scroll: number };
+  /** The first of its rows on screen, for one taller than the screen. */
+  scroll: number;
+  /** When it opened, so the click that opened it does not close it. */
+  opened: number;
+}
+
+/** A page kept running on the host, as the transcript and the viewer show it. */
+interface LivePage {
+  html: string;
+  /** The host's ID for it, once it is open. */
+  id: string | null;
+  /** Its latest frame; new frames change this picture, so rows showing it stay. */
+  picture: Picture | null;
+  /** Its viewport in CSS pixels now, and as the transcript shows it, at its density there. */
+  css: { width: number; height: number };
+  inline: { width: number; height: number; scale: number };
+  /** A request is out for it. */
+  busy: boolean;
+  /** It could not run; it is drawn once instead, or as text. */
+  failed: boolean;
+  /** When a frame last showed it. */
+  seen: number;
 }
 
 /** Where the terminal's host runs. */
@@ -112,6 +175,8 @@ const COMMAND_ORDER = [
   "close",
   "forget",
   "unqueue",
+  "image",
+  "copy",
   "mcp",
   "extensions",
   "connect",
@@ -145,10 +210,31 @@ const KEYS: [string, string][] = [
   ["pgup, pgdn, wheel", "scroll the conversation"],
   ["ctrl+c", "clear input, interrupt, or exit"],
   ["ctrl+z", "suspend"],
-  ["shift+drag", "select text in most terminals"],
+  ["drag", "select text and copy it; double-click a word, triple-click a row"],
+  ["click code", "copy the code block"],
+  ["click a picture", "show it whole and sharp: a diagram, a page, an image; c copies its source"],
+  ["click a live page", "it takes the click; its caption opens it whole, where it takes keys too"],
+  ["click a list's row", "choose it"],
+  ["click a tool call", "show tool calls whole, or in brief again, as ctrl+x does"],
+  ["shift+drag", "the terminal's own selection, in most terminals"],
 ];
 
 const FRAME_MS = 16;
+/** How long a word in the status line, such as what was copied, stays. */
+const TOAST_MS = 2500;
+/** The most time between clicks that make a double or triple one. */
+const CLICK_MS = 400;
+/** How often a live page on screen is asked for a new frame. */
+const LIVE_MS = 150;
+/** A live page out of sight this long is closed, and opened afresh when seen again. */
+const LIVE_IDLE_MS = 120_000;
+/**
+ * The most pixels a live page's frame may have, and the most bytes of frames
+ * sent each second: the terminal decodes and keeps every frame, so a page
+ * that runs away must not take the terminal with it.
+ */
+const LIVE_MAX_PIXELS = 6_000_000;
+const LIVE_BYTES_PER_SECOND = 2_000_000;
 /** How long a new prompt ignores keys, which were likely typed for what it covered. */
 const PROMPT_GRACE_MS = 400;
 const MENTION_LIMIT = 50;
@@ -219,6 +305,14 @@ function keep(paged: Paged, logged: { seq: number; entry: LogEntry }): void {
   if (given.type === "item") paged.items.set(given.item.id, paged.entries.length - 1);
 }
 
+/** The widest the column gets, in columns; ONEHARNESS_COLUMN sets another. */
+const COLUMN_WIDTH = 100;
+
+function columnWidth(): number {
+  const set = Number(process.env["ONEHARNESS_COLUMN"]);
+  return Number.isInteger(set) && set >= 40 ? set : COLUMN_WIDTH;
+}
+
 /** How many log entries a thread's view loads at a time. */
 const PAGE_ENTRIES = 400;
 /** The line over a view whose earlier turns are not loaded yet. */
@@ -285,6 +379,42 @@ export class App {
   #next: string | undefined = undefined;
   /** Whether tool calls show whole, with their output and diffs. */
   #details = false;
+  /** Whether the terminal shows images, which it says when asked. */
+  #graphics = false;
+  /** A character cell's size in pixels, which images are sized by. */
+  #cell: CellSize = DEFAULT_CELL;
+  /** Pictures of image files, by path, as the host sent them. */
+  #images = new Map<string, Picture | null | "loading">();
+  /** What the last frame's transcript rows do when clicked, by screen row; `#top` is the first one's place. */
+  #targets: (Hit | null)[] = [];
+  /** Whether the host runs pages live, scripts and all. */
+  #liveHost = false;
+  /** Live pages, by page, width, theme, and cells, and by the picture showing each. */
+  #livePages = new Map<string, LivePage>();
+  #liveByPicture = new Map<number, LivePage>();
+  /** The live pages the last frame showed: on screen, and kept moving until a frame does not show them. */
+  #liveShown = new Set<LivePage>();
+  #liveTimer: NodeJS.Timeout | null = null;
+  /** Bytes of live frames sent in the current second, and when that second began. */
+  #liveBudget = { since: 0, bytes: 0 };
+  #top = 0;
+  /** The last frame's transcript rows as rendered, for picking a word out of one. */
+  #shownRows: string[] = [];
+  /** The list the last frame showed, and the screen row its rows start on, so a click can choose. */
+  #listAt: { menu: Menu; row: number } | null = null;
+  /** Text selected, or being selected, with the mouse, in the transcript's rows. */
+  #selection: Selection | null = null;
+  /** Where the left button went down, to tell a click from a drag; the last clicks, for double ones. */
+  #press: { row: number; column: number; dragged: boolean; anchor: Point | null } | null = null;
+  #clicks = { at: 0, row: -1, column: -1, count: 0 };
+  /** A word in the status line for a moment, such as what was copied. */
+  #toast: { text: string; until: number } | null = null;
+  /** A picture on the whole screen, opened by a click on it, drawn sharper once it can be. */
+  #viewer: Viewer | null = null;
+  /** Pages drawn as pictures, by theme, width, cell size, and content. */
+  #pages = new Map<string, Picture | null | "loading">();
+  /** Mermaid diagrams drawn as pictures; once drawing can start, the views draw again. */
+  #diagrams = new Diagrams(() => this.#redrawViews());
   /** The default model's ID by thread, for a harness that names it only once a turn runs. */
   #defaultModels = new Map<string, string | null>();
 
@@ -678,6 +808,55 @@ export class App {
         },
       },
       {
+        name: "copy",
+        usage: "[code]",
+        description: "copy the last reply, or its last code block, to the clipboard",
+        group: "General",
+        run: (_context, args) => {
+          const reply = this.#view.transcript.last((block) => block.kind !== "assistant");
+          if (reply?.kind !== "assistant") throw new Error("No reply to copy yet");
+          let text = reply.text.trim();
+          if (args === "code") {
+            const blocks = [...text.matchAll(/^\s*(`{3,}|~{3,})[^\n]*\n([\s\S]*?)\n\s*\1\s*$/gm)];
+            const last = blocks.at(-1)?.[2];
+            if (last === undefined) throw new Error("The last reply has no code block");
+            text = last;
+          }
+          // OSC 52: the terminal puts it on the clipboard, the one where you sit, over SSH or Rex too.
+          process.stdout.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
+          const lines = text.split("\n").length;
+          this.#notice(
+            "info",
+            `Copied ${args === "code" ? "the code block" : "the reply"} (${lines} ${lines === 1 ? "line" : "lines"}).`,
+          );
+        },
+      },
+      {
+        name: "image",
+        usage: "<path>",
+        description: "show an image in the transcript, where the terminal shows images",
+        group: "General",
+        run: async (_context, args) => {
+          if (!args) throw new Error("Usage: /image <path>");
+          // Read where the thread runs, as `@` images are, and shrunk to the room for it.
+          const path = resolvePath(this.#cwd(), args.replace(/^~(?=\/|$)/, homedir()));
+          const found = await this.#client.call("files.image", { path, ...this.#imageBox() });
+          const shown = found ? picture(Buffer.from(found.data, "base64")) : null;
+          if (!shown)
+            throw new Error(
+              `${args} could not be read as an image; without html2term where 1harness runs, only a PNG shows`,
+            );
+          this.#images.set(this.#imageKey(path), shown);
+          this.#view.local({ kind: "image", picture: shown, path, title: basename(path) });
+          this.#view.scroll = 0;
+          if (!this.#graphics)
+            this.#notice(
+              "info",
+              "This terminal did not say it shows images; ONEHARNESS_IMAGES=1 tries anyway.",
+            );
+        },
+      },
+      {
         name: "connect",
         usage: "[host]",
         description: "use 1harness on another machine, named in `1harness hosts`, or this one's",
@@ -727,6 +906,8 @@ export class App {
     this.#in.setEncoding("utf8");
     const onData = (chunk: string) => this.#input(chunk);
     const onResize = () => {
+      // A new font size changes the cells' pixels too; pictures are drawn for them.
+      this.#measureCells();
       this.#screen.invalidate();
       this.#schedule();
     };
@@ -763,6 +944,7 @@ export class App {
       return undefined;
     }
     this.#stored = hello.store !== null;
+    this.#liveHost = hello.live === true;
     this.#instance = hello.instance;
     for (const thread of hello.threads) this.#known.add(thread.id);
     for (const warning of hello.warnings)
@@ -814,7 +996,10 @@ export class App {
     if (themeSet) setLightTheme(theme === "light");
     const status = process.env["ONEHARNESS_PROGRAM_STATUS"];
     if (status === "1") this.#enableStatus();
-    const query = `${themeSet ? "" : "\x1b]11;?\x1b\\"}${status === "0" || status === "1" ? "" : STATUS_QUERY}`;
+    // Images: whether the terminal speaks the Kitty graphics protocol, and its cell size.
+    const images = process.env["ONEHARNESS_IMAGES"];
+    if (images === "1") this.#graphics = true;
+    const query = `${themeSet ? "" : "\x1b]11;?\x1b\\"}${status === "0" || status === "1" ? "" : STATUS_QUERY}${images === "0" ? "" : `${images === "1" ? "" : GRAPHICS_QUERY}${CELL_QUERY}`}`;
     if (query === "") return;
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, THEME_TIMEOUT_MS);
@@ -825,6 +1010,16 @@ export class App {
       process.stdout.write(`${query}\x1b[c`);
     });
     this.#themeReply = null;
+  }
+
+  /**
+   * Asks the terminal for its cells' size in pixels again, where it shows
+   * pictures: after a resize, which a new font size is, or on coming back
+   * into view, as a pane first drawn hidden gets its real cells only then.
+   */
+  #measureCells(): void {
+    if (this.#graphics && process.env["ONEHARNESS_IMAGES"] !== "0" && !this.#exiting)
+      process.stdout.write(CELL_QUERY);
   }
 
   #enableStatus(): void {
@@ -1113,7 +1308,7 @@ export class App {
   async #pickThread(
     words: string,
     focus: "open" | "recent",
-    loading: { dismissed: () => boolean },
+    loading: { dismissed: () => boolean; clear: () => void },
   ): Promise<void> {
     const choices: { id: string; open: boolean; native?: HarnessId }[] = [];
     const entries: MenuEntry[] = [];
@@ -1147,6 +1342,8 @@ export class App {
         this.#notice("info", `No thread mentions ${words}.`);
         return;
       }
+      // The list takes its own loading panel's place, which is no question coming up.
+      loading.clear();
       const index = await this.#pick(`Threads matching ${words}`, entries, 0, true);
       const chosen = index === null ? undefined : choices[index];
       if (chosen) await this.#resume(chosen.id, this.#harness);
@@ -1232,6 +1429,7 @@ export class App {
     }
     const current = choices.findIndex((choice) => choice.id === this.#currentId);
     const earlier = choices.findIndex((choice) => !choice.open);
+    loading.clear();
     const index = await this.#pick(
       "Threads",
       entries,
@@ -1447,12 +1645,307 @@ export class App {
   /** What the transcript renders with: the screen's width, and what is on. */
   #renderContext() {
     return {
-      width: this.#screen.columns,
+      width: this.#column().width,
       cwd: this.#cwd(),
       blink: this.#blinkOn,
       now: Date.now(),
       details: this.#details,
+      media: this.#media(),
+      diagram: (source: string, columns: number) => this.#diagram(source, columns),
+      image: (path: string) => this.#image(path),
+      html: (html: string, columns: number) => this.#page(html, columns),
     };
+  }
+
+  /** The most pixels an image takes on screen, which the host shrinks one to. */
+  #imageBox(): { width: number; height: number } {
+    const media = this.#media();
+    return {
+      width: Math.max(1, this.#column().width - 4) * media.cell.width,
+      height: media.maxRows * media.cell.height,
+    };
+  }
+
+  /** Draws every view again, as when a picture they wait for comes. */
+  #redrawViews(): void {
+    for (const view of new Set([this.#home, ...this.#views.values()])) view.transcript.invalidate();
+    this.#schedule();
+  }
+
+  /**
+   * A page's rows, drawn by the host as a picture as wide as `columns`, at
+   * the screen's density and in its theme; null for its text, where the
+   * terminal shows no pictures or the page cannot be drawn.
+   */
+  #page(html: string, columns: number): { rows: string[]; picture?: Shown; live?: boolean } | null {
+    const media = this.#media();
+    if (!media.graphics) return null;
+    const light = isLightTheme();
+    const digest = createHash("sha1").update(html).digest("hex");
+    const key = `${light ? "light" : "dark"}:${columns}:${media.cell.width}x${media.cell.height}:${digest}`;
+    // A page with scripts runs live where the host can; one that cannot is drawn once.
+    if (this.#liveHost && runsScripts(html)) {
+      const live = this.#livePage(key, html, columns);
+      if (!live.failed || live.picture) {
+        if (!live.picture) return { rows: [style.muted("Starting the page…")], live: true };
+        const shown = live.picture;
+        const size = fit(shown, columns, { ...media, maxRows: PLACEHOLDER_LIMIT });
+        return {
+          rows: Array.from({ length: size.rows }, (_, row) =>
+            placeholderRow(shown, row, size.columns),
+          ),
+          picture: { picture: shown, ...size },
+          live: true,
+        };
+      }
+    }
+    const known = this.#pages.get(key);
+    if (known === null) return null;
+    if (known === undefined || known === "loading") {
+      if (known === undefined) {
+        this.#pages.set(key, "loading");
+        const { width, scale } = this.#pageSize(columns);
+        void this.#client
+          .call("media.html", { html, width, scale, dark: !light, transparent: true })
+          .then((drawn) => picture(Buffer.from(drawn.data, "base64")))
+          .catch(() => null)
+          .then((drawn) => {
+            this.#pages.set(key, drawn);
+            this.#redrawViews();
+          });
+      }
+      return { rows: [style.muted("Drawing the page…")] };
+    }
+    // A page is as tall as its content; it scrolls with the transcript, so it may run past the screen.
+    const size = fit(known, columns, { ...media, maxRows: PLACEHOLDER_LIMIT });
+    return {
+      rows: Array.from({ length: size.rows }, (_, row) => placeholderRow(known, row, size.columns)),
+      picture: { picture: known, ...size },
+    };
+  }
+
+  /** The live page for a page at a width, opened on the host the first time it is asked for. */
+  #livePage(key: string, html: string, columns: number): LivePage {
+    const known = this.#livePages.get(key);
+    if (known) return known;
+    const { width, scale } = this.#pageSize(columns);
+    const page: LivePage = {
+      html,
+      id: null,
+      picture: null,
+      css: { width, height: 0 },
+      inline: { width, height: 0, scale },
+      busy: true,
+      failed: false,
+      seen: Date.now(),
+    };
+    this.#livePages.set(key, page);
+    void this.#client
+      .call("page.open", { html, width, scale, dark: !isLightTheme() })
+      .then((frame) => {
+        page.id = frame.id;
+        page.inline = { width: frame.cssWidth, height: frame.cssHeight, scale };
+        this.#liveFrame(page, frame);
+        this.#pollLive();
+      })
+      .catch(() => {
+        page.failed = true;
+        this.#redrawViews();
+      })
+      .finally(() => {
+        page.busy = false;
+      });
+    return page;
+  }
+
+  /**
+   * Takes a live page's new frame into the picture showing it, so the rows
+   * that show it stay as they are and the terminal is sent the frame alone;
+   * a frame of another size lays them out again.
+   */
+  #liveFrame(page: LivePage, frame: LiveFrame | null): void {
+    if (!frame || page.failed) return;
+    // A frame too large is not sent: the page stops where it was, as a picture.
+    if (frame.width * frame.height > LIVE_MAX_PIXELS) {
+      page.failed = true;
+      if (page.id) void this.#client.call("page.close", { id: page.id }).catch(() => {});
+      this.#notice("warning", "A live page grew too large to keep running; it stays as it was.");
+      return;
+    }
+    this.#liveBudget.bytes += frame.data.length;
+    page.css = { width: frame.cssWidth, height: frame.cssHeight };
+    const current = page.picture;
+    if (!current) {
+      const first = picture(Buffer.from(frame.data, "base64"));
+      if (!first) return;
+      page.picture = first;
+      this.#liveByPicture.set(first.id, page);
+      this.#redrawViews();
+      return;
+    }
+    const size = pngSize(Buffer.from(frame.data.slice(0, 64), "base64"));
+    if (!size) return;
+    const resized = size.width !== current.pixelWidth || size.height !== current.pixelHeight;
+    current.data = frame.data;
+    current.pixelWidth = size.width;
+    current.pixelHeight = size.height;
+    current.version = (current.version ?? 0) + 1;
+    if (resized) this.#redrawViews();
+    else this.#schedule();
+  }
+
+  /** Passes what the user did to a live page, and shows what it did. */
+  #liveInput(page: LivePage, event: PageEvent): void {
+    if (!page.id) return;
+    void this.#client
+      .call("page.input", { id: page.id, event })
+      .then((frame) => this.#liveFrame(page, frame))
+      .catch(() => {});
+  }
+
+  /** Asks for new frames of the live pages on screen soon; at rest, now and then, to close old ones. */
+  #pollLive(delay = LIVE_MS): void {
+    if (this.#liveTimer || this.#exiting || this.#livePages.size === 0) return;
+    this.#liveTimer = setTimeout(() => {
+      this.#liveTimer = null;
+      this.#liveTick();
+    }, delay);
+  }
+
+  #liveTick(): void {
+    const now = Date.now();
+    let showing = false;
+    if (now - this.#liveBudget.since >= 1000) this.#liveBudget = { since: now, bytes: 0 };
+    // Pages move only while someone can be watching, and within the second's budget.
+    const paused = !this.#focused || this.#liveBudget.bytes >= LIVE_BYTES_PER_SECOND;
+    for (const [key, page] of this.#livePages) {
+      if (this.#liveShown.has(page)) page.seen = now;
+      if (now - page.seen > LIVE_IDLE_MS && !page.busy) {
+        this.#dropLive(key, page);
+        continue;
+      }
+      if (!this.#liveShown.has(page)) continue;
+      showing = true;
+      if (page.busy || !page.id || paused || page.failed) continue;
+      page.busy = true;
+      void this.#client
+        .call("page.frame", { id: page.id })
+        .then((frame) => this.#liveFrame(page, frame))
+        .catch(() => this.#dropLive(key, page))
+        .finally(() => {
+          page.busy = false;
+        });
+    }
+    this.#pollLive(showing ? LIVE_MS : 5000);
+  }
+
+  /** Forgets a live page, closed or lost; seen again, it opens afresh. */
+  #dropLive(key: string, page: LivePage): void {
+    if (this.#livePages.get(key) !== page) return;
+    this.#livePages.delete(key);
+    if (page.picture) this.#liveByPicture.delete(page.picture.id);
+    if (page.id) void this.#client.call("page.close", { id: page.id }).catch(() => {});
+    this.#redrawViews();
+  }
+
+  /** The live pages a frame shows are on screen, and kept moving. */
+  #liveSeen(pictures: readonly (Picture | undefined)[]): void {
+    const now = Date.now();
+    this.#liveShown = new Set();
+    for (const shown of pictures) {
+      const page = shown ? this.#liveByPicture.get(shown.id) : undefined;
+      if (page) {
+        page.seen = now;
+        this.#liveShown.add(page);
+      }
+    }
+    if (this.#liveShown.size > 0) this.#pollLive();
+  }
+
+  /**
+   * The CSS width a page is drawn at to fill `columns`, and the device pixels
+   * per CSS pixel: small cells mean a dense screen, which the page is drawn
+   * at, so its text stays legible.
+   */
+  #pageSize(columns: number): { width: number; scale: number } {
+    const { cell } = this.#media();
+    const scale = Math.min(3, Math.max(1, Math.round((cell.height / 16) * 4) / 4));
+    return { width: Math.round((columns * cell.width) / scale), scale };
+  }
+
+  /**
+   * An image file's picture, from the host, where the file is: asked for the
+   * first time, and the views drawn again once it comes.
+   */
+  #image(path: string): Picture | null | undefined {
+    // Fetched again for other cells, as a new font size makes, so it stays sharp.
+    const key = this.#imageKey(path);
+    const known = this.#images.get(key);
+    if (known !== undefined) return known === "loading" ? undefined : known;
+    this.#images.set(key, "loading");
+    void this.#client
+      .call("files.image", { path, ...this.#imageBox() })
+      .then((found) => (found ? picture(Buffer.from(found.data, "base64")) : null))
+      .catch(() => null)
+      .then((shown) => {
+        this.#images.set(key, shown);
+        if (shown) this.#redrawViews();
+      });
+    return undefined;
+  }
+
+  #imageKey(path: string): string {
+    return `${this.#cell.width}x${this.#cell.height}\0${path}`;
+  }
+
+  #media(): MediaContext {
+    return { graphics: this.#graphics, cell: this.#cell, maxRows: maxImageRows(this.#screen.rows) };
+  }
+
+  /**
+   * A Mermaid diagram's rows: a picture where the terminal shows images, else
+   * box-drawing characters that fit, else null for its source as code.
+   */
+  #diagram(source: string, columns: number): { rows: string[]; picture?: Shown } | null {
+    const media = this.#media();
+    if (media.graphics && this.#diagrams.available) {
+      const drawn = this.#diagrams.picture(
+        source,
+        isLightTheme(),
+        columns * media.cell.width,
+        media.cell,
+      );
+      if (drawn === undefined) return { rows: [style.muted("Drawing the diagram…")] };
+      if (drawn) {
+        const size = fit(drawn, columns, media);
+        // A diagram sits in the middle of the column, as a figure does.
+        const indent = " ".repeat(Math.max(0, Math.floor((columns - size.columns) / 2)));
+        return {
+          rows: Array.from(
+            { length: size.rows },
+            (_, row) => indent + placeholderRow(drawn, row, size.columns),
+          ),
+          picture: { picture: drawn, ...size },
+        };
+      }
+    }
+    const art = this.#diagrams.ascii(source);
+    if (art && art.every((line) => visibleWidth(line) <= columns)) {
+      const widest = Math.max(0, ...art.map((line) => visibleWidth(line)));
+      const indent = " ".repeat(Math.max(0, Math.floor((columns - widest) / 2)));
+      return { rows: art.map((line) => indent + style.soft(line)) };
+    }
+    return null;
+  }
+
+  /**
+   * The column everything is laid out in: the screen's width up to a reading
+   * width, centered with the margin split on both sides.
+   */
+  #column(): { width: number; margin: number } {
+    const screen = this.#screen.columns;
+    const width = Math.min(screen, columnWidth());
+    return { width, margin: Math.floor((screen - width) / 2) };
   }
 
   /**
@@ -2118,7 +2611,10 @@ export class App {
 
   #handle(event: InputEvent): void {
     if (
-      (event.type === "key" || event.type === "paste" || event.type === "wheel") &&
+      (event.type === "key" ||
+        event.type === "paste" ||
+        event.type === "wheel" ||
+        event.type === "mouse") &&
       !this.#focused
     ) {
       this.#focused = true;
@@ -2133,7 +2629,17 @@ export class App {
         return;
       case "focus":
         this.#focused = event.focused;
+        if (event.focused) this.#measureCells();
         this.#statusChanged();
+        return;
+      case "graphics":
+        if (process.env["ONEHARNESS_IMAGES"] !== "0") this.#graphics = event.ok;
+        return;
+      case "cellSize":
+        if (event.width === this.#cell.width && event.height === this.#cell.height) return;
+        // Pictures are drawn for the cells they fill: each is drawn again for the new ones.
+        this.#cell = { width: event.width, height: event.height };
+        this.#redrawViews();
         return;
       case "background":
         setLightTheme(event.light);
@@ -2141,9 +2647,25 @@ export class App {
           view.transcript.invalidate();
         return;
       case "wheel":
-        this.#scrollBy(-event.delta * WHEEL_ROWS);
+        if (this.#viewer?.live) {
+          const { live } = this.#viewer;
+          this.#liveInput(live, {
+            type: "wheel",
+            x: live.css.width / 2,
+            y: live.css.height / 2,
+            delta_y: event.delta * 100,
+          });
+        } else if (this.#viewer) this.#viewer.scroll += event.delta * WHEEL_ROWS;
+        else this.#scrollBy(-event.delta * WHEEL_ROWS);
+        return;
+      case "mouse":
+        this.#mouse(event);
         return;
       case "paste":
+        if (this.#viewer?.live) {
+          this.#liveInput(this.#viewer.live, { type: "text", text: event.text });
+          return;
+        }
         if (this.#prompt) {
           if (this.#prompt.prompt.typing) this.#prompt.prompt.paste(event.text);
         } else if (this.#panel?.kind === "menu") {
@@ -2164,6 +2686,12 @@ export class App {
     const now = Date.now();
     const sinceLast = now - this.#typedAt;
     this.#typedAt = now;
+    if (this.#viewer) {
+      this.#viewerKey(key);
+      return;
+    }
+    // A key ends what the mouse selected.
+    this.#selection = null;
     if (key.ctrl && key.name === "z") {
       this.#suspend();
       return;
@@ -2604,6 +3132,362 @@ export class App {
     applyEditingKey(this.#editor, key);
   }
 
+  /**
+   * The mouse: a drag over the transcript selects its text, copied when the
+   * button is let go; a double click takes a word, a third the row. A click
+   * chooses a list's entry, copies a code block, or opens a picture whole.
+   */
+  #mouse(event: Extract<InputEvent, { type: "mouse" }>): void {
+    const viewer = this.#viewer;
+    if (viewer?.live) {
+      this.#viewerMouse(viewer, viewer.live, event);
+      return;
+    }
+    if (viewer) {
+      // Any click closes the view, but the one that opened it.
+      if (event.action === "release" && Date.now() - viewer.opened > CLICK_MS) this.#closeViewer();
+      return;
+    }
+    if (event.button !== 0) return;
+    const { margin, width } = this.#column();
+    const column = Math.max(0, Math.min(width - 1, event.column - margin));
+    const rows = this.#targets.length;
+    if (event.action === "press") {
+      // A selection starts where the button went down, once it moves.
+      const anchor = event.row < rows ? { row: this.#top + event.row, column } : null;
+      this.#press = { row: event.row, column: event.column, dragged: false, anchor };
+      this.#selection = null;
+      this.#schedule();
+      return;
+    }
+    const press = this.#press;
+    if (event.action === "drag") {
+      if (!press?.anchor || rows === 0) return;
+      if (!press.dragged && event.row === press.row && event.column === press.column) return;
+      press.dragged = true;
+      this.#selection ??= { anchor: press.anchor, head: press.anchor };
+      // Held past the transcript's top or bottom, it scrolls to take in more.
+      if (event.row <= 0) this.#scrollBy(1);
+      else if (event.row >= rows && this.#view.scroll > 0) this.#scrollBy(-1);
+      const row = Math.max(0, Math.min(rows - 1, event.row));
+      this.#selection.head = { row: this.#top + row, column };
+      this.#schedule();
+      return;
+    }
+    this.#press = null;
+    if (press?.dragged && this.#selection) {
+      this.#copySelection();
+      return;
+    }
+    this.#selection = null;
+    if (!press) return;
+    const now = Date.now();
+    const last = this.#clicks;
+    const again =
+      now - last.at < CLICK_MS &&
+      last.row === event.row &&
+      Math.abs(last.column - event.column) <= 1;
+    this.#clicks = {
+      at: now,
+      row: event.row,
+      column: event.column,
+      count: again ? last.count + 1 : 1,
+    };
+    if (this.#clicks.count > 1 && event.row < rows) {
+      this.#selectAt(event.row, column, this.#clicks.count > 2);
+      return;
+    }
+    this.#click(event.row, column);
+  }
+
+  /** A click: on a list's entry it chooses it, on code it copies it, on a picture it shows it whole. */
+  #click(row: number, column: number): void {
+    const list = this.#listAt;
+    if (list && row >= list.row) {
+      if (list.menu.entryAt(row - list.row))
+        this.#key({ name: "return", text: "", ctrl: false, meta: false, shift: false });
+      return;
+    }
+    const hit = this.#targets[row];
+    if (!hit) return;
+    const { target } = hit;
+    // A live page takes a click on itself; its caption opens it whole.
+    const live = target.kind === "picture" ? this.#liveByPicture.get(target.picture.id) : undefined;
+    if (live && target.kind === "picture") {
+      const columns = this.#column().width - IMAGE_INDENT * 2;
+      const size = fit(target.picture, columns, { ...this.#media(), maxRows: PLACEHOLDER_LIMIT });
+      const across = column - IMAGE_INDENT;
+      if (hit.row < size.rows && across >= 0 && across < size.columns) {
+        this.#liveInput(live, {
+          type: "click",
+          x: ((across + 0.5) / size.columns) * live.css.width,
+          y: ((hit.row + 0.5) / size.rows) * live.css.height,
+        });
+        return;
+      }
+    }
+    if (target.kind === "details") {
+      this.#details = !this.#details;
+      this.#schedule();
+    } else if (target.kind === "code") {
+      const lines = target.code.split("\n").length;
+      this.#copy(
+        target.code,
+        `Copied the ${target.lang ? `${target.lang} ` : ""}code, ${lines} ${lines === 1 ? "line" : "lines"}`,
+      );
+    } else this.#openViewer(target);
+  }
+
+  /** Selects and copies the word under a double click, or a triple click's whole row. */
+  #selectAt(row: number, column: number, whole: boolean): void {
+    const text = this.#shownRows[row] ?? "";
+    const range = whole
+      ? { from: 0, to: Math.max(0, visibleWidth(text) - 1) }
+      : wordAt(text, column);
+    if (!range) return;
+    const at = this.#top + row;
+    this.#selection = {
+      anchor: { row: at, column: range.from },
+      head: { row: at, column: range.to },
+    };
+    this.#copySelection();
+  }
+
+  /** Copies the selected text; it stays shown selected until the next key or click. */
+  #copySelection(): void {
+    const selection = this.#selection;
+    if (!selection) return;
+    const [start, end] = ordered(selection);
+    const total = this.#view.total;
+    const lines = this.#view.transcript.view(
+      this.#renderContext(),
+      end.row - start.row + 1,
+      Math.max(0, total - end.row - 1),
+    ).rows;
+    const text = selectedText(lines, selection);
+    if (!text) {
+      this.#selection = null;
+      this.#schedule();
+      return;
+    }
+    const count = text.split("\n").length;
+    this.#copy(text, count > 1 ? `Copied ${count} lines` : `Copied “${truncate(text, 48)}”`);
+  }
+
+  /** Puts text on the clipboard where the user sits, through the terminal, and says so for a moment. */
+  #copy(text: string, said: string): void {
+    // OSC 52: the terminal sets the clipboard, the one where you sit, over SSH or Rex too.
+    process.stdout.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
+    this.#toast = { text: said, until: Date.now() + TOAST_MS };
+    setTimeout(() => this.#schedule(), TOAST_MS + 50);
+    this.#schedule();
+  }
+
+  /** Opens a picture on the whole screen, and draws it again for that size. */
+  #openViewer(target: Extract<Target, { kind: "picture" }>): void {
+    const live = this.#liveByPicture.get(target.picture.id);
+    const viewer: Viewer = {
+      target,
+      picture: target.picture,
+      scroll: 0,
+      opened: Date.now(),
+      ...(live ? { live } : {}),
+    };
+    this.#viewer = viewer;
+    this.#selection = null;
+    this.#schedule();
+    if (!live) {
+      void this.#sharpen(viewer);
+      return;
+    }
+    // A live page keeps its width and is zoomed to the screen's, its viewport as tall as the screen.
+    const media = this.#media();
+    const room = {
+      width: Math.max(1, this.#screen.columns - 4) * media.cell.width,
+      height: Math.max(1, this.#screen.rows - 2) * media.cell.height,
+    };
+    const scale = Math.min(4, Math.max(live.inline.scale, room.width / live.inline.width));
+    if (live.id)
+      void this.#client
+        .call("page.resize", {
+          id: live.id,
+          width: live.inline.width,
+          height: Math.floor(room.height / scale),
+          scale,
+        })
+        .then((frame) => this.#liveFrame(live, frame))
+        .catch(() => {});
+  }
+
+  /**
+   * Draws the viewer's picture again at the screen's size, where it has
+   * something to draw from: its file, its diagram's source, or its page, drawn
+   * denser so it reads the same.
+   */
+  async #sharpen(viewer: Viewer): Promise<void> {
+    const media = this.#media();
+    const box = {
+      width: Math.max(1, this.#screen.columns - 4) * media.cell.width,
+      height: Math.max(1, this.#screen.rows - 2) * media.cell.height,
+    };
+    const { target } = viewer;
+    let sharper: Picture | null | undefined = null;
+    try {
+      if (target.path) {
+        const found = await this.#client.call("files.image", { path: target.path, ...box });
+        sharper = found ? picture(Buffer.from(found.data, "base64")) : null;
+      } else if (target.source !== undefined) {
+        sharper = this.#diagrams.picture(
+          target.source,
+          isLightTheme(),
+          box.width,
+          media.cell,
+          box.height,
+        );
+      } else if (target.html !== undefined) {
+        const { width } = this.#pageSize(this.#column().width - IMAGE_INDENT * 2);
+        const scale = Math.round(Math.min(4, Math.max(1, box.width / width)) * 100) / 100;
+        const drawn = await this.#client.call("media.html", {
+          html: target.html,
+          width,
+          scale,
+          dark: !isLightTheme(),
+          transparent: true,
+        });
+        sharper = picture(Buffer.from(drawn.data, "base64"));
+      }
+    } catch {
+      // The picture it opened with stays.
+    }
+    if (sharper && this.#viewer === viewer) {
+      viewer.picture = sharper;
+      this.#schedule();
+    }
+  }
+
+  /** The mouse over a live page shown whole goes to it; a click off it closes the view. */
+  #viewerMouse(
+    viewer: Viewer,
+    live: LivePage,
+    event: Extract<InputEvent, { type: "mouse" }>,
+  ): void {
+    const layout = viewer.layout;
+    if (!layout || event.button !== 0) return;
+    const across = event.column - layout.left;
+    const down = event.row - layout.top;
+    const inside = across >= 0 && across < layout.columns && down >= 0 && down < layout.rows;
+    if (!inside) {
+      if (event.action === "release" && Date.now() - viewer.opened > CLICK_MS) this.#closeViewer();
+      return;
+    }
+    this.#liveInput(live, {
+      type: "mouse",
+      action:
+        event.action === "press"
+          ? "mousePressed"
+          : event.action === "release"
+            ? "mouseReleased"
+            : "mouseMoved",
+      x: ((across + 0.5) / layout.columns) * live.css.width,
+      y: ((down + layout.scroll + 0.5) / layout.rows) * live.css.height,
+      buttons: event.action === "release" ? 0 : 1,
+    });
+  }
+
+  #closeViewer(): void {
+    const live = this.#viewer?.live;
+    this.#viewer = null;
+    this.#schedule();
+    // A live page goes back to the transcript's width and height.
+    if (live?.id)
+      void this.#client
+        .call("page.resize", {
+          id: live.id,
+          width: live.inline.width,
+          height: live.inline.height,
+          scale: live.inline.scale,
+        })
+        .then((frame) => this.#liveFrame(live, frame))
+        .catch(() => {});
+  }
+
+  /** Keys while a picture is shown whole: it scrolls, copies what it was drawn from, or closes. */
+  #viewerKey(key: Key): void {
+    const viewer = this.#viewer;
+    if (!viewer) return;
+    if (viewer.live) {
+      if (key.name === "escape" || (key.ctrl && key.name === "c")) this.#closeViewer();
+      else {
+        const event = pageKey(key);
+        if (event) this.#liveInput(viewer.live, event);
+      }
+      return;
+    }
+    const page = Math.max(1, this.#screen.rows - 4);
+    const step = lineStep(key);
+    if (step) viewer.scroll += step;
+    else if (key.name === "pageup" || key.name === "pagedown")
+      viewer.scroll += key.name === "pageup" ? -page : page;
+    else if (key.name === "home" || key.text === "g") viewer.scroll = 0;
+    else if (key.name === "end" || key.text === "G") viewer.scroll = Number.MAX_SAFE_INTEGER;
+    else if (key.text === "c") {
+      const { target } = viewer;
+      if (target.html !== undefined) this.#copy(target.html, "Copied the page's HTML");
+      else if (target.source !== undefined)
+        this.#copy(target.source, "Copied the diagram's source");
+      else if (target.path) this.#copy(target.path, "Copied the image's path");
+    } else if (
+      key.name === "escape" ||
+      key.name === "return" ||
+      key.name === "space" ||
+      key.text === "q" ||
+      (key.ctrl && key.name === "c")
+    )
+      this.#closeViewer();
+    this.#schedule();
+  }
+
+  /** The viewer's frame: the picture as large as the screen takes, under its name. */
+  #renderViewer(): void {
+    const viewer = this.#viewer;
+    if (!viewer) return;
+    const { target } = viewer;
+    const what =
+      target.html !== undefined
+        ? "HTML"
+        : target.source !== undefined
+          ? "source"
+          : target.path
+            ? "path"
+            : "";
+    const toast = this.#toast && Date.now() < this.#toast.until ? `✓ ${this.#toast.text} · ` : "";
+    const hints = viewer.live
+      ? "the mouse and keys go to the page · esc closes"
+      : `${toast}${what ? `c copies the ${what} · ` : ""}esc closes`;
+    const shown = viewer.live?.picture ?? viewer.picture;
+    this.#liveSeen(viewer.live ? [shown] : []);
+    const frame = viewerFrame(
+      shown,
+      target.title,
+      hints,
+      { columns: this.#screen.columns, rows: this.#screen.rows },
+      this.#media(),
+      viewer.scroll,
+      target.html !== undefined && !viewer.live,
+    );
+    viewer.scroll = frame.scroll;
+    viewer.layout = {
+      left: frame.left,
+      top: frame.top,
+      columns: frame.shown.columns,
+      rows: frame.shown.rows,
+      scroll: frame.scroll,
+    };
+    this.#targets = [];
+    this.#listAt = null;
+    this.#screen.render(frame.rows, null, [frame.shown]);
+  }
+
   #scrollBy(rows: number): void {
     const view = this.#view;
     view.scroll = Math.max(0, view.scroll + rows);
@@ -2865,7 +3749,11 @@ export class App {
     if (this.#frame) clearTimeout(this.#frame);
     this.#frame = null;
     if (this.#exiting) return;
-    const width = this.#screen.columns;
+    if (this.#viewer) {
+      this.#renderViewer();
+      return;
+    }
+    const { width, margin } = this.#column();
     const height = this.#screen.rows;
     const context = this.#renderContext();
     const shown = this.#view;
@@ -2893,11 +3781,76 @@ export class App {
       shown.scroll = Math.max(0, view.total - room);
       view = shown.transcript.view(context, room, shown.scroll);
     }
-    const cursor = footer.cursor
-      ? { row: view.rows.length + footer.cursor.row, column: footer.cursor.column }
+    // What the mouse finds where: each row's target, and what it selected, shown so.
+    this.#targets = view.targets;
+    this.#top = view.top;
+    this.#shownRows = view.rows;
+    this.#liveSeen(view.pictures.map((one) => one.picture));
+    const transcript = this.#selection
+      ? paintSelection(view.rows, this.#selection, view.top, width)
+      : view.rows;
+    // A new thread opens on a welcome, with the composer under it, centered.
+    // Only where it fits with everything else, so the composer stays on screen.
+    const welcome = this.#hero(width);
+    const hero =
+      view.rows.length + welcome.length + footer.rows.length + 2 <= height ? welcome : [];
+    const above =
+      hero.length > 0
+        ? [
+            ...transcript,
+            ...Array.from(
+              {
+                length: Math.max(
+                  1,
+                  Math.floor((height - view.rows.length - hero.length - footer.rows.length) / 2),
+                ),
+              },
+              () => "",
+            ),
+            ...hero,
+          ]
+        : transcript;
+    this.#listAt = footer.list
+      ? { menu: footer.list.menu, row: above.length + footer.list.row }
       : null;
-    this.#screen.render([...view.rows, ...footer.rows], cursor);
+    const cursor = footer.cursor
+      ? { row: above.length + footer.cursor.row, column: margin + footer.cursor.column }
+      : null;
+    const indent = " ".repeat(margin);
+    const rows = [...above, ...footer.rows].map((row) => (row === "" ? row : indent + row));
+    this.#screen.render(rows, cursor, view.pictures);
     this.#animate();
+  }
+
+  /**
+   * The welcome a new thread opens on: what to work on, and where, and with
+   * what; nothing once the thread has a turn, or while something asks.
+   */
+  #hero(width: number): string[] {
+    const current = this.#current;
+    if (!current || current.runCount > 0 || current.busy || this.#prompt || this.#view.turn)
+      return [];
+    const info = current.info;
+    const folder = basename(info.cwd) || info.cwd;
+    const model = info.model ?? this.#defaultModel();
+    const center = (text: string) =>
+      " ".repeat(Math.max(0, Math.floor((width - visibleWidth(text)) / 2))) + text;
+    return [
+      center(
+        `${style.bold(style.strong("What should we work on in"))} ${style.bold(style.link(folder))}${style.bold(style.strong("?"))}`,
+      ),
+      center(
+        style.muted(
+          [this.#harnessLabel(current.harness), model, info.runtimeMode]
+            .filter(Boolean)
+            .join(" · "),
+        ),
+      ),
+      "",
+      center(
+        style.faint("@ files   / commands   shift+tab plan   ctrl+t threads   ctrl+x details"),
+      ),
+    ];
   }
 
   /** Runs the blink only while something on screen is in progress. */
@@ -2916,7 +3869,15 @@ export class App {
   }
 
   /** The rows below the transcript: activity, queue, and the composer or a panel. */
-  #footer(width: number, height: number): { rows: string[]; cursor: CursorPosition | null } {
+  #footer(
+    width: number,
+    height: number,
+  ): {
+    rows: string[];
+    cursor: CursorPosition | null;
+    /** The list shown, and the footer row its rows start on. */
+    list?: { menu: Menu; row: number };
+  } {
     const rows: string[] = [""];
     if (this.#view.turn && !this.#prompt) rows.push(this.#activity(width), "");
     const queue = this.#current?.queue ?? [];
@@ -2944,6 +3905,7 @@ export class App {
     if (attention) rows.push(attention, "");
 
     let cursor: CursorPosition | null = null;
+    let list: { menu: Menu; row: number } | undefined;
     if (this.#prompt) {
       // The rows the footer has left, under the queue and the attention line.
       const rendered = this.#prompt.prompt.render(width, height - rows.length);
@@ -2953,6 +3915,13 @@ export class App {
     } else {
       const limit = Math.max(1, Math.min(10, Math.floor(height / 3)));
       const layout = this.#editor.layout(`${style.strong("┃")} `, width);
+      // An empty composer says what it takes.
+      if (this.#editor.empty && !this.#panel) {
+        const hint = this.#live?.busy
+          ? "Add to the turn, or tab to queue a message"
+          : "Ask anything · @ files · / commands";
+        layout.rows[0] = truncate(`${style.strong("┃")} ${style.faint(hint)}`, width);
+      }
       const start = Math.max(
         0,
         Math.min(layout.cursor.row - limit + 1, layout.rows.length - limit),
@@ -2962,6 +3931,13 @@ export class App {
       rows.push(...layout.rows.slice(start, start + limit));
       // Room for the list: the screen less the rows above it, the panel chrome, and a little transcript.
       const listRows = Math.max(3, Math.min(14, height - rows.length - 8));
+      const listed =
+        this.#panel?.kind === "menu"
+          ? this.#panel.menu
+          : this.#panel
+            ? null
+            : (this.#slash ?? this.#args?.menu ?? this.#mention?.menu ?? null);
+      if (listed) list = { menu: listed, row: rows.length };
       if (this.#panel?.kind === "menu") rows.push(...this.#panel.menu.render(width, listRows));
       else if (this.#panel?.kind === "info")
         rows.push(...infoPanel(this.#panel.title, this.#panel.rows, width));
@@ -2975,9 +3951,13 @@ export class App {
     if (rows.length > height) {
       const cut = rows.length - height;
       if (cursor) cursor = { ...cursor, row: Math.max(0, cursor.row - cut) };
-      return { rows: rows.slice(cut), cursor };
+      return {
+        rows: rows.slice(cut),
+        cursor,
+        ...(list && list.row >= cut ? { list: { ...list, row: list.row - cut } } : {}),
+      };
     }
-    return { rows, cursor };
+    return { rows, cursor, ...(list ? { list } : {}) };
   }
 
   /**
@@ -3021,6 +4001,8 @@ export class App {
 
   #statusLine(width: number): string {
     if (this.#exitArmed) return style.muted("Press ctrl+c again to exit");
+    if (this.#toast && Date.now() < this.#toast.until)
+      return truncate(`${style.added("✓")} ${style.text(this.#toast.text)}`, width);
     const info = this.#info;
     const parts: string[] = [this.#harness];
     if (info) {
