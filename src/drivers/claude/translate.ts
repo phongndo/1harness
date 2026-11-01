@@ -349,6 +349,11 @@ export class ClaudeTranslator {
   }
 
   /** What each task Claude is still running does, such as a background agent. */
+  /** Forgets background tasks, which end without word when Claude Code restarts. */
+  clearBackgroundWork(): void {
+    this.#work.clear();
+  }
+
   get backgroundWork(): string[] {
     return [...this.#work.values()]
       .filter((task) => task.background)

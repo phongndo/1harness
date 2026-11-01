@@ -515,6 +515,8 @@ export class ClaudeSession implements HarnessSession {
       this.info.interactionMode = interactionMode;
       const previous = this.#query;
       this.#input.end();
+      // The old process takes its background tasks with it, without reporting their end.
+      this.#translator.clearBackgroundWork();
       this.#open(this.info.threadId);
       previous?.close();
     } else {

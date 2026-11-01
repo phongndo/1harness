@@ -256,6 +256,10 @@ describe("ClaudeTranslator", () => {
       summary: "done",
     });
     assert.deepEqual(translator.backgroundWork, []);
+    // A restart of Claude Code ends its tasks without a word, so they are forgotten.
+    system({ subtype: "task_started", task_id: "c", description: "Watch", is_backgrounded: true });
+    translator.clearBackgroundWork();
+    assert.deepEqual(translator.backgroundWork, []);
   });
 
   it("builds one task list from Claude's task tools", () => {
