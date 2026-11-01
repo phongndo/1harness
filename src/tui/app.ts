@@ -18,10 +18,16 @@ import type {
 import { FileIndex, mentionedImages, type FileMatch } from "../core/files.ts";
 import { configDir, stateDir } from "../core/paths.ts";
 import { errorMessage, type Thread, type ThreadEvent } from "../core/thread.ts";
+import { findDriver } from "../drivers/index.ts";
 import type { ToolDefinition } from "../extensions/api.ts";
 import { ExtensionHost } from "../extensions/host.ts";
 import { ToolServer } from "../extensions/tool-server.ts";
-import { ThreadManager, type ManagedThread, type ManagerEvent } from "../host/manager.ts";
+import {
+  ThreadManager,
+  type ManagedThread,
+  type ManagerEvent,
+  type SwitchResult,
+} from "../host/manager.ts";
 import { Orchestrator } from "../host/orchestrator.ts";
 import { agentRowOf, agentStatus, harnessLabel, treePrefixes } from "./agents.ts";
 import { Editor, applyEditingKey } from "./editor.ts";
@@ -90,6 +96,55 @@ function oneLine(text: string): string {
 /** How a file mention is written: `@path`, quoted when the path has spaces. */
 function mentionText(path: string): string {
   return /[\s"\\]/.test(path) ? `@"${path.replace(/["\\]/g, "\\$&")}"` : `@${path}`;
+}
+
+function harnessName(harness: HarnessId): string {
+  return findDriver(harness)?.label ?? harness;
+}
+
+/** A resumed thread this large, or idle this long, costs more to pick up than it looks. */
+const HEAVY_RESUME_TOKENS = 100_000;
+const COLD_RESUME_MS = 60 * 60 * 1000;
+
+function idleFor(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 1) return "moments ago";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? `${hours}h ago` : `${Math.round(hours / 24)}d ago`;
+}
+
+/**
+ * What a move to another harness did, in a sentence or two, and how loudly to
+ * say it: a warning when the thread it resumed is large or long idle, since its
+ * first message pays for all of that context again.
+ */
+function describeSwitch(result: SwitchResult): { level: "info" | "warning"; text: string } {
+  const to = harnessName(result.to);
+  const lines: string[] = [];
+  if (result.resumeError)
+    lines.push(
+      `Could not resume ${to}'s earlier thread (${result.resumeError}); started a new one.`,
+    );
+  const context = result.resumedContext;
+  const size = context?.tokens ? `about ${formatTokens(context.tokens)} tokens of context, ` : "";
+  const where = context
+    ? `its earlier thread (${size}last used ${idleFor(context.idleMs)})`
+    : "a new thread";
+  const turns = `${result.handedOver} ${result.handedOver === 1 ? "turn" : "turns"}`;
+  lines.push(
+    result.handedOver > 0
+      ? `Now on ${to}, in ${where}. Your next message brings it up to date on ${context ? `the ${turns} since` : `the ${turns} before`}.`
+      : `Now on ${to}, in ${where}.`,
+  );
+  const heavy =
+    context !== null &&
+    ((context.tokens ?? 0) >= HEAVY_RESUME_TOKENS || context.idleMs >= COLD_RESUME_MS);
+  if (heavy)
+    lines.push(
+      `Its whole earlier context is sent again with that message. /harness ${result.to} fresh starts a new ${to} thread with a handoff instead.`,
+    );
+  return { level: heavy ? "warning" : "info", text: lines.join("\n") };
 }
 
 function describeLimit(limit: RateLimit): string {
@@ -262,6 +317,7 @@ export class App {
           resume: options.resume ?? null,
           ...(options.defaultModel ? { model: null, effort: null } : {}),
         }),
+      switchHarness: (harness, options) => this.#switchHarness(harness, options?.fresh === true),
       exit: () => this.#exit(),
     } satisfies Omit<CommandContext, "harness" | "thread" | "info">;
     // Read live, since the thread changes under a command that outlives it.
@@ -450,6 +506,32 @@ export class App {
     this.#settings = { ...settings, resume: null };
     void this.#loadCommands();
     if (previous && previous.id !== this.#currentId) await this.#retire(previous);
+  }
+
+  /**
+   * Moves the thread on screen to another harness, carrying its context over.
+   * With no thread running, starts one on that harness instead.
+   */
+  async #switchHarness(harness: HarnessId, fresh: boolean): Promise<void> {
+    const current = this.#current;
+    if (!current || current.status === "closed") {
+      // Models and efforts are harness-specific, so the new thread uses its defaults.
+      await this.#open(harness, { ...this.#settings, resume: null, model: null, effort: null });
+      return;
+    }
+    const settle = this.#context.ui.progress(
+      harness === current.harness
+        ? `Starting ${harnessName(harness)} over…`
+        : `Moving ${current.id} to ${harnessName(harness)}…`,
+    );
+    try {
+      const { level, text } = describeSwitch(
+        await this.#manager.switchHarness(current.id, harness, { fresh }),
+      );
+      settle(level, text);
+    } catch (error) {
+      settle("error", `Could not move to ${harnessName(harness)}: ${errorMessage(error)}`);
+    }
   }
 
   /** Whether a thread or one it started still has work. */
@@ -675,6 +757,10 @@ export class App {
       }
       case "commands.updated":
         if (current) void this.#loadCommands();
+        return;
+      case "session.replaced":
+        // Another harness: its models, commands, and settings replace the old one's.
+        if (current && managed) this.#show(managed);
         return;
       case "session.closed":
         this.#dropRequests(threadId);

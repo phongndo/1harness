@@ -7,6 +7,7 @@ import {
   liveSession,
   type CommandContext,
   type CommandDefinition,
+  type Completions,
 } from "./registry.ts";
 import { describeMcpServer, mcpListReport, mcpServerReport } from "./reports.ts";
 
@@ -61,11 +62,37 @@ const quit: CommandDefinition = {
   run: (context) => context.exit(),
 };
 
+/** Every harness, with the current one marked. */
+function harnessCompletions(context: CommandContext): Completions {
+  return {
+    start: 0,
+    items: drivers().map((driver) =>
+      completion(driver.id, driver.id === context.harness ? "current" : driver.label),
+    ),
+  };
+}
+
+/** The harness with this ID, or an error listing the ones there are. */
+function namedHarness(name: string) {
+  const all = drivers();
+  const driver = all.find((candidate) => candidate.id === name);
+  if (!driver)
+    throw new Error(`No harness named ${name}; try ${all.map((entry) => entry.id).join(", ")}`);
+  return driver;
+}
+
 const newThread: CommandDefinition = {
   name: "new",
-  description: "start a new thread",
+  usage: "[harness]",
+  description: "start a new thread, on another harness if named",
   group: "Session",
-  run: (context) => context.openThread(),
+  complete: harnessCompletions,
+  run(context, args) {
+    if (!args) return context.openThread();
+    const driver = namedHarness(args);
+    // Models and efforts are harness-specific, so another harness starts with its defaults.
+    return context.openThread({ harness: driver.id, defaultModel: driver.id !== context.harness });
+  },
 };
 
 const resume: CommandDefinition = {
@@ -104,18 +131,27 @@ const resume: CommandDefinition = {
 
 const harness: CommandDefinition = {
   name: "harness",
-  usage: "[name]",
-  description: "switch harness in a new thread",
+  usage: "[name] [fresh]",
+  description: "move this thread to another harness, which picks up where it left off",
   group: "Session",
-  complete: (context) => ({
-    start: 0,
-    items: drivers().map((driver) =>
-      completion(driver.id, driver.id === context.harness ? "current" : driver.label),
-    ),
-  }),
+  complete(context, args) {
+    const space = args.indexOf(" ");
+    if (space === -1)
+      return {
+        start: 0,
+        items: harnessCompletions(context).items.map((item) => ({ ...item, more: true })),
+      };
+    return {
+      start: space + 1,
+      items: [completion("fresh", "start it a new thread rather than resume its earlier one")],
+    };
+  },
   async run(context, args) {
     const all = drivers();
-    let chosen = all.find((driver) => driver.id === args);
+    const [name = "", flag = ""] = args.split(/\s+/);
+    if (flag && flag !== "fresh") throw new Error("Usage: /harness [name] [fresh]");
+    const fresh = flag === "fresh";
+    let chosen = name ? namedHarness(name) : undefined;
     if (!chosen) {
       const index = await context.ui.pick(
         "Harnesses",
@@ -133,8 +169,15 @@ const harness: CommandDefinition = {
       );
       chosen = index === null ? undefined : all[index];
     }
-    // Models and efforts are harness-specific, so the new thread uses its defaults.
-    if (chosen) await context.openThread({ harness: chosen.id, defaultModel: true });
+    if (!chosen) return;
+    if (chosen.id === context.harness && liveSession(context) && !fresh) {
+      context.ui.notify(
+        "info",
+        `Already on ${chosen.label}. /harness ${chosen.id} fresh starts it over with a handoff.`,
+      );
+      return;
+    }
+    await context.switchHarness(chosen.id, { fresh });
   },
 };
 

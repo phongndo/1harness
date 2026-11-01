@@ -63,6 +63,13 @@ export interface CommandContext {
     resume?: string;
     defaultModel?: boolean;
   }): Promise<void>;
+  /**
+   * Moves the current thread onto another harness, which gets a handoff of the
+   * turns it has not seen; with no thread running, starts one there instead.
+   * `fresh` starts the harness a new thread rather than resuming its earlier
+   * one, and can restart the current harness.
+   */
+  switchHarness(harness: HarnessId, options?: { fresh?: boolean }): Promise<void>;
   exit(): Promise<void>;
 }
 
