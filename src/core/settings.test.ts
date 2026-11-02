@@ -11,12 +11,12 @@ describe("loadSettings", () => {
     const dir = mkdtempSync(join(tmpdir(), "1harness-settings-"));
     try {
       assert.deepEqual(loadSettings(dir), {
-        settings: { harness: null, mode: null, retainClosedDays: null },
+        settings: { harness: null, mode: null, retainClosedDays: null, agentMode: null },
         warnings: [],
       });
       writeFileSync(join(dir, "settings.json"), '{ "mode": "auto" }');
       assert.deepEqual(loadSettings(dir), {
-        settings: { harness: null, mode: "auto", retainClosedDays: null },
+        settings: { harness: null, mode: "auto", retainClosedDays: null, agentMode: null },
         warnings: [],
       });
       writeFileSync(join(dir, "settings.json"), '{ "retainClosedDays": 30 }');
@@ -26,6 +26,8 @@ describe("loadSettings", () => {
       const kept = loadSettings(dir);
       assert.equal(kept.settings.retainClosedDays, null);
       assert.match(kept.warnings[0] ?? "", /retainClosedDays/);
+      writeFileSync(join(dir, "settings.json"), '{ "agentMode": "auto-edit" }');
+      assert.equal(loadSettings(dir).settings.agentMode, "auto-edit");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -39,6 +41,7 @@ describe("loadSettings", () => {
         writeFileSync(file, text);
         const loaded = loadSettings(dir);
         assert.equal(loaded.settings.mode, "supervised", text);
+        assert.equal(loaded.settings.agentMode, "supervised", text);
         assert.match(loaded.warnings[0] ?? "", /threads start in supervised until it is fixed/);
       }
       // A file that exists but cannot be read is not the same as no file.

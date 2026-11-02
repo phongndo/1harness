@@ -13,7 +13,15 @@ export interface Settings {
   mode: RuntimeMode | null;
   /** How many days a closed thread is kept; null keeps them all. Pinned ones are always kept. */
   retainClosedDays: number | null;
+  /**
+   * The most an agent outside 1harness, using `1harness mcp` or the server's
+   * `/mcp`, may start a thread in or act on; `DEFAULT_AGENT_MODE` when unset.
+   */
+  agentMode: RuntimeMode | null;
 }
+
+/** What agents outside 1harness may start and act on unless settings say otherwise. */
+export const DEFAULT_AGENT_MODE: RuntimeMode = "auto";
 
 export function settingsFile(configDir: string): string {
   return join(configDir, "settings.json");
@@ -28,7 +36,12 @@ export function loadSettings(configDir: string): { settings: Settings; warnings:
   const file = settingsFile(configDir);
   // A broken file keeps every thread, since it may have meant to keep more.
   const broken = (problem: string) => ({
-    settings: { harness: null, mode: "supervised" as const, retainClosedDays: null },
+    settings: {
+      harness: null,
+      mode: "supervised" as const,
+      retainClosedDays: null,
+      agentMode: "supervised" as const,
+    },
     warnings: [`${file}: ${problem}; threads start in supervised until it is fixed`],
   });
   let text: string;
@@ -36,7 +49,10 @@ export function loadSettings(configDir: string): { settings: Settings; warnings:
     text = readFileSync(file, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT")
-      return { settings: { harness: null, mode: null, retainClosedDays: null }, warnings: [] };
+      return {
+        settings: { harness: null, mode: null, retainClosedDays: null, agentMode: null },
+        warnings: [],
+      };
     return broken((error as Error).message);
   }
   let parsed: unknown;
@@ -51,6 +67,9 @@ export function loadSettings(configDir: string): { settings: Settings; warnings:
   const mode = values["mode"];
   if (mode !== undefined && mode !== null && !isRuntimeMode(mode))
     return broken(`mode must be one of: ${RUNTIME_MODES.join(", ")}`);
+  const agentMode = values["agentMode"];
+  if (agentMode !== undefined && agentMode !== null && !isRuntimeMode(agentMode))
+    return broken(`agentMode must be one of: ${RUNTIME_MODES.join(", ")}`);
   const warnings: string[] = [];
   const named = values["harness"];
   let harness: string | null = null;
@@ -64,7 +83,12 @@ export function loadSettings(configDir: string): { settings: Settings; warnings:
   else if (retain !== undefined && retain !== null)
     warnings.push(`${file}: retainClosedDays must be a number of days; closed threads are kept`);
   return {
-    settings: { harness, mode: isRuntimeMode(mode) ? mode : null, retainClosedDays },
+    settings: {
+      harness,
+      mode: isRuntimeMode(mode) ? mode : null,
+      retainClosedDays,
+      agentMode: isRuntimeMode(agentMode) ? agentMode : null,
+    },
     warnings,
   };
 }

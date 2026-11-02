@@ -1,4 +1,5 @@
 import type { HarnessId } from "../core/events.ts";
+import { looksLikeThreadId } from "../core/thread-id.ts";
 import type { RunRecord } from "./manager.ts";
 
 /** About how much of a handoff the turns may take, so it stays a small part of a context window. */
@@ -59,7 +60,10 @@ function sender(run: RunRecord): string {
     case "task":
       return `Task from thread ${origin.from}`;
     case "message":
-      return `Message from thread ${origin.from}`;
+      // An agent outside 1harness sends from no thread.
+      return looksLikeThreadId(origin.from)
+        ? `Message from thread ${origin.from}`
+        : `Message from ${origin.from}`;
     case "report":
       return `Result from thread ${origin.from}`;
   }

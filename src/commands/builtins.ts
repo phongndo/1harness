@@ -11,6 +11,8 @@ import {
   type Completions,
   type PickEntry,
 } from "./registry.ts";
+import { parseInput } from "../operations/input.ts";
+import type { OperationInfo } from "../operations/operation.ts";
 import { describeMcpServer, mcpListReport, mcpServerReport } from "./reports.ts";
 
 const MCP_ACTIONS: Record<McpAction, { description: string; progress: string }> = {
@@ -521,6 +523,72 @@ const mcp: CommandDefinition = {
 };
 
 /** 1harness's own commands, registered like any extension's. */
+/** The words an operation's input takes, from its schema. */
+function inputKeys(operation: OperationInfo): [string, string][] {
+  const properties = (operation.inputSchema["properties"] ?? {}) as Record<
+    string,
+    { description?: string; type?: string }
+  >;
+  return Object.entries(properties).map(([key, schema]) => [
+    key,
+    schema.description ?? schema.type ?? "",
+  ]);
+}
+
+const op: CommandDefinition = {
+  name: "op",
+  usage: "[operation] [key=value…]",
+  description: "do what agents do through 1harness's tools: open, steer, follow, or move threads",
+  group: "Tools",
+  complete: (context, args) => {
+    const operations = context.lookup("operations", () => context.operations());
+    const words = args.split(" ");
+    if (words.length === 1)
+      return {
+        start: 0,
+        items: operations.map((operation) =>
+          completion(operation.name, oneLine(operation.description).split(". ")[0] ?? "", true),
+        ),
+      };
+    const operation = operations.find((candidate) => candidate.name === words[0]);
+    if (!operation) return null;
+    const given = new Set(words.slice(1, -1).map((word) => word.split("=")[0]));
+    return {
+      start: args.length - (words.at(-1)?.length ?? 0),
+      items: inputKeys(operation)
+        .filter(([key]) => !given.has(key))
+        .map(([key, detail]) => completion(`${key}=`, detail, true)),
+    };
+  },
+  async run(context, args) {
+    const [name, ...words] = args.split(/\s+/).filter(Boolean);
+    const operations = await context.operations();
+    if (!name) {
+      context.ui.report({
+        title: "Operations",
+        lines: operations.map((operation) => [
+          { text: `${operation.name}  `, tone: "strong" },
+          { text: oneLine(operation.description), tone: "soft" },
+        ]),
+      });
+      return;
+    }
+    const operation = operations.find((candidate) => candidate.name === name);
+    if (!operation) throw new Error(`No operation ${name}; /op lists them`);
+    const input = parseInput(words);
+    // The thread on screen is the one meant, unless another is named.
+    const takesThread = inputKeys(operation).some(([key]) => key === "threadId");
+    if (takesThread && input["threadId"] === undefined && context.thread)
+      input["threadId"] = context.thread.id;
+    const result = await context.runOperation(name, input);
+    const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
+    context.ui.report({
+      title: name,
+      lines: text.split("\n").map((line) => [{ text: line, tone: "text" }]),
+    });
+  },
+};
+
 export const BUILTIN_COMMANDS: readonly CommandDefinition[] = [
   quit,
   newThread,
@@ -534,4 +602,5 @@ export const BUILTIN_COMMANDS: readonly CommandDefinition[] = [
   mode,
   plan,
   mcp,
+  op,
 ];

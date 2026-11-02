@@ -1,4 +1,5 @@
 import { isRuntimeMode, modeRank } from "../core/events.ts";
+import type { MessageOrigin } from "../core/thread.ts";
 import {
   checkHarness,
   drivers,
@@ -6,7 +7,9 @@ import {
   harnessInfo,
   type DriverDefinition,
 } from "../drivers/index.ts";
-import type { ToolContext, ToolDefinition } from "../extensions/api.ts";
+import type { ToolDefinition } from "../extensions/api.ts";
+import { OperationError, type Caller, type Operation } from "../operations/operation.ts";
+import { agentTool } from "../operations/tools.ts";
 import type { TaskRow } from "../store/store.ts";
 import type { HarnessInfo } from "../protocol.ts";
 import {
@@ -16,6 +19,7 @@ import {
   type RunRecord,
   type ThreadManager,
 } from "./manager.ts";
+import { Scope, type ThreadSnapshot } from "./scope.ts";
 
 const ROLES = ["implementation", "research", "review", "design", "test", "general"];
 /** How many delegations deep work may go below a user's thread. */
@@ -31,16 +35,6 @@ const RESULT_LIMIT = 8000;
 const READ_LIMIT = 40_000;
 /** How many of a run's commands thread_read shows, the latest ones. */
 const COMMAND_COUNT = 20;
-
-/** A refusal an agent can act on: a stable code and a sentence. */
-export class OrchestrationError extends Error {
-  readonly code: string;
-
-  constructor(code: string, message: string) {
-    super(`${code}: ${message}`);
-    this.code = code;
-  }
-}
 
 /** How a task stands: its run's status, or why it has none. */
 type TaskStatus = RunRecord["status"] | "starting" | "cancelled";
@@ -76,7 +70,7 @@ function runNumber(input: Record<string, unknown>, name: string): number | undef
   const value = input[name];
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "number" || !Number.isInteger(value) || value < 1)
-    throw new OrchestrationError("invalid_request", `${name} must be a run number, from 1`);
+    throw new OperationError("invalid_request", `${name} must be a run number, from 1`);
   return value;
 }
 
@@ -84,8 +78,58 @@ function text(input: Record<string, unknown>, name: string): string | undefined 
   const value = input[name];
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "string")
-    throw new OrchestrationError("invalid_request", `${name} must be a string`);
+    throw new OperationError("invalid_request", `${name} must be a string`);
   return value.trim() || undefined;
+}
+
+/** A thread in brief, with what it waits on the user for. */
+export function threadView(thread: ThreadSnapshot) {
+  const info = thread.thread.info;
+  const last = thread.runs.at(-1);
+  const requests = thread.thread.requests;
+  return {
+    threadId: thread.id,
+    title: thread.title,
+    harness: thread.harness,
+    status: thread.status,
+    parentId: thread.parentId,
+    runtimeMode: info.runtimeMode,
+    plan: info.interactionMode === "plan",
+    runs: thread.runs.length,
+    lastResult: last?.result ? clip(last.result.slice(0, 400)) : null,
+    ...(requests.length > 0
+      ? {
+          waitingOn: requests.map((request) =>
+            request.kind === "approval"
+              ? {
+                  requestId: request.id,
+                  kind: request.kind,
+                  title: request.title,
+                  options: request.options.map(({ id, label, effect }) => ({
+                    optionId: id,
+                    label,
+                    effect,
+                  })),
+                }
+              : {
+                  requestId: request.id,
+                  kind: request.kind,
+                  questions: request.questions.map(({ id, question, options }) => ({
+                    id,
+                    question,
+                    options: options.map((option) => option.label),
+                  })),
+                },
+          ),
+        }
+      : {}),
+  };
+}
+
+/** Where a message from `caller` says it came from; `thread` is an agent's own. */
+function senderOf(caller: Caller, thread: string | null): MessageOrigin {
+  if (caller.kind === "user") return { type: "user" };
+  return { type: "message", from: thread ?? "an agent outside 1harness" };
 }
 
 function runView(run: RunRecord) {
@@ -111,12 +155,14 @@ function runView(run: RunRecord) {
 
 /**
  * Lets agents orchestrate other agents through 1harness: start a task on any
- * harness, wait for or poll its result, cancel it, and list, read, message,
- * wait on, or interrupt threads. The tools are served on the `1harness` MCP
- * server every session has, and they call the same thread manager clients use.
+ * harness, wait for or poll its result, and cancel it. Its operations to list,
+ * read, message, wait on, or interrupt threads serve people and agents outside
+ * 1harness too, each seeing and acting on what `Scope` allows. Agents get them
+ * on the `1harness` MCP server every session has.
  */
 export class Orchestrator {
   #manager: ThreadManager;
+  #scope: Scope;
   #env: NodeJS.ProcessEnv;
   #tasks = new Map<string, Task>();
   /** Tasks by caller and request ID, set before the task starts so retries find it. */
@@ -130,23 +176,31 @@ export class Orchestrator {
   storedTask: (id: string) => Pick<ManagedThread, "harness" | "title" | "runs" | "error"> | null =
     () => null;
 
-  constructor(manager: ThreadManager, env: NodeJS.ProcessEnv = process.env) {
+  constructor(
+    manager: ThreadManager,
+    env: NodeJS.ProcessEnv = process.env,
+    scope: Scope = new Scope(manager),
+  ) {
     this.#manager = manager;
+    this.#scope = scope;
     this.#env = env;
     manager.subscribe((event) => {
       if (event.type === "thread.updated") this.#deliver(event.thread);
     });
   }
 
-  get tools(): ToolDefinition[] {
+  /** What agents use to hand out and follow work; the thread ones serve every caller. */
+  get operations(): Operation[] {
+    const agent = (caller: Caller) => this.#scope.agent(caller);
     return [
       {
         name: "orchestrator_capabilities",
         description:
           "Lists the harnesses you can hand work to, your own harness and modes, and the limits on delegation. Call it before delegate_task to choose a harness.",
         inputSchema: { type: "object", properties: {} },
-        readOnly: true,
-        execute: (_input, context) => this.#json(this.#capabilities(this.#caller(context))),
+        effect: "read",
+        callers: ["agent"],
+        run: (_input, { caller }) => this.#capabilities(agent(caller)),
       },
       {
         name: "delegate_task",
@@ -197,8 +251,10 @@ export class Orchestrator {
           },
           required: ["task"],
         },
-        execute: async (input, context) =>
-          this.#json(await this.#delegate(this.#caller(context), input, context.callId ?? null)),
+        effect: "act",
+        callers: ["agent"],
+        run: (input, { caller }) =>
+          this.#delegate(agent(caller), input, caller.kind === "agent" ? caller.callId : null),
       },
       {
         name: "task_status",
@@ -213,12 +269,13 @@ export class Orchestrator {
           },
           required: ["taskId"],
         },
-        readOnly: true,
-        execute: async (input, context) => {
-          const task = this.#task(this.#caller(context), input);
+        effect: "read",
+        callers: ["agent"],
+        run: async (input, { caller }) => {
+          const task = this.#task(agent(caller), input);
           if (input["wait"] === true)
             await this.#waitTask(task, seconds(input["timeoutSeconds"], DEFAULT_WAIT_SECONDS));
-          return this.#json(this.#taskView(task, false));
+          return this.#taskView(task, false);
         },
       },
       {
@@ -230,8 +287,10 @@ export class Orchestrator {
           properties: { taskId: { type: "string" } },
           required: ["taskId"],
         },
-        execute: async (input, context) => {
-          const task = this.#task(this.#caller(context), input);
+        effect: "act",
+        callers: ["agent"],
+        run: async (input, { caller }) => {
+          const task = this.#task(agent(caller), input);
           // The caller knows the outcome, so it is not also delivered when the thread closes.
           task.seen = true;
           const child = this.#manager.get(task.id);
@@ -239,22 +298,20 @@ export class Orchestrator {
             await child.thread.interrupt().catch(() => {});
             await this.#manager.close(child.id);
           }
-          return this.#json(this.#taskView(task, false));
+          return this.#taskView(task, false);
         },
       },
       {
         name: "thread_list",
         description:
-          "Lists the threads in your tree: the user's thread at its root and every thread started under it, with their harness, status, and which thread started them.",
+          "Lists threads with their harness, status, and which thread started them. An agent in a 1harness thread sees its tree: the user's thread at its root and every thread started under it. Others see every thread 1harness has in memory; thread_search finds older ones.",
         inputSchema: { type: "object", properties: {} },
-        readOnly: true,
-        execute: (_input, context) => {
-          const caller = this.#caller(context);
-          return this.#json({
-            you: caller.id,
-            threads: this.#tree(caller).map((thread) => this.#threadView(thread)),
-          });
-        },
+        effect: "read",
+        callers: ["user", "agent", "external"],
+        run: (_input, { caller }) => ({
+          you: caller.kind === "agent" ? agent(caller).id : null,
+          threads: this.#scope.visible(caller).map((thread) => threadView(thread)),
+        }),
       },
       {
         name: "thread_read",
@@ -273,9 +330,10 @@ export class Orchestrator {
           },
           required: ["threadId"],
         },
-        readOnly: true,
-        execute: (input, context) => {
-          const thread = this.#thread(this.#caller(context), input, true);
+        effect: "read",
+        callers: ["user", "agent", "external"],
+        run: (input, { caller }) => {
+          const thread = this.#scope.readable(caller, text(input, "threadId") ?? "", true);
           const from = runNumber(input, "fromRun");
           const to = runNumber(input, "toRun");
           const count = typeof input["runs"] === "number" ? Math.max(1, input["runs"]) : 5;
@@ -298,17 +356,17 @@ export class Orchestrator {
           }
           const left = chosen.slice(0, chosen.length - views.length);
           const [first, last] = [left[0], left.at(-1)];
-          return this.#json({
-            ...this.#threadView(thread),
+          return {
+            ...threadView(thread),
             runs: views,
             ...(first && last ? { moreRuns: { fromRun: first.index, toRun: last.index } } : {}),
-          });
+          };
         },
       },
       {
         name: "thread_send",
         description:
-          "Sends a message to another thread, such as a follow-up for a task's thread. It queues as the thread's next turn, or joins the running turn with steer.",
+          "Sends a message to a thread, such as a follow-up for a task's thread. It queues as the thread's next turn, or joins the running turn with steer.",
         inputSchema: {
           type: "object",
           properties: {
@@ -321,19 +379,20 @@ export class Orchestrator {
           },
           required: ["threadId", "message"],
         },
-        execute: async (input, context) => {
-          const caller = this.#caller(context);
-          const target = this.#target(caller, input);
+        effect: "act",
+        callers: ["user", "agent", "external"],
+        run: async (input, { caller }) => {
+          const target = this.#scope.actable(caller, text(input, "threadId") ?? "");
           const message = text(input, "message");
-          if (!message) throw new OrchestrationError("invalid_request", "message is empty");
-          const origin = { type: "message", from: caller.id } as const;
+          if (!message) throw new OperationError("invalid_request", "message is empty");
+          const origin = senderOf(caller, caller.kind === "agent" ? agent(caller).id : null);
           if (input["steer"] === true) await target.thread.steer({ text: message }, origin);
           else target.thread.send({ text: message }, origin);
-          return this.#json({
+          return {
             threadId: target.id,
             status: target.status,
             queued: target.thread.queue.length,
-          });
+          };
         },
       },
       {
@@ -344,39 +403,49 @@ export class Orchestrator {
           properties: { threadId: { type: "string" }, timeoutSeconds: { type: "number" } },
           required: ["threadId"],
         },
-        readOnly: true,
-        execute: async (input, context) => {
-          const caller = this.#caller(context);
-          const thread = this.#thread(caller, input);
-          if (thread.id === caller.id)
-            throw new OrchestrationError("invalid_request", "a thread cannot wait on itself");
-          const { timedOut } = await this.#manager.wait(
-            thread.id,
-            seconds(input["timeoutSeconds"], DEFAULT_WAIT_SECONDS),
-          );
+        effect: "read",
+        callers: ["user", "agent", "external"],
+        run: async (input, { caller }) => {
+          const thread = this.#scope.readable(caller, text(input, "threadId") ?? "");
+          if (caller.kind === "agent" && thread.id === agent(caller).id)
+            throw new OperationError("invalid_request", "a thread cannot wait on itself");
+          // One only the store keeps is closed, with nothing to wait for.
+          const { timedOut } = this.#manager.get(thread.id)
+            ? await this.#manager.wait(
+                thread.id,
+                seconds(input["timeoutSeconds"], DEFAULT_WAIT_SECONDS),
+              )
+            : { timedOut: false };
           const run = thread.runs.at(-1);
-          return this.#json({
-            ...this.#threadView(thread),
+          return {
+            ...threadView(thread),
             latest: run ? runView(run) : null,
             waitTimedOut: timedOut,
-          });
+          };
         },
       },
       {
         name: "thread_interrupt",
-        description: "Interrupts another thread's running turn.",
+        description: "Interrupts a thread's running turn.",
         inputSchema: {
           type: "object",
           properties: { threadId: { type: "string" } },
           required: ["threadId"],
         },
-        execute: async (input, context) => {
-          const target = this.#target(this.#caller(context), input);
+        effect: "act",
+        callers: ["user", "agent", "external"],
+        run: async (input, { caller }) => {
+          const target = this.#scope.actable(caller, text(input, "threadId") ?? "");
           await target.thread.interrupt();
-          return this.#json({ threadId: target.id, status: target.status });
+          return { threadId: target.id, status: target.status };
         },
       },
     ];
+  }
+
+  /** The operations agents in 1harness threads call, as the tools their sessions get. */
+  get tools(): ToolDefinition[] {
+    return this.operations.filter((op) => op.callers.includes("agent")).map(agentTool);
   }
 
   /** Every task, for a store to keep. */
@@ -444,31 +513,16 @@ export class Orchestrator {
     await Promise.all([...stopping.map((done) => done.catch(() => {})), thread.thread.interrupt()]);
   }
 
-  /** The user's thread at the root of a thread's tree. */
-  #root(thread: ManagedThread): ManagedThread {
-    const parent = thread.parentId ? this.#manager.get(thread.parentId) : undefined;
-    return parent ? this.#root(parent) : thread;
-  }
-
-  /**
-   * The threads an agent may see and act on: its tree, from the user's thread
-   * at its root down. Other trees, such as another terminal's, are not its own.
-   */
-  #tree(caller: ManagedThread): ManagedThread[] {
-    const root = this.#root(caller);
-    return [root, ...this.#manager.descendants(root.id)];
-  }
-
   /**
    * Threads in the caller's tree with a harness running, and the ones among
    * them with work, counting tasks it is still starting. A parked thread holds
    * no harness, so it is not counted.
    */
   #counts(caller: ManagedThread): { open: number; running: number } {
-    const reserved = this.#reserved.get(this.#root(caller).id) ?? 0;
-    const open = this.#tree(caller).filter(
-      (thread) => !this.#manager.closing(thread.id) && thread.status !== "parked",
-    );
+    const reserved = this.#reserved.get(this.#scope.root(caller).id) ?? 0;
+    const open = this.#scope
+      .tree(caller)
+      .filter((thread) => !this.#manager.closing(thread.id) && thread.status !== "parked");
     const running = open.filter((thread) => thread.status === "starting" || !thread.thread.idle);
     return { open: open.length + reserved, running: running.length + reserved };
   }
@@ -533,54 +587,54 @@ export class Orchestrator {
     callId: string | null,
   ): Promise<Task> {
     const brief = text(input, "task");
-    if (!brief) throw new OrchestrationError("invalid_request", "task is empty");
+    if (!brief) throw new OperationError("invalid_request", "task is empty");
     if (this.#manager.depth(caller.id) + 1 > MAX_DEPTH)
-      throw new OrchestrationError(
+      throw new OperationError(
         "depth_limit",
         `work can be delegated at most ${MAX_DEPTH} levels deep`,
       );
 
     const harness = text(input, "harness") ?? caller.harness;
     const driver = findDriver(harness);
-    if (!driver) throw new OrchestrationError("harness_unavailable", `no harness named ${harness}`);
+    if (!driver) throw new OperationError("harness_unavailable", `no harness named ${harness}`);
     const { unavailable: reason } = await this.checkHarness(driver);
-    if (reason) throw new OrchestrationError("harness_unavailable", reason);
+    if (reason) throw new OperationError("harness_unavailable", reason);
 
     const info = caller.thread.info;
     const asked = text(input, "runtimeMode");
     const mode = asked === undefined || asked === "inherit" ? info.runtimeMode : asked;
     if (!isRuntimeMode(mode))
-      throw new OrchestrationError("invalid_request", `no runtime mode ${mode}`);
+      throw new OperationError("invalid_request", `no runtime mode ${mode}`);
     if (modeRank(mode) > modeRank(info.runtimeMode))
-      throw new OrchestrationError(
+      throw new OperationError(
         "runtime_mode_escalation_denied",
         `a ${info.runtimeMode} thread cannot start ${mode} work`,
       );
     const callerPlans = info.interactionMode === "plan";
     if (callerPlans && input["plan"] === false)
-      throw new OrchestrationError(
+      throw new OperationError(
         "interaction_mode_escalation_denied",
         "a thread in plan mode can only start planning work",
       );
     const plan = input["plan"] === true || callerPlans;
     const role = text(input, "role");
     if (role && !ROLES.includes(role))
-      throw new OrchestrationError("invalid_request", `no role ${role}`);
+      throw new OperationError("invalid_request", `no role ${role}`);
     const sameHarness = harness === caller.harness;
 
     const counts = this.#counts(caller);
     if (counts.running >= MAX_RUNNING_THREADS)
-      throw new OrchestrationError(
+      throw new OperationError(
         "thread_limit",
         `${counts.running} threads are working; wait for some to finish or cancel them first`,
       );
     if (counts.open >= MAX_OPEN_THREADS)
-      throw new OrchestrationError(
+      throw new OperationError(
         "thread_limit",
         `${counts.open} threads are open; close finished tasks with task_cancel first`,
       );
     // Held until the task is sent, when its thread counts as working.
-    const root = this.#root(caller).id;
+    const root = this.#scope.root(caller).id;
     this.#reserved.set(root, (this.#reserved.get(root) ?? 0) + 1);
     try {
       let child: ManagedThread;
@@ -602,7 +656,7 @@ export class Orchestrator {
         });
       } catch (error) {
         // A harness that cannot run the task as narrowly as asked is refused, with why.
-        if (error instanceof ModeError) throw new OrchestrationError(error.code, error.message);
+        if (error instanceof ModeError) throw new OperationError(error.code, error.message);
         throw error;
       }
       const task: Task = {
@@ -695,22 +749,6 @@ export class Orchestrator {
     };
   }
 
-  #threadView(thread: ManagedThread) {
-    const info = thread.thread.info;
-    const last = thread.runs.at(-1);
-    return {
-      threadId: thread.id,
-      title: thread.title,
-      harness: thread.harness,
-      status: thread.status,
-      parentId: thread.parentId,
-      runtimeMode: info.runtimeMode,
-      plan: info.interactionMode === "plan",
-      runs: thread.runs.length,
-      lastResult: last?.result ? clip(last.result.slice(0, 400)) : null,
-    };
-  }
-
   /**
    * Sends a finished task's outcome to the thread that delegated it, unless
    * that thread already saw it: into its running turn where the harness
@@ -779,73 +817,11 @@ export class Orchestrator {
     }
   }
 
-  #caller(context: ToolContext): ManagedThread {
-    const caller = this.#manager.byThread(context.thread);
-    if (!caller)
-      throw new OrchestrationError(
-        "orchestration_error",
-        "the calling thread is not managed by 1harness",
-      );
-    return caller;
-  }
-
   #task(caller: ManagedThread, input: Record<string, unknown>): Task {
     const id = text(input, "taskId") ?? "";
     const task = this.#tasks.get(id);
     if (!task || task.parentId !== caller.id)
-      throw new OrchestrationError("task_not_found", `no task ${id} delegated by this thread`);
+      throw new OperationError("task_not_found", `no task ${id} delegated by this thread`);
     return task;
-  }
-
-  /**
-   * A thread in the caller's tree; another tree's is not found. `read` also
-   * finds the threads the caller's tree was forked from, whose turns its
-   * handoff points to.
-   */
-  #thread(caller: ManagedThread, input: Record<string, unknown>, read = false): ManagedThread {
-    const id = text(input, "threadId") ?? "";
-    const thread = this.#manager.get(id);
-    const ours = thread && this.#root(thread) === this.#root(caller);
-    if (!thread || (!ours && !(read && this.#forkedFrom(caller).has(thread.id))))
-      throw new OrchestrationError("thread_not_found", `no thread ${id} in your tree`);
-    return thread;
-  }
-
-  /** The threads the caller's tree was forked from, and the ones those were forked from. */
-  #forkedFrom(caller: ManagedThread): Set<string> {
-    const sources = new Set<string>();
-    let source = this.#root(caller).forkedFrom;
-    while (source && !sources.has(source)) {
-      sources.add(source);
-      const thread = this.#manager.get(source);
-      source = thread ? this.#root(thread).forkedFrom : null;
-    }
-    return sources;
-  }
-
-  /** Another open thread the caller may act on: never one allowed more than the caller. */
-  #target(caller: ManagedThread, input: Record<string, unknown>): ManagedThread {
-    const target = this.#thread(caller, input);
-    if (target.id === caller.id)
-      throw new OrchestrationError("invalid_request", "use your own turn for your own thread");
-    if (target.status === "closed")
-      throw new OrchestrationError("thread_closed", `thread ${target.id} is closed`);
-    const mine = caller.thread.info;
-    const theirs = target.thread.info;
-    if (modeRank(theirs.runtimeMode) > modeRank(mine.runtimeMode))
-      throw new OrchestrationError(
-        "runtime_mode_escalation_denied",
-        `thread ${target.id} runs ${theirs.runtimeMode}, more than this thread's ${mine.runtimeMode}`,
-      );
-    if (mine.interactionMode === "plan" && theirs.interactionMode !== "plan")
-      throw new OrchestrationError(
-        "interaction_mode_escalation_denied",
-        "a thread in plan mode can only act on planning threads",
-      );
-    return target;
-  }
-
-  #json(value: unknown): string {
-    return JSON.stringify(value, null, 2);
   }
 }

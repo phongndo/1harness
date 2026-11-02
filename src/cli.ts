@@ -31,6 +31,8 @@ import { harnessesCommand } from "./client/harnesses-cli.ts";
 import { hostsCommand, whoami } from "./client/hosts-cli.ts";
 import { loadHosts, resolveServer } from "./client/hosts.ts";
 import { threadsCommand } from "./client/threads-cli.ts";
+import { MCP_HELP, mcpBridge } from "./client/mcp-bridge.ts";
+import { opCommand } from "./client/ops-cli.ts";
 import { watch } from "./client/watch.ts";
 import { Store, StoreLocked } from "./store/store.ts";
 import { App, type ServerInfo } from "./tui/app.ts";
@@ -44,6 +46,8 @@ Usage: 1harness [options] [prompt]
        1harness harnesses          say which harnesses are ready, need signing in, or are missing
        1harness threads [words]    list this folder's threads, or search them; show <id> prints one
        1harness watch              report every thread's status to the terminal (OSC 7501)
+       1harness op [name] [k=v…]   list what 1harness can do, or do it: open, steer, or move threads
+       1harness mcp                serve that to agents 1harness does not run, as an MCP server
        1harness hosts <command>    name servers on other machines, for -S
        1harness whoami             who the server takes you to be
 
@@ -208,7 +212,7 @@ async function reach(spec: string | undefined) {
  */
 function socketClient(
   server: Awaited<ReturnType<typeof reach>>,
-  options: { cwd: string; version: string; extensions: string[] },
+  options: { cwd: string; version: string; extensions: string[]; agent?: boolean },
 ): HostClient {
   const id = newClientId();
   return new HostClient(
@@ -223,10 +227,16 @@ async function connectClient(
   version: string,
   extensions: string[],
   spec: string | undefined,
+  options: { agent?: boolean } = {},
 ): Promise<HostClient> {
   const server = await reach(spec);
   // On another machine, this folder is not there; threads start in its home.
-  return socketClient(server, { cwd: server.local ? process.cwd() : "~", version, extensions });
+  return socketClient(server, {
+    cwd: server.local ? process.cwd() : "~",
+    version,
+    extensions,
+    ...options,
+  });
 }
 
 interface TerminalOptions {
@@ -399,6 +409,22 @@ try {
     process.exitCode = await threadsCommand(rest, () => connectClient(version, [], server));
   } else if (command === "watch") {
     await watch(await connectClient(version, [], server), process.stdout);
+  } else if (command === "op") {
+    process.exitCode = await opCommand(rest, () => connectClient(version, [], server));
+  } else if (command === "mcp") {
+    if (rest.includes("-h") || rest.includes("--help")) process.stdout.write(MCP_HELP);
+    else
+      await mcpBridge({
+        input: process.stdin,
+        output: process.stdout,
+        version,
+        env: process.env,
+        connect: async () => {
+          const client = await connectClient(version, [], server, { agent: true });
+          await client.connect();
+          return client;
+        },
+      });
   } else if (command === "hosts") {
     process.exitCode = await hostsCommand(rest);
   } else if (command === "whoami") {

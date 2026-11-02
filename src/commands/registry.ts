@@ -11,6 +11,7 @@ import type {
   ThreadSummary,
 } from "../core/events.ts";
 import type { Message } from "../core/thread.ts";
+import type { OperationInfo } from "../operations/operation.ts";
 import type { HarnessInfo, ThreadListing } from "../protocol.ts";
 
 /** Report text, styled by the client so it follows theme changes. */
@@ -144,6 +145,10 @@ export interface CommandContext {
    */
   switchHarness(harness: HarnessId, options?: { fresh?: boolean }): Promise<void>;
   exit(): Promise<void>;
+  /** The operations the user may call here: 1harness's, and the extensions'. */
+  operations(): Promise<OperationInfo[]>;
+  /** Calls one as the user, for the current thread's extensions. */
+  runOperation(name: string, input: Record<string, unknown>): Promise<unknown>;
 }
 
 /** A word that can follow a command, offered as it is typed. */

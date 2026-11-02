@@ -1,21 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { McpServerConfig } from "../core/events.ts";
-import { errorMessage, type Thread } from "../core/thread.ts";
-import type { ToolDefinition, ToolResult } from "./api.ts";
-
-// The newest first; a client asking for another gets the newest.
-const PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
-const MAX_BODY_BYTES = 4 * 1024 * 1024;
-// A tool call that waits sends a comment this often, so HTTP idle timeouts leave it be.
-const KEEPALIVE_MS = 15_000;
-
-interface JsonRpcMessage {
-  jsonrpc?: string;
-  id?: string | number | null;
-  method?: string;
-  params?: Record<string, unknown>;
-}
+import type { Thread } from "../core/thread.ts";
+import { serveMcp } from "../operations/mcp-http.ts";
+import type { OperationInfo } from "../operations/operation.ts";
+import type { ToolDefinition } from "./api.ts";
 
 /** One session's access: the server config to give the harness, and its thread once known. */
 export interface ToolGrant {
@@ -104,150 +93,36 @@ export class ToolServer {
     const token = /^Bearer (.+)$/.exec(request.headers.authorization ?? "")?.[1];
     const grant = token ? this.#grants.get(token) : undefined;
     if (!grant) {
-      send(response, 401, { error: "unauthorized" });
+      response
+        .writeHead(401, { "Content-Type": "application/json" })
+        .end(JSON.stringify({ error: "unauthorized" }));
       return;
     }
-    if (request.method !== "POST") {
-      // No server-to-client stream: everything is a reply to a request.
-      response.writeHead(405, { Allow: "POST" }).end();
-      return;
-    }
-    let body: unknown;
-    try {
-      body = JSON.parse(await readBody(request));
-    } catch (error) {
-      send(response, 400, rpcError(null, -32700, errorMessage(error)));
-      return;
-    }
-    const messages = (Array.isArray(body) ? body : [body]) as JsonRpcMessage[];
-    // A tool call can wait on other work, so it streams where the client takes a stream.
-    const single = Array.isArray(body) ? undefined : messages[0];
-    if (
-      single?.method === "tools/call" &&
-      single.id !== undefined &&
-      single.id !== null &&
-      request.headers.accept?.includes("text/event-stream")
-    ) {
-      await stream(response, this.#reply(single, grant));
-      return;
-    }
-    const replies = (
-      await Promise.all(messages.map((message) => this.#reply(message, grant)))
-    ).filter((reply) => reply !== null);
-    if (replies.length === 0) {
-      response.writeHead(202).end();
-      return;
-    }
-    send(response, 200, Array.isArray(body) ? replies : replies[0]);
-  }
-
-  /** The reply to one message, or null for a notification. */
-  async #reply(
-    message: JsonRpcMessage,
-    grant: { thread: Thread | null; tools: Tools },
-  ): Promise<unknown> {
-    if (message.id === undefined || message.id === null) return null;
-    const id = message.id;
-    const params = message.params ?? {};
-    switch (message.method) {
-      case "initialize": {
-        const asked = String(params["protocolVersion"] ?? "");
-        return {
-          jsonrpc: "2.0",
-          id,
-          result: {
-            protocolVersion: PROTOCOL_VERSIONS.includes(asked) ? asked : PROTOCOL_VERSIONS[0],
-            capabilities: { tools: { listChanged: false } },
-            serverInfo: { name: "1harness", version: this.#version },
-            instructions: "Tools that 1harness extensions provide.",
-          },
-        };
-      }
-      case "ping":
-        return { jsonrpc: "2.0", id, result: {} };
-      case "tools/list":
-        return {
-          jsonrpc: "2.0",
-          id,
-          result: {
-            tools: [...grant.tools().values()].map(({ tool }) => ({
-              name: tool.name,
-              description: tool.description,
-              inputSchema: tool.inputSchema,
-              ...(tool.readOnly ? { annotations: { readOnlyHint: true } } : {}),
-            })),
-          },
-        };
-      case "tools/call": {
-        const name = String(params["name"] ?? "");
+    await serveMcp(request, response, {
+      version: this.#version,
+      instructions:
+        "1harness: hand work to agents on any harness, follow and steer its threads, and use the tools its extensions add.",
+      tools: () => [...grant.tools().values()].map(({ tool }) => toolInfo(tool)),
+      call: async (name, input, meta) => {
         const entry = grant.tools().get(name);
-        if (!entry) return rpcError(id, -32602, `No tool named ${name}`);
-        if (!grant.thread) return toolError(id, "The session is still starting");
-        try {
-          const input = (params["arguments"] ?? {}) as Record<string, unknown>;
-          const meta = (params["_meta"] ?? {}) as Record<string, unknown>;
-          const callId = grant.thread.callId(meta, name);
-          const result = await entry.tool.execute(input, {
-            thread: grant.thread,
-            ...(callId ? { callId } : {}),
-          });
-          return { jsonrpc: "2.0", id, result: toolResult(result) };
-        } catch (error) {
-          return toolError(id, errorMessage(error));
-        }
-      }
-      default:
-        return rpcError(id, -32601, `Method not found: ${message.method}`);
-    }
-  }
-}
-
-function toolResult(result: ToolResult): { content: unknown[]; isError?: boolean } {
-  return typeof result === "string" ? { content: [{ type: "text", text: result }] } : result;
-}
-
-function toolError(id: string | number, text: string) {
-  return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], isError: true } };
-}
-
-function rpcError(id: string | number | null, code: number, message: string) {
-  return { jsonrpc: "2.0", id, error: { code, message } };
-}
-
-/**
- * Answers over an event stream: headers at once, a comment every so often while
- * the reply is pending, then the reply as the stream's one message.
- */
-async function stream(response: ServerResponse, reply: Promise<unknown>): Promise<void> {
-  response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
-  response.flushHeaders();
-  const timer = setInterval(() => response.write(": keepalive\n\n"), KEEPALIVE_MS);
-  try {
-    const message = await reply;
-    response.end(`event: message\ndata: ${JSON.stringify(message)}\n\n`);
-  } finally {
-    clearInterval(timer);
-  }
-}
-
-function send(response: ServerResponse, status: number, body: unknown): void {
-  response.writeHead(status, { "Content-Type": "application/json" }).end(JSON.stringify(body));
-}
-
-function readBody(request: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    request.on("data", (chunk: Buffer) => {
-      size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
-        reject(new Error("request too large"));
-        request.destroy();
-        return;
-      }
-      chunks.push(chunk);
+        if (!entry || !grant.thread) throw new Error("The session is still starting");
+        const callId = grant.thread.callId(meta, name);
+        return entry.tool.execute(input, {
+          thread: grant.thread,
+          ...(callId ? { callId } : {}),
+        });
+      },
     });
-    request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    request.on("error", reject);
-  });
+  }
+}
+
+/** A tool as an operation lists it: one only agents in 1harness threads call. */
+export function toolInfo(tool: ToolDefinition): OperationInfo {
+  return {
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.inputSchema,
+    effect: tool.readOnly ? "read" : "act",
+    callers: ["agent"],
+  };
 }

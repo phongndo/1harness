@@ -566,6 +566,10 @@ export class App {
       },
       switchHarness: (harness, options) => this.#switchHarness(harness, options?.fresh === true),
       exit: () => this.#exit(),
+      operations: () => this.#client.call("operations.list", { threadId: this.#currentId }),
+      runOperation: async (name, input) =>
+        (await this.#client.call("operations.call", { name, input, threadId: this.#currentId }))
+          .result,
     } satisfies Omit<CommandContext, "harness" | "defaultHarness" | "thread" | "info">;
     // Read live, since the thread changes under a command that outlives it.
     return Object.defineProperties(context, {

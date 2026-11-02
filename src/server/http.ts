@@ -1,6 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Host } from "../host/host.ts";
+import { OUTSIDE_INSTRUCTIONS } from "../operations/mcp.ts";
+import { serveMcp } from "../operations/mcp-http.ts";
 import {
   PROTOCOL_VERSION,
   RpcError,
@@ -40,6 +42,7 @@ const READS: ReadonlySet<string> = new Set<Method>([
   "threads.search",
   "thread.attach",
   "harnesses.list",
+  "operations.list",
   "commands.list",
   "commands.complete",
   "files.search",
@@ -82,7 +85,8 @@ interface Remembered {
 /**
  * The host over HTTP/1.1, on whatever listeners it is given: `GET /v1/hello`,
  * `POST /v1/rpc`, and `GET /v1/events?after=<seq>`, a stream of the host's
- * events as lines of JSON. Remote access is another listener with an
+ * events as lines of JSON; and `POST /mcp`, its operations as an MCP server
+ * for agents it does not run. Remote access is another listener with an
  * authorizer, not another protocol.
  */
 export class HostServer {
@@ -192,6 +196,10 @@ export class HostServer {
       send(response, 200, hello);
       return;
     }
+    if (url.pathname === "/mcp") {
+      await this.#mcp(request, response, decision.identity, authorize !== LOCAL);
+      return;
+    }
     const client = header(request, CLIENT_HEADER);
     if (!client || client.length > 128) {
       send(response, 400, {
@@ -214,6 +222,29 @@ export class HostServer {
       return;
     }
     send(response, 404, { error: { code: "not_found", message: `No ${url.pathname}` } });
+  }
+
+  /**
+   * The operations as an MCP server. MCP clients name themselves to no one,
+   * so each caller the listener knows is one client, held to what agents
+   * outside 1harness may do.
+   */
+  async #mcp(
+    request: IncomingMessage,
+    response: ServerResponse,
+    identity: string | null,
+    remote: boolean,
+  ): Promise<void> {
+    const client = `mcp:${identity ?? "local"}`;
+    this.#host.markAgent(client);
+    if (remote) this.#host.markRemote(client);
+    await serveMcp(request, response, {
+      version: this.#options.version,
+      instructions: OUTSIDE_INSTRUCTIONS,
+      tools: () => this.#host.call(client, "operations.list", {}),
+      call: async (name, input) =>
+        (await this.#host.call(client, "operations.call", { name, input })).result,
+    });
   }
 
   async #rpc(client: string, request: IncomingMessage, response: ServerResponse): Promise<void> {

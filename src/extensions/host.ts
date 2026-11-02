@@ -24,6 +24,8 @@ import {
   type ToolDefinition,
 } from "./api.ts";
 import type { ToolGrant, ToolServer } from "./tool-server.ts";
+import { CALLER_KINDS, OPERATION_NAME, type Operation } from "../operations/operation.ts";
+import { agentTool, toolOperation } from "../operations/tools.ts";
 import { acpDriver, registerDriver } from "../drivers/index.ts";
 
 export type ExtensionScope = "user" | "project" | "flag";
@@ -41,6 +43,8 @@ export interface LoadedExtension {
   error: string | null;
   commands: string[];
   tools: string[];
+  /** Operations it registered that are more than an agent's tool. */
+  operations: string[];
 }
 
 /** What an extension left behind, undone when it unloads. */
@@ -67,8 +71,6 @@ function mapApiImports(): void {
 type AnyEventHandler = (event: ThreadEvent, context: ExtensionContext) => void | Promise<void>;
 
 const MODULE_EXTENSIONS = new Set([".ts", ".mts", ".js", ".mjs"]);
-const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
-
 /** Extension modules in a folder: module files, and folders with an `index` module. */
 export function findExtensions(folder: string): string[] {
   let names: string[];
@@ -183,8 +185,10 @@ export interface ExtensionHostOptions {
  */
 export class ExtensionHost {
   readonly extensions: LoadedExtension[] = [];
-  /** Tools by name, with the extension that registered each. */
+  /** Tools agents in 1harness threads call, by name, with the extension that registered each. */
   readonly tools = new Map<string, { extension: string; tool: ToolDefinition }>();
+  /** Every operation the extensions registered, tools included, by name. */
+  readonly operations = new Map<string, { extension: string; operation: Operation }>();
   #options: ExtensionHostOptions;
   #trust: TrustList;
   #events: { extension: string; type: ThreadEvent["type"]; handler: AnyEventHandler }[] = [];
@@ -317,7 +321,14 @@ export class ExtensionHost {
 
   async load(source: ExtensionSource): Promise<LoadedExtension> {
     const name = extensionName(source.path);
-    const record: LoadedExtension = { ...source, name, error: null, commands: [], tools: [] };
+    const record: LoadedExtension = {
+      ...source,
+      name,
+      error: null,
+      commands: [],
+      tools: [],
+      operations: [],
+    };
     this.extensions.push(record);
     this.#registrations.set(record, { undo: [], unload: [] });
     if (this.extensions.some((other) => other !== record && other.name === name && !other.error)) {
@@ -379,6 +390,7 @@ export class ExtensionHost {
       const parts = [
         ...extension.commands.map((name) => `/${name}`),
         ...extension.tools.map((name) => `tool ${name}`),
+        ...extension.operations.map((name) => `op ${name}`),
       ];
       lines.push([
         { text: `${extension.name.padEnd(width)}  `, tone: "strong" },
@@ -432,15 +444,15 @@ export class ExtensionHost {
         record.commands.push(command.name);
       },
       registerTool: (tool) => {
-        if (!TOOL_NAME.test(tool.name)) throw new Error(`tool name ${tool.name} is not valid`);
-        const owner = this.tools.get(tool.name);
-        if (owner) throw new Error(`tool ${tool.name} is already registered by ${owner.extension}`);
-        const entry = { extension, tool };
-        this.tools.set(tool.name, entry);
-        this.#registrations.get(record)?.undo.push(() => {
-          if (this.tools.get(tool.name) === entry) this.tools.delete(tool.name);
-        });
-        record.tools.push(tool.name);
+        this.#register(record, toolOperation(tool), tool);
+      },
+      registerOperation: (definition) => {
+        const operation: Operation = {
+          ...definition,
+          effect: definition.effect ?? "act",
+          callers: [...(definition.callers ?? CALLER_KINDS)],
+        };
+        this.#register(record, operation, null);
       },
       onUnload: (handler) => {
         this.#registrations.get(record)?.unload.push(handler);
@@ -464,6 +476,31 @@ export class ExtensionHost {
       },
       choose,
     };
+  }
+
+  /**
+   * Adds an extension's operation, and its tool where agents in 1harness
+   * threads may call it; `tool` is the tool it was registered as, if any.
+   */
+  #register(record: LoadedExtension, operation: Operation, tool: ToolDefinition | null): void {
+    const name = operation.name;
+    if (!OPERATION_NAME.test(name))
+      throw new Error(`${tool ? "tool" : "operation"} name ${name} is not valid`);
+    const owner = this.operations.get(name);
+    if (owner) throw new Error(`${name} is already registered by ${owner.extension}`);
+    const extension = record.name;
+    const entry = { extension, operation };
+    this.operations.set(name, entry);
+    const served = operation.callers.includes("agent")
+      ? { extension, tool: tool ?? agentTool(operation) }
+      : null;
+    if (served) this.tools.set(name, served);
+    this.#registrations.get(record)?.undo.push(() => {
+      if (this.operations.get(name) === entry) this.operations.delete(name);
+      if (served && this.tools.get(name) === served) this.tools.delete(name);
+    });
+    if (tool) record.tools.push(name);
+    else record.operations.push(name);
   }
 
   async #filterInput(input: UserInput, context: ExtensionContext): Promise<UserInput | null> {

@@ -20,6 +20,7 @@ import type {
   Usage,
 } from "./core/events.ts";
 import type { FileMatch } from "./core/files.ts";
+import type { OperationInfo } from "./operations/operation.ts";
 import type { Message } from "./core/thread.ts";
 import type { RunRecord, SwitchResult, ThreadStatus } from "./host/manager.ts";
 
@@ -216,6 +217,11 @@ export interface HelloParams {
   version: string;
   /** Extension modules this client loads, as `-x` named them. */
   extensions: string[];
+  /**
+   * It is an agent 1harness does not run, as `1harness mcp` is: its operations
+   * are held to what settings let such agents do.
+   */
+  agent?: boolean;
 }
 
 export interface HelloResult {
@@ -384,6 +390,13 @@ export interface Methods {
   };
   /** Every harness, after asking `id`, or all of them, whether it is installed and signed in. */
   "harnesses.list": { params: { id?: HarnessId }; result: HarnessInfo[] };
+  /** What the client may call through `operations.call`, for the thread or its folder. */
+  "operations.list": { params: { threadId?: string | null }; result: OperationInfo[] };
+  /** Runs an operation, the same one agents call as a tool. */
+  "operations.call": {
+    params: { name: string; input?: Record<string, unknown>; threadId?: string | null };
+    result: { result: unknown };
+  };
   "commands.list": { params: { threadId: string | null }; result: CommandInfo[] };
   "commands.run": {
     params: { threadId: string | null; name: string; args: string };

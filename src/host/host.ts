@@ -5,12 +5,18 @@ import {
   type CommandUI,
   type SessionHandle,
 } from "../commands/registry.ts";
-import type { HarnessId, SessionOptions, UserInput } from "../core/events.ts";
+import {
+  DEFAULT_RUNTIME_MODE,
+  type HarnessId,
+  type SessionOptions,
+  type UserInput,
+} from "../core/events.ts";
 import { FileIndex, mentionedImages } from "../core/files.ts";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join as joinPath, resolve as resolvePath } from "node:path";
 import { configDir, stateDir } from "../core/paths.ts";
+import { DEFAULT_AGENT_MODE, loadLastHarness, loadSettings } from "../core/settings.ts";
 import { errorMessage, type Thread } from "../core/thread.ts";
 import { isThreadIdPrefix, shortThreadId } from "../core/thread-id.ts";
 import { formatTokens } from "../core/wording.ts";
@@ -24,6 +30,16 @@ import {
 import type { ToolDefinition } from "../extensions/api.ts";
 import type { ExtensionHost } from "../extensions/host.ts";
 import { ToolServer } from "../extensions/tool-server.ts";
+import { HOSTED_ENV } from "../operations/mcp.ts";
+import {
+  OperationError,
+  operationInfo,
+  runOperation,
+  type Caller,
+  type Operation,
+  type OperationInfo,
+} from "../operations/operation.ts";
+import { agentTool, toolOperation } from "../operations/tools.ts";
 import {
   PROTOCOL_VERSION,
   RpcError,
@@ -53,7 +69,9 @@ import { LivePages } from "./live.ts";
 import { Media, fileImage, pageTools } from "./media.ts";
 import { EventFeed, type Unnumbered } from "./feed.ts";
 import { ExtensionSets, type ExtensionSet } from "./extension-sets.ts";
+import { hostOperations } from "./operations.ts";
 import { Orchestrator } from "./orchestrator.ts";
+import { Scope } from "./scope.ts";
 import { StoreWriter } from "./store-writer.ts";
 import {
   NO_FLAGS,
@@ -102,7 +120,12 @@ interface Client {
   extensions: string[];
   /** It calls from another machine, so the modules it names are not loaded here. */
   remote: boolean;
+  /** It is an agent 1harness does not run, held to what settings let such agents do. */
+  agent: boolean;
 }
+
+/** The client agents in 1harness threads make requests as, when an operation needs one. */
+const AGENTS_CLIENT = "1harness:agents";
 
 export interface HostOptions {
   version: string;
@@ -209,6 +232,9 @@ export class Host {
   readonly instance = randomUUID();
   readonly manager: ThreadManager;
   readonly orchestrator: Orchestrator;
+  /** Everything 1harness itself can do, for every surface; extensions add their own. */
+  readonly operations: readonly Operation[];
+  #scope: Scope;
 
   readonly tools: ToolServer;
   #options: HostOptions;
@@ -260,6 +286,9 @@ export class Host {
   constructor(options: HostOptions) {
     this.#options = options;
     this.version = options.version;
+    // Harnesses inherit it, so a `1harness mcp` in their own config steps aside
+    // for the tools their session already gets.
+    process.env[HOSTED_ENV] = "1";
     this.#store = options.store ?? null;
     this.#feed = new EventFeed(this.#store?.maxSeq() ?? 0);
     this.#writer = this.#store
@@ -294,7 +323,23 @@ export class Host {
       onWarning: (text) => this.#broadcast("warning", text),
       ...(options.idleCloseMs === undefined ? {} : { idleCloseMs: options.idleCloseMs }),
     });
-    this.orchestrator = new Orchestrator(this.manager, options.env);
+    // Reads reach closed threads that have left memory for the store.
+    this.#scope = new Scope(this.manager, (id) => {
+      const row = this.#store?.thread(id);
+      if (!row) return null;
+      const { title, harness, parentId, info } = row;
+      const runs = this.#store!.runs(id);
+      return {
+        id,
+        title,
+        harness,
+        parentId,
+        status: "closed",
+        runs,
+        thread: { info, requests: [] },
+      };
+    });
+    this.orchestrator = new Orchestrator(this.manager, options.env, this.#scope);
     // Through the host, so clients hear of what a delegation's check finds.
     this.orchestrator.checkHarness = async (driver) =>
       (await this.#checkHarnesses(driver.id)).find((harness) => harness.id === driver.id) ??
@@ -314,8 +359,30 @@ export class Host {
         this.#writer?.schedule();
       },
     });
+    this.operations = [
+      ...this.orchestrator.operations,
+      ...hostOperations({
+        manager: this.manager,
+        scope: this.#scope,
+        request: (caller, method, params) =>
+          this.call(caller.kind === "agent" ? AGENTS_CLIENT : caller.clientId, method, params),
+        cwd: (caller) =>
+          caller.kind === "agent"
+            ? this.#scope.agent(caller).thread.info.cwd
+            : this.#client(caller.clientId).cwd,
+        defaultHarness: () =>
+          this.#settings().harness ?? loadLastHarness(options.stateDir ?? stateDir()),
+        defaultMode: () => this.#settings().mode ?? DEFAULT_RUNTIME_MODE,
+        seq: () => this.seq,
+        since: (after) => this.since(after),
+        subscribe: (listener) => this.subscribe(listener),
+      }),
+      ...this.pageTools.map(toolOperation),
+    ];
     this.#orchestratorTools = new Map(
-      [...this.orchestrator.tools, ...this.pageTools].map((tool) => [tool.name, { tool }]),
+      this.operations
+        .filter((operation) => operation.callers.includes("agent"))
+        .map((operation) => [operation.name, { tool: agentTool(operation) }]),
     );
     this.manager.subscribe((event) => this.#managerEvent(event));
     this.#handlers = this.#methods();
@@ -529,6 +596,58 @@ export class Host {
   /** Marks a client as one on a remote listener, from its first request on. */
   markRemote(clientId: string): void {
     this.#client(clientId).remote = true;
+  }
+
+  /** Marks a client as an agent 1harness does not run, as the server's `/mcp` serves. */
+  markAgent(clientId: string): void {
+    this.#client(clientId).agent = true;
+  }
+
+  /** Who a client is to the operations it calls. */
+  #callerOf(client: Client): Caller {
+    if (!client.agent) return { kind: "user", clientId: client.id };
+    return {
+      kind: "external",
+      clientId: client.id,
+      ceiling: this.#settings().agentMode ?? DEFAULT_AGENT_MODE,
+    };
+  }
+
+  #settings() {
+    return loadSettings(this.#options.configDir ?? configDir()).settings;
+  }
+
+  /** The operations a client may call: 1harness's, and its folder's or thread's extensions'. */
+  async #operationsFor(client: Client, threadId: string | null): Promise<Map<string, Operation>> {
+    const set = await this.#commandSet(client, threadId);
+    const all = new Map(this.operations.map((operation) => [operation.name, operation]));
+    // 1harness's own come first; an extension cannot replace one.
+    for (const [name, { operation }] of set.host.operations)
+      if (!all.has(name)) all.set(name, operation);
+    return all;
+  }
+
+  /** The operations a client may call, as it lists them. */
+  async #operationList(client: Client, threadId: string | null): Promise<OperationInfo[]> {
+    const kind = this.#callerOf(client).kind;
+    return [...(await this.#operationsFor(client, threadId)).values()]
+      .filter((operation) => operation.callers.includes(kind))
+      .map(operationInfo);
+  }
+
+  async #runOperation(
+    client: Client,
+    threadId: string | null,
+    name: string,
+    input: unknown,
+  ): Promise<unknown> {
+    const operations = await this.#operationsFor(client, threadId);
+    try {
+      return await runOperation(operations.get(name), name, input, this.#callerOf(client));
+    } catch (error) {
+      if (error instanceof OperationError) throw new RpcError(error.code, error.message);
+      throw error;
+    }
   }
 
   /** Runs one client request. */
@@ -871,6 +990,7 @@ export class Host {
         sent: new Map(),
         extensions: [...(this.#options.extensions ?? [])],
         remote: false,
+        agent: false,
       };
       this.#clients.set(id, client);
     }
@@ -1069,6 +1189,8 @@ export class Host {
       exit: async () => {
         this.#ask(client, { method: "exit" });
       },
+      operations: () => this.#operationList(client, threadId),
+      runOperation: (name, input) => this.#runOperation(client, threadId, name, input),
     };
   }
 
@@ -1222,6 +1344,7 @@ export class Host {
         const named = client.remote ? [] : params.extensions;
         client.extensions = named.map((path) => resolvePath(client.cwd, path));
         client.connected = true;
+        if (params.agent) client.agent = true;
         const warnings = [...(this.#options.warnings ?? [])];
         if (named.length < params.extensions.length)
           warnings.push("Extensions load only for clients on this machine; yours were left out.");
@@ -1598,6 +1721,11 @@ export class Host {
         return null;
       },
       "harnesses.list": async (_client, { id }) => this.#checkHarnesses(id),
+      "operations.list": async (client, { threadId }) =>
+        this.#operationList(client, threadId ?? null),
+      "operations.call": async (client, { threadId, name, input }) => ({
+        result: (await this.#runOperation(client, threadId ?? null, name, input)) ?? null,
+      }),
       "commands.list": async (client, { threadId }) => this.#commandList(client, threadId),
       "commands.run": async (client, { threadId, name, args }) => {
         const command = (await this.#commandSet(client, threadId)).commands.find(name);

@@ -6,12 +6,15 @@
 //   import type { ExtensionAPI } from "1harness/extension";
 //   export default function (api: ExtensionAPI) { api.on("turn.ended", ...) }
 //
-// Extensions work at three layers, each the same on every harness:
-//   client  — commands, through `registerCommand`, shown by whichever client runs
-//   session — events, messages, and approvals of every thread, through `on`,
-//             `onInput`, and `onRequest`
-//   agent   — tools the model can call, through `registerTool`, served to each
-//             harness as an MCP server
+// Extensions work at four layers, each the same on every harness:
+//   client    — commands, through `registerCommand`, shown by whichever client runs
+//   session   — events, messages, and approvals of every thread, through `on`,
+//               `onInput`, and `onRequest`
+//   agent     — tools the model can call, through `registerTool`, served to each
+//               harness as an MCP server
+//   operation — what people, programs, and agents inside and outside 1harness can
+//               all call, through `registerOperation`: a tool, `/op`, `1harness op`,
+//               `1harness mcp`, and the server's API at once
 
 import type { CommandDefinition, CommandUI } from "../commands/registry.ts";
 import type {
@@ -24,9 +27,13 @@ import type {
 import type { Thread, ThreadEvent } from "../core/thread.ts";
 import type { AcpAgentSpec } from "../drivers/acp/session.ts";
 import type { DriverDefinition } from "../drivers/index.ts";
+import type { Caller, CallerKind, Operation, OperationContext } from "../operations/operation.ts";
 
 export type {
   AcpAgentSpec,
+  Caller,
+  CallerKind,
+  OperationContext,
   CommandDefinition,
   DriverDefinition,
   CommandUI,
@@ -103,12 +110,30 @@ export interface ToolDefinition {
   execute(input: Record<string, unknown>, context: ToolContext): ToolResult | Promise<ToolResult>;
 }
 
+/**
+ * Something people, programs, and agents can all call. `run` gets who called:
+ * check `context.caller.kind`, and for an agent in a 1harness thread, its
+ * `thread`. Its result is JSON, or text.
+ */
+export type OperationDefinition = Omit<Operation, "effect" | "callers"> & {
+  /** A read changes nothing; `act` by default. */
+  effect?: Operation["effect"];
+  /** Who may call it; everyone by default. */
+  callers?: readonly CallerKind[];
+};
+
 export interface ExtensionAPI {
   /** The extension's name, from its file or folder name. */
   readonly name: string;
   readonly storage: ExtensionStorage;
   registerCommand(command: CommandDefinition): void;
   registerTool(tool: ToolDefinition): void;
+  /**
+   * Adds an operation: a tool for agents in 1harness threads, `/op` and
+   * `1harness op` for people, `operations.call` for programs, and a tool for
+   * agents outside 1harness through `1harness mcp`, as `callers` allows.
+   */
+  registerOperation(operation: OperationDefinition): void;
   /** Runs on each event of every thread. */
   on<T extends ThreadEvent["type"]>(type: T, handler: EventHandler<T>): void;
   /** Sees each message before it is sent or queued. */

@@ -246,4 +246,41 @@ describe("ExtensionHost", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("registers operations, serving the ones agents in threads may call as tools", async () => {
+    const { root, host } = setup();
+    try {
+      const folder = join(root, "config", "extensions");
+      mkdirSync(folder, { recursive: true });
+      writeFileSync(
+        join(folder, "ops.ts"),
+        `export default function (api) {
+          const schema = { type: "object", properties: {} };
+          api.registerOperation({ name: "everyone", description: "", inputSchema: schema,
+            run: (_input, { caller }) => caller.kind });
+          api.registerOperation({ name: "people", description: "", inputSchema: schema,
+            effect: "read", callers: ["user"], run: () => "ok" });
+          api.registerTool({ name: "tool", description: "", inputSchema: schema, execute: () => "t" });
+        }`,
+      );
+      await host.loadAll();
+      assert.equal(host.extensions[0]?.error, null);
+      assert.deepEqual([...host.operations.keys()].toSorted(), ["everyone", "people", "tool"]);
+      assert.deepEqual([...host.tools.keys()].toSorted(), ["everyone", "tool"]);
+      const everyone = host.operations.get("everyone")!.operation;
+      assert.deepEqual([everyone.effect, everyone.callers], ["act", ["user", "agent", "external"]]);
+      assert.deepEqual(host.operations.get("tool")!.operation.callers, ["agent"]);
+      assert.equal(
+        await host.operations
+          .get("everyone")!
+          .operation.run({}, { caller: { kind: "user", clientId: "c" } }),
+        "user",
+      );
+      assert.match(JSON.stringify(host.report()), /tool tool.*op everyone, op people/);
+      await host.reload();
+      assert.equal(host.operations.size, 3, "a reload registers them once");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
