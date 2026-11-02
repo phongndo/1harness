@@ -45,7 +45,7 @@ export class ScriptedSession {
       threadId: options.resume ?? `native-${++natives}`,
       cwd: options.cwd,
       model: options.model,
-      effort: null,
+      effort: options.effort,
       runtimeMode: options.runtimeMode,
       interactionMode: "default",
       version: null,

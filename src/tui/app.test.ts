@@ -327,6 +327,20 @@ describe("App threads and keys", () => {
     assert.doesNotMatch(session.terminal.text(), /Done with beta/);
   });
 
+  it("starts /new on the harness, model, and effort it names", async () => {
+    const session = await start({ prompt: "alpha" });
+    await session.sees("Done with alpha");
+    await session.type("/new scripted small high\r");
+    await session.sees("New scripted thread");
+    await session.type("/status\r");
+    assert.match(await session.sees(/Status\n/), /Model\s+small · high/);
+    await session.type("\x1b");
+    await session.type("/new nowhere\r");
+    await session.sees("No harness named nowhere");
+    await session.type("/new scripted big high extra\r");
+    await session.sees("Usage: /new [harness] [model] [effort]");
+  });
+
   it("says why the thread list could not load, rather than that there are no threads", async () => {
     const session = await start({ prompt: "alpha" });
     await session.sees("Done with alpha");

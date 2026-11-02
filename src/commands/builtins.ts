@@ -103,15 +103,53 @@ function namedHarness(context: CommandContext, name: string) {
 
 const newThread: CommandDefinition = {
   name: "new",
-  usage: "[harness]",
-  description: "start a new thread, on another harness if named",
+  usage: "[harness] [model] [effort]",
+  description: "start a new thread, on a harness, model, and effort if named",
   group: "Threads",
-  complete: harnessCompletions,
+  complete(context, args) {
+    const words = args.split(" ");
+    const start = args.length - (words.at(-1) ?? "").length;
+    const [named = "", chosen = ""] = words;
+    // A harness's models are known only while one of its threads runs.
+    const options =
+      named === context.harness ? listed(context, "models", () => listModels(context)) : [];
+    switch (words.length) {
+      case 1:
+        return harnessCompletions(context);
+      case 2:
+        return { start, items: options.map((option) => completion(option.id, option.label)) };
+      case 3: {
+        const option = options.find((candidate) => matchesModel(candidate, chosen));
+        const levels = option?.efforts ?? Object.keys(EFFORT_DESCRIPTIONS);
+        return {
+          start,
+          items: levels.map((level) =>
+            completion(
+              level,
+              [EFFORT_DESCRIPTIONS[level], level === option?.defaultEffort ? "default" : ""]
+                .filter(Boolean)
+                .join(" · "),
+            ),
+          ),
+        };
+      }
+      default:
+        return null;
+    }
+  },
   run(context, args) {
-    if (!args) return context.openThread();
-    const driver = namedHarness(context, args);
+    const words = args.split(/\s+/).filter(Boolean);
+    if (words.length > 3) throw new Error("Usage: /new [harness] [model] [effort]");
+    const [name, model = null, effort = null] = words;
+    if (name === undefined) return context.openThread();
+    const driver = namedHarness(context, name);
     // Models and efforts are harness-specific, so another harness starts with its defaults.
-    return context.openThread({ harness: driver.id, defaultModel: driver.id !== context.harness });
+    if (model === null)
+      return context.openThread({
+        harness: driver.id,
+        defaultModel: driver.id !== context.harness,
+      });
+    return context.openThread({ harness: driver.id, model, effort });
   },
 };
 

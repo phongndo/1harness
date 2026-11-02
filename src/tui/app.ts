@@ -532,6 +532,9 @@ export class App {
           ...this.#settings,
           resume: null,
           ...(options.defaultModel ? { model: null, effort: null } : {}),
+          ...(options.model !== undefined
+            ? { model: options.model, effort: options.effort ?? null }
+            : {}),
         });
       },
       switchHarness: (harness, options) => this.#switchHarness(harness, options?.fresh === true),

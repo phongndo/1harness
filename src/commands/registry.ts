@@ -120,6 +120,9 @@ export interface CommandContext {
     /** A 1harness thread ID or the start of one, or a harness's own thread ID. */
     resume?: string;
     defaultModel?: boolean;
+    /** The model to start on, and its effort; null for the harness's default. */
+    model?: string | null;
+    effort?: string | null;
   }): Promise<void>;
   /**
    * Moves the current thread onto another harness, which gets a handoff of the

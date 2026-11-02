@@ -1015,7 +1015,13 @@ export class Host {
             })
           : await this.call(client.id, "thread.open", {
               harness,
-              settings: options.defaultModel ? { ...base, model: null, effort: null } : base,
+              settings: {
+                ...base,
+                ...(options.defaultModel ? { model: null, effort: null } : {}),
+                ...(options.model !== undefined
+                  ? { model: options.model, effort: options.effort ?? null }
+                  : {}),
+              },
             });
         this.#ask(client, { method: "show", threadId: state.id });
       },
