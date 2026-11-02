@@ -177,7 +177,7 @@ export class Orchestrator {
               type: "string",
               enum: ["inherit", "supervised", "auto-edit", "auto", "full-access"],
               description:
-                "How much the agent may do without asking. Yours by default, and never more than yours.",
+                "Omit unless the user asks for a supervised child. Narrow modes pause for human approval, not read-only. Above yours is rejected.",
             },
             plan: { type: "boolean", description: "Run the task in plan mode." },
           },
