@@ -47,6 +47,8 @@ interface Task {
   seen: boolean;
   /** The outcome was sent to the parent as a message. */
   delivered: boolean;
+  /** The last of the child's runs the parent was told of, by its index. */
+  reported: number;
   /** A wait for the outcome is open, so it is not also delivered. */
   waiting: number;
 }
@@ -404,7 +406,13 @@ export class Orchestrator {
     }[],
   ): void {
     for (const row of rows) {
-      const task: Task = { ...row, delivered: row.delivered || !row.seen, waiting: 0 };
+      // After a restart a task reports nothing more, its later runs included.
+      const task: Task = {
+        ...row,
+        delivered: row.delivered || !row.seen,
+        reported: Number.POSITIVE_INFINITY,
+        waiting: 0,
+      };
       this.#tasks.set(task.id, task);
       if (task.requestId)
         this.#byRequest.set(`${task.parentId}\0${task.requestId}`, Promise.resolve(task));
@@ -603,6 +611,7 @@ export class Orchestrator {
         requestId,
         seen: false,
         delivered: false,
+        reported: 1,
         waiting: 0,
       };
       this.#tasks.set(task.id, task);
@@ -704,18 +713,54 @@ export class Orchestrator {
    */
   #deliver(child: ManagedThread): void {
     const task = this.#tasks.get(child.id);
-    if (!task || task.delivered || task.seen || task.waiting > 0) return;
+    if (!task || task.waiting > 0) return;
+    if (task.delivered || task.seen) {
+      this.#reportLater(task, child);
+      return;
+    }
     if (!this.#finished(task)) return;
     task.delivered = true;
-    // A parent closing with its children has no use for their outcomes.
-    const parent = this.#manager.get(task.parentId);
-    if (!parent || this.#manager.closing(parent.id)) return;
     const view = this.#taskView(task, false);
     const { status } = view;
     // Only a finished task is reported, so it is never running or starting.
     if (status === "running" || status === "starting") return;
     const outcome = view.result ?? view.error ?? "(no reply)";
-    const message = `[1harness] Task ${task.id} (${child.harness}: ${child.title}) ${status}:\n\n${outcome}`;
+    this.#report(task, child, status, outcome, `${status}`);
+  }
+
+  /**
+   * A task whose run was interrupted, as a declined approval interrupts it,
+   * and which the user then had go on in its thread: what each later run the
+   * user started there came to goes to the parent too, once it ends.
+   */
+  #reportLater(task: Task, child: ManagedThread): void {
+    if (child.runs[0]?.status !== "interrupted") return;
+    const run = child.runs.at(-1);
+    if (!run || run.index <= task.reported || run.status === "running") return;
+    if (run.origin && run.origin.type !== "user") return;
+    task.reported = run.index;
+    const outcome = clip(run.result ?? run.error ?? "(no reply)") ?? "(no reply)";
+    this.#report(
+      task,
+      child,
+      run.status,
+      outcome,
+      `went on after it was interrupted, and ${run.status}`,
+    );
+  }
+
+  /** Sends a task's outcome to its parent: into its running turn where the harness allows. */
+  #report(
+    task: Task,
+    child: ManagedThread,
+    status: Exclude<RunRecord["status"], "running"> | "cancelled",
+    outcome: string,
+    said: string,
+  ): void {
+    // A parent closing with its children has no use for their outcomes.
+    const parent = this.#manager.get(task.parentId);
+    if (!parent || this.#manager.closing(parent.id)) return;
+    const message = `[1harness] Task ${task.id} (${child.harness}: ${child.title}) ${said}:\n\n${outcome}`;
     const origin = { type: "report", from: child.id, status, result: outcome } as const;
     if (parent.thread.busy && parent.thread.capabilities.steer) {
       void parent.thread.steer({ text: message }, origin);

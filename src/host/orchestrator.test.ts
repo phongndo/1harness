@@ -799,6 +799,29 @@ describe("Orchestrator", () => {
     assert.equal(origin?.type === "report" && origin.status, "interrupted");
   });
 
+  it("reports what an interrupted task came to once the user has it go on", async () => {
+    const parent = await manager.create({ harness: "fake", settings: settings() });
+    const started = await call("delegate_task", parent, { task: "slow work SLOW", wait: false });
+    const child = manager.get(String(started["threadId"]));
+    assert.ok(child);
+    await settle(5);
+    await orchestrator.stop(child.id);
+    await settle(60);
+    child.thread.send({ text: "go on" });
+    await settle(60);
+    const origins = parent.runs.map((run) => run.origin?.type === "report" && run.origin.status);
+    assert.deepEqual(origins, ["interrupted", "completed"]);
+    const session = parent.thread.session as unknown as FakeSession;
+    assert.match(
+      session.prompts.at(-1) ?? "",
+      /went on after it was interrupted, and completed:\n\ndone: go on$/,
+    );
+    // A message from another agent is no reason to report again.
+    child.thread.send({ text: "more" }, { type: "message", from: parent.id });
+    await settle(60);
+    assert.equal(parent.runs.length, 2);
+  });
+
   it("returns the same task for a retried request ID", async () => {
     const parent = await manager.create({ harness: "fake", settings: settings() });
     const first = await call("delegate_task", parent, { task: "once", requestId: "r1" });
