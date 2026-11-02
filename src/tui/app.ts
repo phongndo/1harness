@@ -2535,12 +2535,12 @@ export class App {
           this.#liveInput(this.#viewer.live, { type: "text", text: event.text });
           return;
         }
-        if (this.#prompt) {
+        if (this.#panel?.kind === "resume") {
+          this.#panel.view.paste(event.text);
+        } else if (this.#prompt) {
           if (this.#prompt.prompt.typing) this.#prompt.prompt.paste(event.text);
         } else if (this.#panel?.kind === "menu") {
           this.#panel.menu.paste(event.text);
-        } else if (this.#panel?.kind === "resume") {
-          this.#panel.view.paste(event.text);
         } else {
           this.#panel = null;
           this.#editor.insert(event.text);
@@ -2571,7 +2571,8 @@ export class App {
       this.#screen.invalidate();
       return;
     }
-    if (key.ctrl && key.name === "t" && !this.#prompt && !this.#panel) {
+    // The thread list opens over a prompt too, which waits for its thread to show again.
+    if (key.ctrl && key.name === "t" && !this.#panel) {
       void this.#switchThread("").catch((error: unknown) =>
         this.#notice("error", errorMessage(error)),
       );
@@ -2607,6 +2608,8 @@ export class App {
         return;
       }
     }
+    // A list opened over a prompt, such as the thread list, shows and takes keys first.
+    if (this.#prompt && this.#panel && this.#panelKey(key)) return;
     if (this.#prompt) {
       // Typing that was going on when a prompt appeared was meant for something else:
       // its keys are dropped until it pauses. Keys after a pause, or after an answer
@@ -3729,7 +3732,7 @@ export class App {
 
     let cursor: CursorPosition | null = null;
     let list: { menu: Menu; row: number } | undefined;
-    if (this.#prompt) {
+    if (this.#prompt && !this.#panel) {
       // The rows the footer has left, under the queue and the attention line,
       // less the status line, which keeps the bottom row under a prompt too.
       const rendered = this.#prompt.prompt.render(width, height - rows.length - 2);
@@ -3855,9 +3858,14 @@ export class App {
     ).length;
     if (others > 0) parts.push(`${others} other ${others === 1 ? "thread" : "threads"} working`);
     else {
-      // Threads of your own left open, not the agents they started, which ctrl+t lists under them.
+      // Threads of your own still open, not the agents they started, which ctrl+t lists
+      // under them, nor parked ones, which are earlier threads to resume.
       const open = threads.filter(
-        (thread) => thread.id !== this.#currentId && thread.parentId === null && !thread.archived,
+        (thread) =>
+          thread.id !== this.#currentId &&
+          thread.parentId === null &&
+          !thread.archived &&
+          thread.status !== "parked",
       ).length;
       if (open > 0) parts.push(`${open} other open · ctrl+t`);
     }
