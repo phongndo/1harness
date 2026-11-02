@@ -267,11 +267,8 @@ export class ClaudeSession implements HarnessSession {
         aliases: command.aliases ?? [],
         description: command.description,
         argumentHint: command.argumentHint,
-        // Until the first turn names the skills, Claude's own entries count as commands.
-        kind:
-          this.#skills.has(command.name) || (this.#skills.size === 0 && !command.builtin)
-            ? "skill"
-            : "command",
+        // Skills and your own commands are yours; Claude's built-in ones are its own.
+        kind: this.#skills.has(command.name) || !command.builtin ? "skill" : "command",
         startsTurn: true,
       }));
   }

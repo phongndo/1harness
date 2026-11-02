@@ -101,7 +101,7 @@ const newThread: CommandDefinition = {
   name: "new",
   usage: "[harness]",
   description: "start a new thread, on another harness if named",
-  group: "Session",
+  group: "Threads",
   complete: harnessCompletions,
   run(context, args) {
     if (!args) return context.openThread();
@@ -146,7 +146,7 @@ const harness: CommandDefinition = {
   name: "harness",
   usage: "[name] [fresh]",
   description: "move this thread to another harness, which picks up where it left off",
-  group: "Session",
+  group: "Model",
   complete(context, args) {
     const space = args.indexOf(" ");
     // `fresh` may follow a harness, but need not, so enter on one runs the switch.
@@ -195,7 +195,7 @@ const harness: CommandDefinition = {
 const compact: CommandDefinition = {
   name: "compact",
   description: "compact the conversation context",
-  group: "Session",
+  group: "Threads",
   available: (context) => liveSession(context)?.compact !== undefined,
   run: async (context) => {
     await context.session().compact?.();
@@ -205,7 +205,7 @@ const compact: CommandDefinition = {
 const unqueue: CommandDefinition = {
   name: "unqueue",
   description: "move the last queued message back into the editor",
-  group: "Session",
+  group: "Threads",
   async run(context) {
     const message = await context.thread?.unqueue();
     if (message) context.ui.setInput(message.input.text);

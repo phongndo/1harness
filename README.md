@@ -86,9 +86,13 @@ the thread where it was or starts it a new thread, and says which.
 `/new <name>` starts a fresh thread on another harness.
 
 Approvals, plan prompts, and notices use the same words whichever harness asks.
-The harness's own commands and skills appear beside 1harness's, less those that
-only drive its own terminal. Typing after a command offers its
-arguments, such as `/mcp login <server>`. `@` completes files and folders with
+1harness owns the commands, the same on every harness: `/new`, `/resume`,
+`/rename`, `/fork`, `/close`, `/compact`, and `/unqueue` for threads; `/model`,
+`/effort`, and `/harness`; `/mode` and `/plan`; `/mcp` and `/extensions`; and
+`/help`, `/status`, `/copy`, `/connect`, and `/quit`. From a harness come only
+your skills and your own commands, such as a `/sol-loop` skill, never its
+built-in ones. Typing after a command offers its arguments, such as
+`/mcp login <server>`. `@` completes files and folders with
 [fff](https://github.com/dmtrKovalenko/fff); a mentioned image is attached.
 `/help` lists everything.
 

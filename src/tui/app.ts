@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { basename, resolve as resolvePath } from "node:path";
 import { BUILTIN_COMMANDS } from "../commands/builtins.ts";
 import {
   CommandRegistry,
@@ -721,46 +720,10 @@ export class App {
         },
       },
       {
-        name: "pin",
-        usage: "[id]",
-        description: "keep a thread at the top of /threads and /resume, or unpin it",
-        group: "Session",
-        run: async (_context, args) => {
-          const id = args || this.#currentId;
-          if (!id) throw new Error("No thread to pin");
-          const pinned = !(this.#client.threads.get(id)?.pinned ?? false);
-          const listed = await this.#client.call("thread.flag", { threadId: id, pinned });
-          this.#notice("info", `${listed.pinned ? "Pinned" : "Unpinned"} ${id}`);
-        },
-      },
-      {
-        name: "archive",
-        usage: "[id]",
-        description: "end a thread and move it out of the lists, into /threads' Archived tab",
-        group: "Session",
-        run: async (_context, args) => {
-          const id = args || this.#currentId;
-          if (!id) throw new Error("No thread to archive");
-          await this.#client.call("thread.flag", { threadId: id, archived: true });
-          this.#notice("info", `Archived ${id}; /threads lists it under Archived.`);
-        },
-      },
-      {
-        name: "unarchive",
-        usage: "<id>",
-        description: "bring an archived thread back into the lists",
-        group: "Session",
-        run: async (_context, args) => {
-          if (!args) throw new Error("Usage: /unarchive <id>");
-          await this.#client.call("thread.flag", { threadId: args, archived: false });
-          this.#notice("info", `Brought ${args} back; /resume ${args} opens it.`);
-        },
-      },
-      {
         name: "fork",
         usage: "[turn]",
         description: "start a new thread from this one's turns, through a turn or all of them",
-        group: "Session",
+        group: "Threads",
         available: () => (this.#current?.runCount ?? 0) > 0,
         run: async (_context, args) => {
           const current = this.#current;
@@ -774,36 +737,6 @@ export class App {
           const shown = this.#client.threads.get(fork.id) ?? fork;
           // Shown, unless the user went elsewhere while it was made.
           if (this.#currentId === current.id) this.#show(shown);
-        },
-      },
-      {
-        name: "forget",
-        usage: "[id]",
-        description: "delete a thread and the threads it started, for good",
-        group: "Session",
-        run: async (_context, args) => {
-          const id = args || this.#currentId;
-          if (!id) throw new Error("No thread to forget");
-          const title = this.#client.threads.get(id)?.title;
-          const answer = await this.#pick(
-            `Forget ${id}${title ? ` (${title})` : ""}? Its transcript and the threads it started go too.`,
-            [entry("Keep it"), entry("Forget it for good")],
-            0,
-            false,
-            { count: false },
-          );
-          if (answer !== 1) return;
-          const { forgotten } = await this.#client.call("thread.forget", { threadId: id });
-          // On to a thread that remains, then the notice, which goes where the user is.
-          if (this.#currentId === null || forgotten.includes(this.#currentId)) {
-            const next = this.#threadOrder().find(
-              (thread) =>
-                thread.status !== "closed" && !forgotten.includes(thread.id) && !thread.archived,
-            );
-            if (next) this.#show(next);
-            else await this.#open(this.#harness, { ...this.#settings, resume: null }, false);
-          }
-          this.#notice("info", `Forgot ${forgotten.join(", ")}`);
         },
       },
       {
@@ -831,31 +764,6 @@ export class App {
         },
       },
       {
-        name: "image",
-        usage: "<path>",
-        description: "show an image in the transcript, where the terminal shows images",
-        group: "General",
-        run: async (_context, args) => {
-          if (!args) throw new Error("Usage: /image <path>");
-          // Read where the thread runs, as `@` images are, and shrunk to the room for it.
-          const path = resolvePath(this.#cwd(), args.replace(/^~(?=\/|$)/, homedir()));
-          const found = await this.#client.call("files.image", { path, ...this.#imageBox() });
-          const shown = found ? picture(Buffer.from(found.data, "base64")) : null;
-          if (!shown)
-            throw new Error(
-              `${args} could not be read as an image; without html2term where 1harness runs, only a PNG shows`,
-            );
-          this.#images.set(this.#imageKey(path), shown);
-          this.#view.local({ kind: "image", picture: shown, path, title: basename(path) });
-          this.#view.scroll = 0;
-          if (!this.#graphics)
-            this.#notice(
-              "info",
-              "This terminal did not say it shows images; ONEHARNESS_IMAGES=1 tries anyway.",
-            );
-        },
-      },
-      {
         name: "connect",
         usage: "[host]",
         description: "use 1harness on another machine, named in `1harness hosts`, or this one's",
@@ -873,16 +781,10 @@ export class App {
         run: async (_context, args) => this.#connectTo(args),
       },
       {
-        name: "stop",
-        description: "stop the running turn and the agents under it (also esc)",
-        group: "Session",
-        run: () => this.#stop(),
-      },
-      {
         name: "close",
         usage: "[id]",
         description: "end a thread and the threads it started",
-        group: "Session",
+        group: "Threads",
         available: () =>
           [...this.#client.threads.values()].some((thread) => thread.status !== "closed"),
         run: async (_context, args) => {
@@ -1982,9 +1884,13 @@ export class App {
       const own = new Set(
         this.#commands.list().flatMap((command) => [command.name, ...(command.aliases ?? [])]),
       );
-      // 1harness's commands take precedence, so the harness's copies are hidden.
+      // 1harness owns the commands; from a harness come only your skills, and
+      // none that would shadow one of 1harness's.
       this.#nativeCommands = commands.filter(
-        (command) => !own.has(command.name) && !command.aliases.some((alias) => own.has(alias)),
+        (command) =>
+          command.kind === "skill" &&
+          !own.has(command.name) &&
+          !command.aliases.some((alias) => own.has(alias)),
       );
       this.#syncSlash();
       this.#schedule();
@@ -2937,7 +2843,7 @@ export class App {
     for (const command of this.#nativeCommands)
       add(
         [command.name, ...command.aliases],
-        entry(`/${command.name}`, command.description, { tag: this.#tag(command) }),
+        entry(`/${command.name}`, command.description, { tag: "Skills" }),
       );
     for (const command of last)
       add(
@@ -3540,17 +3446,14 @@ export class App {
         (command) => command.name === name || command.aliases.includes(name),
       );
       const thread = this.#live;
-      if (native || thread?.capabilities.nativeSlashCommands) {
-        // The harness runs its own commands and skills, such as Claude's /context or Codex's /review.
+      if (native) {
+        // The harness runs your skills, such as /sol-loop; its own commands stay its own.
         if (!thread) throw new Error("No session is running.");
-        // One the harness did not list goes as a message; the harness says if it has none.
-        if (native)
-          await this.#client.call("thread.command", {
-            threadId: thread.id,
-            command: native,
-            args: arg.trim(),
-          });
-        else await this.#client.call("thread.send", { threadId: thread.id, text, command: true });
+        await this.#client.call("thread.command", {
+          threadId: thread.id,
+          command: native,
+          args: arg.trim(),
+        });
         return;
       }
       this.#notice("warning", `Unknown command /${name}. Type /help for commands.`);
@@ -3559,11 +3462,6 @@ export class App {
     } finally {
       this.#schedule();
     }
-  }
-
-  /** The tab a harness's command goes under: its skills, or the harness by name. */
-  #tag(command: NativeCommand): string {
-    return command.kind === "skill" ? "Skills" : this.#harnessLabel(this.#harness);
   }
 
   #help(): void {
@@ -3585,7 +3483,7 @@ export class App {
         entry(
           short ? `/${command.name} ${hint}` : `/${command.name}`,
           hint && !short ? `${command.description} · takes: ${hint}` : command.description,
-          { group: this.#tag(command) },
+          { group: "Skills" },
         ),
       );
     }
