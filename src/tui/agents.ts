@@ -143,32 +143,3 @@ export function plainLine(text: string): string {
   const body = line.replace(/^\s*(?:#+\s+|[-*+]\s+|>\s*|\d+\.\s+)/, "");
   return plainText(stripVTControlCharacters(inline(body)), true);
 }
-
-/**
- * Tree branches for threads in tree order, each one's children after it:
- * `├ ` and `└ ` before a child, `│ ` under a parent's later siblings.
- */
-export function treePrefixes(threads: readonly ThreadState[]): string[] {
-  const shown = new Set(threads.map((thread) => thread.id));
-  const parentOf = (thread: ThreadState) =>
-    thread.parentId && shown.has(thread.parentId) ? thread.parentId : null;
-  const isLast = (index: number): boolean => {
-    const thread = threads[index];
-    if (!thread) return true;
-    const parent = parentOf(thread);
-    return !threads.slice(index + 1).some((other) => parentOf(other) === parent);
-  };
-  return threads.map((thread, index) => {
-    const parts: string[] = [];
-    let current: ThreadState | undefined = thread;
-    let position = index;
-    while (current && parentOf(current)) {
-      const last = isLast(position);
-      parts.unshift(current === thread ? (last ? "└ " : "├ ") : last ? "  " : "│ ");
-      const parentId = parentOf(current);
-      position = threads.findIndex((other) => other.id === parentId);
-      current = threads[position];
-    }
-    return parts.join("");
-  });
-}

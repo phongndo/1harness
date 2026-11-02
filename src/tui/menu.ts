@@ -334,8 +334,10 @@ export class Menu {
       const room =
         width - 2 - visibleWidth(item.detail) - (item.tag ? visibleWidth(item.tag) + 2 : 0);
       const own = visibleWidth(item.label) + 3;
+      // Where the selected entry shows whole under the list, labels keep to
+      // their column, so the details line up.
       const label =
-        own > labelWidth && own <= room
+        own > labelWidth && own <= room && !describing
           ? pad(item.label, own)
           : pad(truncate(item.label, labelWidth - 3), labelWidth);
       const detail = item.inert ? style.muted(item.detail) : paint(item.detail);

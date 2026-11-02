@@ -23,11 +23,9 @@ import type {
   RequestResponse,
   SessionInfo,
   SessionOptions,
-  ThreadSummary,
 } from "../core/events.ts";
 import type { FileMatch } from "../core/files.ts";
 import { appendDelta, errorMessage } from "../core/thread.ts";
-import { ago } from "../core/wording.ts";
 import type { ClientEvent, HostClient } from "../client/client.ts";
 import {
   RpcError,
@@ -37,13 +35,15 @@ import {
   type LiveFrame,
   type LogEntry,
   type PageEvent,
+  type ThreadListing,
   type ThreadState,
   type UiRequest,
 } from "../protocol.ts";
-import { agentRowOf, agentStatus, harnessLabel, treePrefixes } from "./agents.ts";
+import { agentRowOf, agentStatus, harnessLabel, isLive, statusDot } from "./agents.ts";
 import { Editor, applyEditingKey } from "./editor.ts";
 import { InputDecoder, type InputEvent, type Key } from "./input.ts";
 import { Menu, entry, infoPanel, lineStep, type MenuEntry } from "./menu.ts";
+import { listedEntry, ResumeView, type ResumeEntry } from "./resume.ts";
 import {
   ChoicePrompt,
   QuestionPrompt,
@@ -339,6 +339,11 @@ function describeLimit(limit: RateLimit): string {
   return `${limit.label}: ${used}${resets}`;
 }
 
+/** When a thread last did something: its latest run, or its start. */
+function lastActive(thread: ThreadState): number {
+  return thread.lastRun?.endedAt ?? thread.lastRun?.startedAt ?? thread.createdAt;
+}
+
 export class App {
   #in = process.stdin;
   #screen = new Screen(process.stdout);
@@ -442,6 +447,7 @@ export class App {
         onReplaced?: () => void;
       }
     | { kind: "info"; title: string; rows: [string, string][] }
+    | { kind: "resume"; view: ResumeView; onDone: (id: string | null) => void }
     | null = null;
   /** The host's progress lines, by request. */
   #progress = new Map<string, (level: "info" | "warning" | "error", text: string) => void>();
@@ -643,7 +649,7 @@ export class App {
           };
         },
         setInput: (text) => this.#editor.set(text),
-        threads: (focus) => this.#switchThread("", focus),
+        threads: (query) => this.#switchThread(query),
       },
       session: () => {
         const live = this.#live;
@@ -701,26 +707,10 @@ export class App {
         run: () => this.#status(),
       },
       {
-        name: "threads",
-        usage: "[id | words]",
-        description:
-          "open threads, recent and archived ones, or search what they said (also ctrl+t)",
-        group: "Session",
-        complete: () => ({
-          start: 0,
-          items: this.#threadOrder().map((thread) => ({
-            value: thread.id,
-            detail: `${thread.harness} · ${thread.status} · ${thread.title}`,
-            more: false,
-          })),
-        }),
-        run: (_context, args) => this.#switchThread(args),
-      },
-      {
         name: "rename",
         usage: "<title>",
         description: "rename this thread",
-        group: "Session",
+        group: "Threads",
         available: () => this.#current !== undefined,
         run: async (_context, args) => {
           const current = this.#current;
@@ -959,7 +949,7 @@ export class App {
     if (held.length > 0)
       this.#notice(
         "info",
-        `${held.join(", ")} ${held.length === 1 ? "has" : "have"} messages waiting from before 1harness stopped; /threads opens ${held.length === 1 ? "it" : "them"}.`,
+        `${held.join(", ")} ${held.length === 1 ? "has" : "have"} messages waiting from before 1harness stopped; /resume opens ${held.length === 1 ? "it" : "them"}.`,
       );
     const resume = this.#settings.resume;
     if (resume) await this.#resume(resume, this.#harness);
@@ -1223,11 +1213,10 @@ export class App {
 
   /** Shows a thread, picking one from the tree of threads when no ID is given. */
   /**
-   * Shows a thread by its ID, or picks one: the open ones as a tree, recent
-   * and archived ones from the host's records, or, given words, the threads
-   * whose titles or transcripts match them.
+   * Shows a thread by its ID, or picks one from the thread list, or, given
+   * words, from the threads whose titles or transcripts mention them.
    */
-  async #switchThread(args: string, focus: "open" | "recent" = "open"): Promise<void> {
+  async #switchThread(args: string): Promise<void> {
     const words = args.trim();
     const named = /^t\d+$/.test(words) ? words : null;
     if (named) {
@@ -1245,7 +1234,7 @@ export class App {
     // and esc closes it rather than stopping the turn.
     const loading = this.#loadingPanel("Threads");
     try {
-      await this.#pickThread(words, focus, loading);
+      await this.#pickThread(words, loading);
       if (loading.replaced())
         this.#notice(
           "info",
@@ -1290,143 +1279,104 @@ export class App {
     };
   }
 
+  /**
+   * The thread list: each of your threads by what it is doing, newest first,
+   * the agents a thread started under it. With `words`, the threads that
+   * mention them.
+   */
   async #pickThread(
     words: string,
-    focus: "open" | "recent",
     loading: { dismissed: () => boolean; clear: () => void },
   ): Promise<void> {
-    const choices: { id: string; open: boolean; native?: HarnessId }[] = [];
-    const entries: MenuEntry[] = [];
-    const add = (id: string, open: boolean, made: MenuEntry, native?: HarnessId) => {
-      choices.push({ id, open, ...(native ? { native } : {}) });
-      entries.push(made);
-    };
+    let entries: ResumeEntry[];
     if (words) {
       const found = await this.#client.call("threads.search", { query: words });
       const titled = await this.#client.call("threads.list", { scope: "recent", query: words });
-      const ids = new Set<string>();
-      for (const { thread, snippet } of found) {
-        ids.add(thread.id);
-        add(
-          thread.id,
-          false,
-          entry(thread.title || thread.id, oneLine(snippet), { tag: thread.id }),
-        );
-      }
-      for (const thread of titled)
-        if (!ids.has(thread.id))
-          add(
-            thread.id,
-            false,
-            entry(thread.title || thread.id, `${thread.harness} · ${thread.status}`, {
-              tag: thread.id,
-            }),
-          );
-      if (loading.dismissed()) return;
-      if (entries.length === 0) {
+      const seen = new Map<string, ThreadListing>();
+      for (const thread of [...found.map((match) => match.thread), ...titled])
+        if (!seen.has(thread.id)) seen.set(thread.id, thread);
+      entries = [...seen.values()].map(listedEntry);
+      if (entries.length === 0 && !loading.dismissed()) {
         this.#notice("info", `No thread mentions ${words}.`);
         return;
       }
-      // The list takes its own loading panel's place, which is no question coming up.
-      loading.clear();
-      const index = await this.#pick(`Threads matching ${words}`, entries, 0, true);
-      const chosen = index === null ? undefined : choices[index];
-      if (chosen) await this.#resume(chosen.id, this.#harness);
-      return;
-    }
-    const open = this.#threadOrder().filter(
-      (thread) => thread.status !== "closed" && !thread.archived,
-    );
-    const prefixes = treePrefixes(open);
-    open.forEach((thread, row) =>
-      add(
-        thread.id,
-        true,
-        entry(
-          `${prefixes[row] ?? ""}${thread.title || thread.id}`,
-          `${harnessLabel(thread)} · ${agentStatus(thread)}`,
-          { tag: this.#marker(thread), group: "Open" },
-        ),
-      ),
-    );
-    // The harness's own sessions in this folder are asked for alongside the host's lists.
-    const live = this.#live;
-    const listsNative =
-      live !== null && live.status !== "parked" && live.methods.includes("listThreads");
-    const [recent, archived, natives] = await Promise.all([
-      this.#client.call("threads.list", { scope: "recent", limit: 100 }).catch(() => []),
-      this.#client.call("threads.list", { scope: "archived", limit: 100 }).catch(() => []),
-      listsNative && live
-        ? this.#callSession(live.id, "listThreads", [])
-            .then((found) => (found ?? []) as ThreadSummary[])
-            .catch((): ThreadSummary[] => [])
-        : Promise.resolve<ThreadSummary[]>([]),
-    ]);
-    const shown = new Set(open.map((thread) => thread.id));
-    const cwd = this.#cwd();
-    for (const thread of recent)
-      if (!shown.has(thread.id) && thread.parentId === null)
-        add(
-          thread.id,
-          false,
-          entry(
-            thread.title || thread.id,
-            `${thread.id} · ${thread.harness} · ${thread.status}${thread.cwd === cwd ? "" : ` · ${thread.cwd}`}`,
-            {
-              tag: thread.pinned ? "pinned" : thread.unseen ? "new" : ago(thread.updatedAt),
-              group: "Recent",
-            },
-          ),
-        );
-    for (const thread of archived)
-      add(
-        thread.id,
-        false,
-        entry(thread.title || thread.id, `${thread.id} · ${thread.harness}`, {
-          tag: ago(thread.updatedAt),
-          group: "Archived",
-        }),
+    } else {
+      // Listed first: the host names threads for their harness's titles as it lists them,
+      // and the open threads below are read once those names have come.
+      const recent = await this.#client
+        .call("threads.list", { scope: "recent", limit: 100 })
+        .catch((): ThreadListing[] => []);
+      // The thread on screen with nothing in it yet is where you are, not one to go back to.
+      const empty = (thread: { id: string; runCount: number }) =>
+        thread.runCount === 0 && thread.id === this.#currentId;
+      const open = this.#threadOrder().filter(
+        (thread) => thread.status !== "closed" && !thread.archived && !empty(thread),
       );
-    // The harness's own sessions in this folder that no 1harness thread runs.
-    if (live && listsNative) {
-      const owned = new Set(
-        [...recent, ...archived]
-          .map((thread) => thread.native)
-          .concat(open.map((thread) => thread.info.threadId)),
-      );
-      const tab = this.#harnessLabel(live.harness);
-      for (const native of natives) {
-        const title = oneLine(native.title);
-        // A session that only ran a command, such as /clear, is no conversation to go back to.
-        if (owned.has(native.id) || title === "" || /^[/!]\S*$/.test(title)) continue;
-        add(
-          native.id,
-          false,
-          entry(title, `${tab} session`, { tag: ago(native.updatedAt), group: tab }),
-          live.harness,
-        );
+      // Each of your threads with the agents it started, the groups newest first.
+      const groups: { at: number; rows: ResumeEntry[] }[] = [];
+      const depth = (thread: ThreadState): number => {
+        const parent = thread.parentId ? this.#client.threads.get(thread.parentId) : undefined;
+        return parent && open.includes(parent) ? depth(parent) + 1 : 0;
+      };
+      for (const thread of open) {
+        const status = agentStatus(thread);
+        const made: ResumeEntry = {
+          id: thread.id,
+          title: thread.title,
+          on: harnessLabel(thread),
+          cwd: thread.info.cwd,
+          updatedAt: lastActive(thread),
+          depth: depth(thread),
+          // A thread at work, or waiting on you, says so with its dot.
+          dot: isLive(status) ? `${statusDot(status)} ` : "",
+        };
+        if (made.depth > 0) groups.at(-1)?.rows.push(made);
+        else groups.push({ at: made.updatedAt, rows: [made] });
       }
+      const shown = new Set(open.map((thread) => thread.id));
+      // Agents whose threads closed, as finished tasks' do, go under the thread that started them.
+      const agents = new Map<string, ThreadListing[]>();
+      for (const thread of recent.toSorted((a, b) => a.createdAt - b.createdAt)) {
+        if (shown.has(thread.id) || empty(thread)) continue;
+        if (thread.parentId === null)
+          groups.push({ at: thread.updatedAt, rows: [listedEntry(thread)] });
+        else agents.set(thread.parentId, [...(agents.get(thread.parentId) ?? []), thread]);
+      }
+      const withAgents = (parent: ResumeEntry): ResumeEntry[] => [
+        parent,
+        ...(agents.get(parent.id) ?? []).flatMap((agent) =>
+          withAgents({ ...listedEntry(agent), depth: parent.depth + 1 }),
+        ),
+      ];
+      entries = groups
+        .toSorted((a, b) => b.at - a.at)
+        .flatMap((group) => group.rows)
+        .flatMap(withAgents);
     }
     if (loading.dismissed()) return;
     if (entries.length === 0) {
       this.#notice("info", "No threads yet.");
       return;
     }
-    const current = choices.findIndex((choice) => choice.id === this.#currentId);
-    const earlier = choices.findIndex((choice) => !choice.open);
     loading.clear();
-    const index = await this.#pick(
-      "Threads",
-      entries,
-      Math.max(0, focus === "recent" && earlier !== -1 ? earlier : current),
-      true,
-      { tabs: true, describe: true },
-    );
-    const chosen = index === null ? undefined : choices[index];
-    if (!chosen || chosen.id === this.#currentId) return;
-    const target = this.#client.threads.get(chosen.id);
-    if (chosen.open && target) this.#show(target);
-    else await this.#resume(chosen.id, chosen.native ?? this.#harness);
+    const chosen = await new Promise<string | null>((resolve) => {
+      this.#panel = {
+        kind: "resume",
+        view: new ResumeView(words ? `Threads mentioning ${words}` : "Resume", entries, {
+          initial: this.#currentId,
+          cwd: this.#cwd(),
+          home: homedir(),
+          // What mentions the words, from every folder.
+          ...(words ? { all: true } : {}),
+        }),
+        onDone: resolve,
+      };
+      this.#schedule();
+    });
+    if (!chosen || chosen === this.#currentId) return;
+    const target = this.#client.threads.get(chosen);
+    if (target && target.status !== "closed") this.#show(target);
+    else await this.#resume(chosen, this.#harness);
   }
 
   /** A harness's name as people know it, such as `Claude Code`. */
@@ -1489,17 +1439,6 @@ export class App {
     settle("info", `Moving to ${target}…`);
     this.#next = local ? "" : target;
     await this.#exit();
-  }
-
-  /** What the thread list marks a thread with: what needs the user, what is new, or where it is. */
-  #marker(thread: ThreadState): string {
-    if (thread.id === this.#currentId) return "current";
-    if (thread.status === "waiting") return "needs you";
-    const finished = thread.lastRun && thread.lastRun.status !== "running";
-    if (finished && thread.runCount > Math.max(thread.seenRuns, this.#seenRuns.get(thread.id) ?? 0))
-      return "new";
-    if (thread.pinned) return "pinned";
-    return thread.status === "parked" ? "parked" : thread.id;
   }
 
   #show(thread: ThreadState): void {
@@ -2019,9 +1958,11 @@ export class App {
   /** Threads with each one's children right after it. */
   #threadOrder(): ThreadState[] {
     const all = [...this.#client.threads.values()];
+    // Your threads newest first; the agents each started under it, as they were started.
     const under = (parentId: string | null): ThreadState[] =>
       all
         .filter((thread) => thread.parentId === parentId)
+        .toSorted((a, b) => (parentId === null ? lastActive(b) - lastActive(a) : 0))
         .flatMap((thread) => [thread, ...under(thread.id)]);
     return under(null);
   }
@@ -2692,6 +2633,8 @@ export class App {
           if (this.#prompt.prompt.typing) this.#prompt.prompt.paste(event.text);
         } else if (this.#panel?.kind === "menu") {
           this.#panel.menu.paste(event.text);
+        } else if (this.#panel?.kind === "resume") {
+          this.#panel.view.paste(event.text);
         } else {
           this.#panel = null;
           this.#editor.insert(event.text);
@@ -2794,6 +2737,13 @@ export class App {
       // A panel to read closes on any key; typing goes on into the composer.
       this.#panel = null;
       return key.name === "escape" || key.name === "return" || (key.ctrl && key.name === "c");
+    }
+    if (panel.kind === "resume") {
+      const result = panel.view.key(key, Math.max(1, this.#screen.rows - 12));
+      if (!result) return true;
+      this.#panel = null;
+      panel.onDone(result.kind === "choose" ? result.id : null);
+      return true;
     }
     const result = panel.menu.key(key);
     if (!result) return true;
@@ -3912,13 +3862,19 @@ export class App {
           : this.#panel
             ? null
             : (this.#slash ?? this.#args?.menu ?? this.#mention?.menu ?? null);
-      // Lists and panels open above the composer, which keeps its place at the bottom.
+      // Lists and panels open above the composer, which keeps its place at the
+      // bottom; the thread list takes the screen above it.
       const panel =
         this.#panel?.kind === "info"
           ? infoPanel(this.#panel.title, this.#panel.rows, width)
-          : listed
-            ? listed.render(width, listRows)
-            : [];
+          : this.#panel?.kind === "resume"
+            ? this.#panel.view.render(
+                width,
+                Math.max(8, height - rows.length - composer.length - 3),
+              )
+            : listed
+              ? listed.render(width, listRows)
+              : [];
       if (listed) list = { menu: listed, row: rows.length };
       if (panel.length > 0) rows.push(...panel, "");
       if (!this.#panel)

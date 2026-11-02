@@ -221,12 +221,14 @@ once you send that thread something. A task an agent delegated reports nothing
 after a restart; the agent can ask with `task_status`. Text still streaming when
 1harness crashes is kept up to the last write, a moment before.
 
-`/threads` (or ctrl+t) lists the open threads as a tree, with recent and
-archived ones under tabs, and marks the ones that need you, have news, or are
-parked; `/threads <words>` searches what every thread said. `/rename` names a
-thread, `/pin` keeps it at the top, `/archive` ends it and moves it out of the
-way (`/unarchive` brings it back), and `/forget` deletes it for good, with the
-threads it started. `/fork [turn]` starts a new thread on the same harness and
+`/resume` (or ctrl+t) lists your threads by what each is doing, with the
+harness, model, and effort it runs on: the open ones first, each with the
+agents it started under it, then earlier ones. A thread is named for what it
+does by its harness, Claude Code or Codex, after its first turns; until then,
+and on harnesses that name none, by its first message. `/resume t42` opens a
+thread by its ID, or a harness's own session by its ID, and `/resume <words>`
+searches what every thread said. `/rename` names a thread, and a name you give
+it stays. `/fork [turn]` starts a new thread on the same harness and
 folder from this one's turns, all of them or up to a turn; its first message
 carries them, and its agent can read the rest with `thread_read`. Outside the
 terminal, `1harness threads` lists this folder's threads (`--all` for every

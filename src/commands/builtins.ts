@@ -1,4 +1,4 @@
-import type { McpAction, McpServer, ModelOption, ThreadSummary } from "../core/events.ts";
+import type { McpAction, McpServer, ModelOption } from "../core/events.ts";
 import type { ThreadListing } from "../protocol.ts";
 import { errorMessage } from "../core/thread.ts";
 import { EFFORT_DESCRIPTIONS, MODE_DESCRIPTIONS } from "../core/wording.ts";
@@ -46,12 +46,6 @@ function listed<T>(context: CommandContext, key: string, load: () => Promise<T[]
 }
 
 /** The harness's own earlier threads in this folder, where it lists them. */
-function nativeThreads(context: CommandContext): ThreadSummary[] {
-  const session = liveSession(context);
-  if (!session?.listThreads) return [];
-  return listed(context, "threads", async () => (await session.listThreads?.()) ?? []);
-}
-
 /** 1harness's threads, this folder's first, newest first, without the one on screen. */
 async function storedThreads(context: CommandContext): Promise<ThreadListing[]> {
   const cwd = context.info?.cwd;
@@ -119,30 +113,32 @@ const newThread: CommandDefinition = {
 
 const resume: CommandDefinition = {
   name: "resume",
-  usage: "[id]",
-  description: "open an earlier thread: 1harness's, such as t42, or the harness's own session",
-  group: "Session",
+  usage: "[id | words]",
+  description: "pick up a thread, by its ID, or search what threads said (also ctrl+t)",
+  group: "Threads",
   complete: (context) => ({
     start: 0,
-    items: [
-      ...context
-        .lookup("stored", () => storedThreads(context))
-        .map((thread: ThreadListing) =>
-          completion(thread.id, `${thread.harness} · ${oneLine(thread.title).slice(0, 50)}`),
+    items: context
+      .lookup("stored", () => storedThreads(context))
+      .map((thread: ThreadListing) =>
+        completion(
+          thread.id,
+          `${oneLine(thread.title).slice(0, 50)} · ${[thread.harness, thread.model, thread.effort].filter(Boolean).join(" · ")}`,
         ),
-      ...nativeThreads(context).map((thread) =>
-        completion(thread.id, oneLine(thread.title).slice(0, 50)),
       ),
-    ],
   }),
   async run(context, args) {
-    if (args) {
+    // An ID, 1harness's such as t42 or a harness's own session's, opens that thread.
+    if (/^t\d+$/.test(args) || /^[\w-]{16,}$/.test(args)) {
       await context.openThread({ resume: args });
       return;
     }
-    if (!context.ui.threads) throw new Error("Usage: /resume <id>");
-    // One list of threads: the open ones, earlier ones, and the harness's own.
-    await context.ui.threads("recent");
+    if (!context.ui.threads) {
+      if (!args) throw new Error("Usage: /resume <id>");
+      await context.openThread({ resume: args });
+      return;
+    }
+    await context.ui.threads(args);
   },
 };
 
