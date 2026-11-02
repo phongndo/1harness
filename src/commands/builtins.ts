@@ -82,13 +82,18 @@ const quit: CommandDefinition = {
 };
 
 /** A harness as a pick lists it: where it stands, and what to do about that. */
-export function harnessEntry(harness: HarnessInfo, current: string | null): PickEntry {
-  const state = HARNESS_STATES[harness.state];
+export function harnessEntry(
+  harness: HarnessInfo,
+  current: string | null,
+  chosen: string | null,
+): PickEntry {
+  const marks = [harness.id === current ? "current" : "", harness.id === chosen ? "default" : ""];
+  // Ready goes without saying beside a mark.
+  if (harness.state !== "ready" || !marks.some(Boolean)) marks.push(HARNESS_STATES[harness.state]);
   return {
     label: harness.id,
     detail: harness.detail ? `${harness.label} · ${harness.detail}` : harness.label,
-    tag:
-      harness.id !== current ? state : harness.state === "ready" ? "current" : `current · ${state}`,
+    tag: marks.filter(Boolean).join(" · "),
   };
 }
 
@@ -238,12 +243,23 @@ const harness: CommandDefinition = {
     if (!chosen) {
       const index = await context.ui.pick(
         "Harnesses",
-        all.map((driver) => harnessEntry(driver, context.harness)),
+        all.map((driver) => harnessEntry(driver, context.harness, context.defaultHarness)),
         {
           initial: Math.max(
             0,
             all.findIndex((driver) => driver.id === context.harness),
           ),
+          ...(context.setDefaultHarness
+            ? {
+                save: {
+                  hint: "use and make default",
+                  run: (row: number) => {
+                    const picked = all[row];
+                    if (picked) context.setDefaultHarness?.(picked.id);
+                  },
+                },
+              }
+            : {}),
         },
       );
       chosen = index === null ? undefined : all[index];

@@ -42,14 +42,31 @@ const harnesses: HarnessInfo[] = [
 describe("harnessesText", () => {
   it("says where each harness stands, and what to do about it or where it is", () => {
     assert.equal(
-      harnessesText(harnesses),
+      harnessesText(harnesses, { chosen: "codex", last: "claude" }),
       [
         "claude  ready          /usr/local/bin/claude",
         "codex   needs sign-in  run `codex login` to sign in",
         "acme    installed      /opt/acme",
         "fx      not installed  fx is not installed: no `fx` on PATH",
         "",
+        "1harness starts codex, your default, unless -H names another.",
+        "",
       ].join("\n"),
+    );
+  });
+
+  it("says it starts the harness used last without a default, and when it will ask", () => {
+    assert.match(
+      harnessesText(harnesses, { chosen: null, last: "claude" }),
+      /starts claude, the harness used last, unless -H names another; ctrl\+s in \/harness sets a default/,
+    );
+    assert.match(
+      harnessesText(harnesses, { chosen: null, last: null }),
+      /asks which to start the next time it opens/,
+    );
+    assert.match(
+      harnessesText(harnesses, { chosen: "gone", last: null }),
+      /settings\.json names gone, which is none of these/,
     );
   });
 });
@@ -62,9 +79,13 @@ describe("harnessesCommand", () => {
       return true;
     });
     try {
-      const status = await harnessesCommand(["--help"], async () => {
-        throw new Error("reached a server");
-      });
+      const status = await harnessesCommand(
+        ["--help"],
+        async () => {
+          throw new Error("reached a server");
+        },
+        { chosen: null, last: null },
+      );
       assert.equal(status, 0);
     } finally {
       write.mock.restore();
@@ -88,7 +109,10 @@ describe("harnessesCommand", () => {
       return true;
     });
     try {
-      assert.equal(await harnessesCommand(["--json"], async () => client), 0);
+      assert.equal(
+        await harnessesCommand(["--json"], async () => client, { chosen: null, last: null }),
+        0,
+      );
     } finally {
       write.mock.restore();
     }

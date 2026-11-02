@@ -1027,6 +1027,8 @@ export class Host {
       },
       harnesses: () => this.#harnesses(),
       checkHarnesses: () => this.#checkHarnesses(),
+      // Defaults are each client's own, in its settings.
+      defaultHarness: null,
       threads: (scope) => this.call(client.id, "threads.list", { scope }),
       lookup: <T>(key: string, load: () => Promise<T[]>): T[] => {
         const cached = client.lookups.get(prefix + key);
@@ -1039,7 +1041,8 @@ export class Host {
         client.lookups.delete(prefix + key);
       },
       openThread: async (options = {}) => {
-        const harness = options.harness ?? managed?.harness ?? "claude";
+        const harness = options.harness ?? managed?.harness;
+        if (!harness) throw new Error("Name a harness to start the thread on");
         const base = settings();
         const state = options.resume
           ? await this.call(client.id, "thread.resume", {

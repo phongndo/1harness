@@ -1,13 +1,22 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { RUNTIME_MODES, isRuntimeMode, type RuntimeMode } from "./events.ts";
 
 /** What the user sets in `settings.json` in the config folder. */
 export interface Settings {
+  /**
+   * The harness 1harness starts when none is named, which ctrl+s in a harness
+   * pick sets; without one, it starts the harness used last.
+   */
+  harness: string | null;
   /** The mode new threads start in; 1harness's default when unset. */
   mode: RuntimeMode | null;
   /** How many days a closed thread is kept; null keeps them all. Pinned ones are always kept. */
   retainClosedDays: number | null;
+}
+
+export function settingsFile(configDir: string): string {
+  return join(configDir, "settings.json");
 }
 
 /**
@@ -16,10 +25,10 @@ export interface Settings {
  * mode until it is fixed, since it may have been meant to narrow them.
  */
 export function loadSettings(configDir: string): { settings: Settings; warnings: string[] } {
-  const file = join(configDir, "settings.json");
+  const file = settingsFile(configDir);
   // A broken file keeps every thread, since it may have meant to keep more.
   const broken = (problem: string) => ({
-    settings: { mode: "supervised" as const, retainClosedDays: null },
+    settings: { harness: null, mode: "supervised" as const, retainClosedDays: null },
     warnings: [`${file}: ${problem}; threads start in supervised until it is fixed`],
   });
   let text: string;
@@ -27,7 +36,7 @@ export function loadSettings(configDir: string): { settings: Settings; warnings:
     text = readFileSync(file, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT")
-      return { settings: { mode: null, retainClosedDays: null }, warnings: [] };
+      return { settings: { harness: null, mode: null, retainClosedDays: null }, warnings: [] };
     return broken((error as Error).message);
   }
   let parsed: unknown;
@@ -42,12 +51,64 @@ export function loadSettings(configDir: string): { settings: Settings; warnings:
   const mode = values["mode"];
   if (mode !== undefined && mode !== null && !isRuntimeMode(mode))
     return broken(`mode must be one of: ${RUNTIME_MODES.join(", ")}`);
-  const retain = values["retainClosedDays"];
   const warnings: string[] = [];
+  const named = values["harness"];
+  let harness: string | null = null;
+  if (typeof named === "string" && named !== "") harness = named;
+  else if (named !== undefined && named !== null)
+    warnings.push(`${file}: harness must be a harness's name, such as codex; 1harness asks`);
+  const retain = values["retainClosedDays"];
   let retainClosedDays: number | null = null;
   if (typeof retain === "number" && Number.isFinite(retain) && retain > 0)
     retainClosedDays = retain;
   else if (retain !== undefined && retain !== null)
     warnings.push(`${file}: retainClosedDays must be a number of days; closed threads are kept`);
-  return { settings: { mode: isRuntimeMode(mode) ? mode : null, retainClosedDays }, warnings };
+  return {
+    settings: { harness, mode: isRuntimeMode(mode) ? mode : null, retainClosedDays },
+    warnings,
+  };
+}
+
+/**
+ * The harness used last, kept in the state folder, as the harness to start
+ * when the user set no default. Null when none was kept or it cannot be read.
+ */
+export function loadLastHarness(stateDir: string): string | null {
+  try {
+    return readFileSync(join(stateDir, "last-harness"), "utf8").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveLastHarness(stateDir: string, harness: string): void {
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "last-harness"), `${harness}\n`);
+}
+
+/**
+ * Sets keys in `settings.json`, keeping the rest of it as written. A file that
+ * cannot be read as a JSON object is left alone, since rewriting it would lose
+ * what the user meant by it.
+ */
+export function saveSettings(configDir: string, changes: Partial<Settings>): void {
+  const file = settingsFile(configDir);
+  let values: Record<string, unknown> = {};
+  let text: string | null = null;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (text !== null) {
+    const parsed: unknown = JSON.parse(text);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+      throw new Error(`${file}: settings must be a JSON object`);
+    values = parsed as Record<string, unknown>;
+  }
+  mkdirSync(configDir, { recursive: true });
+  // Written beside it and moved over it, so a crash never leaves half a file.
+  const temporary = `${file}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify({ ...values, ...changes }, null, 2)}\n`);
+  renameSync(temporary, file);
 }

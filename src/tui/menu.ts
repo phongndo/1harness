@@ -23,6 +23,8 @@ export interface MenuConfig {
   filter: boolean;
   /** What enter does, for the hint line. */
   action: string;
+  /** What ctrl+s does besides choosing, such as `make default`; none without it. */
+  save: string;
   /** fx's argument list: rows only, between rules, lined up under the word being completed. */
   bare: boolean;
   /** Shows the selected entry's whole detail under the list, for details cut short in their row. */
@@ -31,7 +33,7 @@ export interface MenuConfig {
   count: boolean;
 }
 
-export type MenuResult = { kind: "choose"; index: number } | { kind: "close" } | null;
+export type MenuResult = { kind: "choose"; index: number; save?: true } | { kind: "close" } | null;
 
 const HINT_GAP = "   ";
 /** Ctrl keys that move by pages, as in vim. */
@@ -136,6 +138,7 @@ export class Menu {
       tabs: false,
       filter: false,
       action: "use",
+      save: "",
       bare: false,
       describe: false,
       count: true,
@@ -235,6 +238,11 @@ export class Menu {
     }
     if (key.ctrl) {
       if (key.name === "c") return { kind: "close" };
+      if (key.name === "s" && this.config.save) {
+        const chosen = this.#visible()[this.#index];
+        if (!chosen || chosen.entry.inert) return null;
+        return { kind: "choose", index: chosen.index, save: true };
+      }
       const pages = this.config.filter ? undefined : PAGE_KEYS[key.name];
       if (pages) this.#page(pages);
       return null;
@@ -357,7 +365,10 @@ export class Menu {
     }
     const keys = ["↑↓ navigate"];
     if (this.#tabs.length > 0) keys.push("tab category");
-    if (visible.some(({ entry: item }) => !item.inert)) keys.push(`enter ${this.config.action}`);
+    if (visible.some(({ entry: item }) => !item.inert)) {
+      keys.push(`enter ${this.config.action}`);
+      if (this.config.save) keys.push(`ctrl+s ${this.config.save}`);
+    }
     keys.push("esc close");
     rows.push(rule(width), hints(keys, width));
     return rows;

@@ -13,7 +13,7 @@ signs in through its own CLI, such as `claude auth login` or `codex login`.
 
 ```sh
 1harness harnesses        # which harnesses are ready, need signing in, or are missing
-1harness                  # Claude Code in the current folder
+1harness                  # asks which harness to start the first time, then remembers
 1harness -H codex         # another harness
 1harness --help           # every option, subcommand, and environment variable
 ```
@@ -22,7 +22,7 @@ Inside the UI, `/help` lists every command.
 
 | Path                                  | What it holds                                     |
 | ------------------------------------- | ------------------------------------------------- |
-| `~/.config/1harness/settings.json`    | defaults, such as `{ "mode": "auto" }`            |
+| `~/.config/1harness/settings.json`    | defaults, such as `{ "harness": "codex" }`        |
 | `~/.config/1harness/mcp.json`         | MCP servers added to every harness (`mcpServers`) |
 | `~/.config/1harness/agents.json`      | extra ACP agents                                  |
 | `~/.config/1harness/extensions/`      | extensions; a trusted project adds `.1harness/`   |

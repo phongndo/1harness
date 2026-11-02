@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { BUILTIN_COMMANDS } from "../commands/builtins.ts";
+import { BUILTIN_COMMANDS, harnessEntry } from "../commands/builtins.ts";
 import {
   CommandRegistry,
   completion,
@@ -30,6 +30,7 @@ import {
   SESSION_CALLS,
   type CommandInfo,
   type HelloResult,
+  type HarnessInfo,
   type ThreadListing,
   type ThreadState,
   type UiRequest,
@@ -94,7 +95,14 @@ import { ThreadView, type ViewContext } from "./view.ts";
 export interface AppOptions {
   /** The host the terminal works through, in this process or a server's. */
   client: HostClient;
-  harness: HarnessId;
+  /** The harness the first thread starts on; null asks, as on the first run. */
+  harness: HarnessId | null;
+  /** The harness the user made their default, which harness picks mark. */
+  defaultHarness?: HarnessId | null;
+  /** Makes a harness the default, as ctrl+s in a harness pick does; returns where it is kept. */
+  setDefault?: (harness: HarnessId) => string;
+  /** Told the harness in use as it changes, so the next run can start on it. */
+  onHarness?: (harness: HarnessId) => void;
   /** What the first thread starts with; `resume` opens a stored or native thread instead. */
   session: SessionOptions;
   version: string;
@@ -212,8 +220,16 @@ export class App {
   #editor = new Editor();
   /** The host, and every thread's state as it last said. */
   #client: HostClient;
-  /** The harness and settings the next thread starts with. */
+  /** The harness and settings the next thread starts with; empty until chosen. */
   #harness: HarnessId;
+  /**
+   * The harness the next run starts on, without a default: the last one told
+   * to `onHarness`. Unset at first, so a harness -H named counts too.
+   */
+  #lastHarness: HarnessId | null = null;
+  #defaultHarness: HarnessId | null;
+  #setDefault: AppOptions["setDefault"];
+  #onHarness: AppOptions["onHarness"];
   /** Harness states already told of, so each is said once. */
   #toldHarness = new Set<string>();
   #settings: SessionOptions;
@@ -294,7 +310,8 @@ export class App {
     | {
         kind: "menu";
         menu: Menu;
-        onDone: (index: number | null) => void;
+        /** `save` when ctrl+s chose it. */
+        onDone: (index: number | null, save?: boolean) => void;
         /** The host's pick request it answers. */
         pick?: string;
         /** Called instead of `onDone` when another list takes the panel. */
@@ -360,7 +377,10 @@ export class App {
 
   constructor(options: AppOptions) {
     this.#client = options.client;
-    this.#harness = options.harness;
+    this.#harness = options.harness ?? "";
+    this.#defaultHarness = options.defaultHarness ?? null;
+    this.#setDefault = options.setDefault;
+    this.#onHarness = options.onHarness;
     this.#settings = { ...options.session };
     this.#version = options.version;
     if (options.prompt) this.#editor.set(options.prompt);
@@ -496,6 +516,7 @@ export class App {
             initial: options?.initial ?? 0,
             filter: options?.filter ?? false,
             tabs: options?.tabs ?? false,
+            ...(options?.save ? { save: options.save.hint, onSave: options.save.run } : {}),
           }),
         progress: (text) => {
           const view = this.#view;
@@ -520,6 +541,9 @@ export class App {
       },
       harnesses: () => this.#client.harnesses,
       checkHarnesses: () => this.#client.call("harnesses.list", {}),
+      ...(this.#setDefault
+        ? { setDefaultHarness: (harness: HarnessId) => this.#setDefaultHarness(harness) }
+        : {}),
       threads: (scope) => this.#client.call("threads.list", { scope }),
       lookup: (key, load) => this.#lookup(key, load),
       fetch: (key, load) => this.#fetch(key, load),
@@ -542,10 +566,11 @@ export class App {
       },
       switchHarness: (harness, options) => this.#switchHarness(harness, options?.fresh === true),
       exit: () => this.#exit(),
-    } satisfies Omit<CommandContext, "harness" | "thread" | "info">;
+    } satisfies Omit<CommandContext, "harness" | "defaultHarness" | "thread" | "info">;
     // Read live, since the thread changes under a command that outlives it.
     return Object.defineProperties(context, {
       harness: { get: () => this.#harness },
+      defaultHarness: { get: () => this.#defaultHarness },
       thread: {
         get: () => {
           const current = this.#current;
@@ -720,6 +745,14 @@ export class App {
         "info",
         `${held.join(", ")} ${held.length === 1 ? "has" : "have"} messages waiting from before 1harness stopped; /resume opens ${held.length === 1 ? "it" : "them"}.`,
       );
+    if (!this.#harness) {
+      const chosen = await this.#chooseHarness();
+      if (!chosen) {
+        await this.#exit();
+        return undefined;
+      }
+      this.#harness = chosen;
+    }
     const resume = this.#settings.resume;
     if (resume) await this.#resume(resume, this.#harness);
     else await this.#open(this.#harness, this.#settings, false);
@@ -1233,6 +1266,18 @@ export class App {
     const info = thread.info;
     this.#harness = thread.harness;
     this.#tellHarness();
+    // Agents a thread started run where it chose, not where the user works.
+    if (thread.parentId === null && thread.harness !== this.#lastHarness) {
+      this.#lastHarness = thread.harness;
+      try {
+        this.#onHarness?.(thread.harness);
+      } catch (error) {
+        this.#notice(
+          "warning",
+          `Could not keep ${thread.harness} for next time: ${errorMessage(error)}`,
+        );
+      }
+    }
     this.#settings = {
       ...this.#settings,
       cwd: info.cwd,
@@ -2020,9 +2065,9 @@ export class App {
   #pick(
     title: string,
     entries: MenuEntry[],
-    config: Partial<MenuConfig> & { pick?: string } = {},
+    config: Partial<MenuConfig> & { pick?: string; onSave?: (index: number) => void } = {},
   ): Promise<number | null> {
-    const { pick, ...menu } = config;
+    const { pick, onSave, ...menu } = config;
     return new Promise((resolve) => {
       if (entries.length === 0) {
         resolve(null);
@@ -2039,7 +2084,10 @@ export class App {
       this.#panel = {
         kind: "menu",
         menu: new Menu({ ...menu, title, entries }),
-        onDone: resolve,
+        onDone: (index, save) => {
+          if (save && index !== null) onSave?.(index);
+          resolve(index);
+        },
         ...(pick ? { pick } : {}),
       };
       this.#schedule();
@@ -2251,7 +2299,8 @@ export class App {
     const result = panel.menu.key(key);
     if (!result) return true;
     this.#panel = null;
-    panel.onDone(result.kind === "choose" ? result.index : null);
+    if (result.kind === "choose") panel.onDone(result.index, result.save === true);
+    else panel.onDone(null);
     return true;
   }
 
@@ -2692,6 +2741,62 @@ export class App {
         this.#suggestions.sync();
       },
     };
+  }
+
+  /**
+   * Asks which harness to start, with where each stands, as on the first run,
+   * and keeps the answer for the next. Null when none was chosen.
+   */
+  async #chooseHarness(): Promise<HarnessId | null> {
+    const line = this.#view.say("info", "Checking which harnesses are installed and signed in…");
+    this.#renderNow();
+    let harnesses: HarnessInfo[];
+    try {
+      harnesses = await this.#client.call("harnesses.list", {});
+      const ready = harnesses.filter((harness) => harness.state === "ready").length;
+      line.text = `${ready} of ${harnesses.length} harnesses are ready.`;
+    } catch (error) {
+      harnesses = this.#client.harnesses;
+      line.level = "warning";
+      line.text = `Could not check the harnesses: ${errorMessage(error)}`;
+    }
+    this.#view.transcript.touch(line);
+    let saved = false;
+    const index = await this.#pick(
+      "Which harness should 1harness start?",
+      harnesses.map((harness) => pickEntry(harnessEntry(harness, null, this.#defaultHarness))),
+      {
+        initial: Math.max(
+          0,
+          harnesses.findIndex((harness) => harness.state === "ready"),
+        ),
+        filter: true,
+        ...(this.#setDefault ? { save: "use and make default", onSave: () => (saved = true) } : {}),
+      },
+    );
+    const chosen = index === null ? undefined : harnesses[index];
+    if (!chosen) return null;
+    if (saved) this.#setDefaultHarness(chosen.id);
+    else
+      this.#notice(
+        "info",
+        `1harness starts ${chosen.label} next time too, as the harness used last; ctrl+s in /harness makes one the default.`,
+      );
+    return chosen.id;
+  }
+
+  /** Makes a harness the one 1harness starts, as ctrl+s in a harness pick does. */
+  #setDefaultHarness(harness: HarnessId): void {
+    try {
+      const where = this.#setDefault?.(harness);
+      this.#defaultHarness = harness;
+      this.#notice(
+        "info",
+        `${this.#harnessLabel(harness)} is your default harness${where ? `, in ${where}` : ""}; -H names another for one run.`,
+      );
+    } catch (error) {
+      this.#notice("warning", `Could not make ${harness} the default: ${errorMessage(error)}`);
+    }
   }
 
   /**

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import {
   DEFAULT_RUNTIME_MODE,
@@ -13,8 +14,14 @@ import {
 import { HostClient } from "./client/client.ts";
 import { LocalConnection, newClientId } from "./client/connection.ts";
 import { SocketConnection } from "./client/socket.ts";
-import { configDir, socketFile, storeFile } from "./core/paths.ts";
-import { loadSettings } from "./core/settings.ts";
+import { configDir, socketFile, stateDir, storeFile } from "./core/paths.ts";
+import {
+  loadLastHarness,
+  loadSettings,
+  saveLastHarness,
+  saveSettings,
+  settingsFile,
+} from "./core/settings.ts";
 import { drivers, registerConfiguredAgents } from "./drivers/index.ts";
 import { Host } from "./host/host.ts";
 import { PROTOCOL_VERSION } from "./protocol.ts";
@@ -46,7 +53,9 @@ terminal quits; it starts in the background when none is running.
 Options:
   -H, --harness <name>   ${drivers()
     .map((driver) => driver.id)
-    .join(", ")} (default: claude)
+    .join(", ")} (default: "harness" in
+                         ~/.config/1harness/settings.json, which ctrl+s in a harness pick
+                         sets, else the one used last; the first run asks)
   -m, --model <id>       model to use (default: the harness's default)
   -e, --effort <level>   reasoning effort
       --mode <mode>      supervised, auto-edit, auto, or full-access (default: "mode"
@@ -221,7 +230,10 @@ async function connectClient(
 }
 
 interface TerminalOptions {
-  harness: HarnessId;
+  /** Null asks which, as on the first run. */
+  harness: HarnessId | null;
+  /** The harness settings.json names, which harness picks mark. */
+  defaultHarness: HarnessId | null;
   session: SessionOptions;
   prompt: string | null;
   version: string;
@@ -339,6 +351,14 @@ async function terminal(options: TerminalOptions): Promise<string | undefined> {
   return new App({
     client,
     harness: options.harness,
+    defaultHarness: options.defaultHarness,
+    setDefault: (harness) => {
+      saveSettings(configDir(), { harness });
+      const file = settingsFile(configDir());
+      const home = homedir() + sep;
+      return file.startsWith(home) ? `~${sep}${file.slice(home.length)}` : file;
+    },
+    onHarness: (harness) => saveLastHarness(stateDir(), harness),
     session,
     version,
     prompt: options.prompt,
@@ -371,7 +391,10 @@ try {
   if (command === "server") {
     process.exitCode = await serverCommand(rest, version);
   } else if (command === "harnesses") {
-    process.exitCode = await harnessesCommand(rest, () => connectClient(version, [], server));
+    process.exitCode = await harnessesCommand(rest, () => connectClient(version, [], server), {
+      chosen: loadSettings(configDir()).settings.harness,
+      last: loadLastHarness(stateDir()),
+    });
   } else if (command === "threads") {
     process.exitCode = await threadsCommand(rest, () => connectClient(version, [], server));
   } else if (command === "watch") {
@@ -435,10 +458,11 @@ async function main(argv: string[], server: string | undefined, version: string)
   } else if (values.version) {
     process.stdout.write(`${version}\n`);
   } else {
-    // Harnesses from agents.json and extensions register later, so an unknown
-    // name fails when the session starts, listing the ones there are.
-    const harness = values.harness ?? "claude";
     const { settings, warnings: settingsWarnings } = loadSettings(configDir());
+    // Harnesses from agents.json and extensions register later, so an unknown
+    // name fails when the session starts, listing the ones there are. With no
+    // default and none used before, the terminal asks; no harness is everyone's.
+    const harness = values.harness ?? settings.harness ?? loadLastHarness(stateDir());
     const warnings = [...settingsWarnings, ...registerConfiguredAgents(configDir())];
     const session: SessionOptions = {
       cwd: resolve(values.cwd ?? process.cwd()),
@@ -459,6 +483,10 @@ async function main(argv: string[], server: string | undefined, version: string)
       for (const warning of warnings) process.stderr.write(`1harness: ${warning}\n`);
     if (values.print) {
       if (!prompt) throw new Error("--print needs a prompt");
+      if (!harness)
+        throw new Error(
+          "--print needs a harness: -H names one, and `1harness harnesses` says which are ready",
+        );
       process.exitCode = await print(harness, session, prompt, version, extensions);
     } else if (!process.stdin.isTTY || !process.stdout.isTTY) {
       throw new Error(
@@ -467,6 +495,7 @@ async function main(argv: string[], server: string | undefined, version: string)
     } else {
       await interactive({
         harness,
+        defaultHarness: settings.harness,
         session,
         prompt,
         version,

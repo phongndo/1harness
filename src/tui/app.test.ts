@@ -104,7 +104,16 @@ afterEach(async () => {
 });
 
 async function start(
-  options: { prompt?: string | null; store?: Store | null; harness?: string } = {},
+  options: {
+    prompt?: string | null;
+    store?: Store | null;
+    /** Null asks, as the first run does. */
+    harness?: string | null;
+    setDefault?: (harness: string) => string;
+    onHarness?: (harness: string) => void;
+    /** Where the host looks for harnesses. */
+    env?: NodeJS.ProcessEnv;
+  } = {},
 ): Promise<Session> {
   const terminal = new Terminal();
   const keyboard = new Keyboard();
@@ -118,6 +127,7 @@ async function start(
     stateDir: join(root, "state"),
     idleCloseMs: 0,
     store: options.store ?? null,
+    ...(options.env ? { env: options.env } : {}),
   });
   const client = new HostClient(
     new LocalConnection(host, "tui", { owns: true }),
@@ -126,7 +136,9 @@ async function start(
   );
   const app = new App({
     client,
-    harness: options.harness ?? "scripted",
+    harness: options.harness === undefined ? "scripted" : options.harness,
+    ...(options.setDefault ? { setDefault: options.setDefault } : {}),
+    ...(options.onHarness ? { onHarness: options.onHarness } : {}),
     session: { ...scriptedSettings, cwd: root },
     version: "test",
     prompt: options.prompt ?? null,
@@ -249,6 +261,88 @@ describe("App", () => {
     } finally {
       unregisterBroken();
     }
+  });
+
+  it("asks which harness to start when none is named, saying where each stands", async () => {
+    const unregisterSignedOut = registerDriver({
+      id: "signedout",
+      label: "Signed Out",
+      unavailable: () => null,
+      signIn: async () => ({ state: "signed-out", detail: "run `signedout login` to sign in" }),
+      create: (options) => new ScriptedSession(options),
+    });
+    const used: string[] = [];
+    const defaults: string[] = [];
+    try {
+      // No real harness is found on this PATH, so none is asked anything.
+      const session = await start({
+        harness: null,
+        env: { PATH: "" },
+        onHarness: (harness) => used.push(harness),
+        setDefault: (harness) => {
+          defaults.push(harness);
+          return "~/.config/1harness/settings.json";
+        },
+      });
+      const picker = await session.sees("Which harness should 1harness start?");
+      assert.match(picker, /claude\s+Claude Code · Claude Code is not installed: .*not installed/);
+      assert.match(
+        picker,
+        /signedout\s+Signed Out · run `signedout login` to sign in\s+needs sign-in/,
+      );
+      assert.match(picker, /scripted\s+Scripted\s+installed/);
+      assert.match(picker, /ctrl\+s use and make default/);
+      await session.type("signedout\r");
+      const screen = await session.sees(/Once it is, send your\s+message again/);
+      // Enter uses it, and the next run starts on it as the one used last; it is no default.
+      assert.deepEqual(used, ["signedout"]);
+      assert.deepEqual(defaults, []);
+      assert.match(screen, /1harness starts Signed Out next time too, as the harness used last/);
+      assert.match(
+        screen,
+        /Signed Out is not signed in: run `signedout login` to sign in\. Once it is, send your\s+message again\./,
+      );
+    } finally {
+      unregisterSignedOut();
+    }
+  });
+
+  it("keeps a harness -H named as the one used last", async () => {
+    const used: string[] = [];
+    const session = await start({ onHarness: (harness) => used.push(harness) });
+    // Shown, the thread's session is up, and the harness it runs was told.
+    await session.sees("supervised · scripted · big");
+    assert.deepEqual(used, ["scripted"]);
+  });
+
+  it("makes the harness ctrl+s chooses the default, there and in /harness", async () => {
+    const defaults: string[] = [];
+    const session = await start({
+      harness: null,
+      env: { PATH: "" },
+      setDefault: (harness) => {
+        defaults.push(harness);
+        return "~/.config/1harness/settings.json";
+      },
+    });
+    await session.sees("Which harness should 1harness start?");
+    await session.type("scripted\x13");
+    await session.sees(
+      /Scripted is your default harness, in ~\/\.config\/1harness\/settings\.json/,
+    );
+    assert.deepEqual(defaults, ["scripted"]);
+    await session.type("/harness\r");
+    const picker = await session.sees("Harnesses");
+    assert.match(picker, /scripted\s+Scripted\s+current · default · installed/);
+    await session.type("\x1b");
+  });
+
+  it("quits without a thread when the first run's question goes unanswered", async () => {
+    const session = await start({ harness: null, env: { PATH: "" } });
+    await session.sees("Which harness should 1harness start?");
+    await session.type("\x1b");
+    assert.equal(await session.done, undefined);
+    assert.equal(session.client.threads.size, 0);
   });
 
   it("says once that the harness in use must sign in, through its own CLI", async () => {

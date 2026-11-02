@@ -117,7 +117,8 @@ export function statusLine(state: StatusState, width: number): string {
   if (state.toast) return truncate(`${style.added("✓")} ${style.text(state.toast)}`, width);
   const { current } = state;
   const info = current?.info ?? null;
-  const parts: string[] = [state.harness];
+  // Empty while the first run asks which harness to start.
+  const parts: string[] = state.harness ? [state.harness] : [];
   if (info) {
     if (state.model) parts.push(state.model);
     if (info.effort) parts.push(info.effort);
@@ -150,7 +151,7 @@ export function statusLine(state: StatusState, width: number): string {
   // A closed thread on screen says so first, since it takes no messages.
   const mode = info?.runtimeMode ?? state.runtimeMode;
   const shown = current?.status === "closed" ? `closed · ${mode}` : mode;
-  let left = `${style.text(shown)}${style.muted(` · ${parts.join(" · ")}`)}`;
+  let left = `${style.text(shown)}${parts.length > 0 ? style.muted(` · ${parts.join(" · ")}`) : ""}`;
   if (info?.interactionMode === "plan") left += `${style.muted(" · ")}${style.strong("plan")}`;
   // The right edge stays whole as the left is cut, so modes the keys toggle go there.
   const right =

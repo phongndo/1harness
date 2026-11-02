@@ -46,7 +46,13 @@ export interface CommandUI {
   pick(
     title: string,
     entries: PickEntry[],
-    options?: { initial?: number; filter?: boolean; tabs?: boolean },
+    options?: {
+      initial?: number;
+      filter?: boolean;
+      tabs?: boolean;
+      /** Ctrl+s chooses too, and does this with the choice, as `hint` says; where the UI has it. */
+      save?: { hint: string; run(index: number): void };
+    },
   ): Promise<number | null>;
   /** Shows work in progress; the returned function replaces it with how it went. */
   progress(text: string): (level: NoticeLevel, text: string) => void;
@@ -106,6 +112,10 @@ export interface CommandContext {
   harnesses(): HarnessInfo[];
   /** The harnesses after asking each whether it is installed and signed in. */
   checkHarnesses(): Promise<HarnessInfo[]>;
+  /** The harness 1harness starts when none is named, where the user made one their default. */
+  readonly defaultHarness: HarnessId | null;
+  /** Makes a harness the one 1harness starts; absent where the client keeps no settings. */
+  setDefaultHarness?(harness: HarnessId): void;
   /** 1harness's threads, newest first, kept ones included. */
   threads(scope: "open" | "recent" | "archived"): Promise<ThreadListing[]>;
   /**

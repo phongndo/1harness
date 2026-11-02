@@ -1,22 +1,22 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { fitRuntimeMode } from "./events.ts";
-import { loadSettings } from "./settings.ts";
+import { loadLastHarness, loadSettings, saveLastHarness, saveSettings } from "./settings.ts";
 
 describe("loadSettings", () => {
   it("reads the start mode", () => {
     const dir = mkdtempSync(join(tmpdir(), "1harness-settings-"));
     try {
       assert.deepEqual(loadSettings(dir), {
-        settings: { mode: null, retainClosedDays: null },
+        settings: { harness: null, mode: null, retainClosedDays: null },
         warnings: [],
       });
       writeFileSync(join(dir, "settings.json"), '{ "mode": "auto" }');
       assert.deepEqual(loadSettings(dir), {
-        settings: { mode: "auto", retainClosedDays: null },
+        settings: { harness: null, mode: "auto", retainClosedDays: null },
         warnings: [],
       });
       writeFileSync(join(dir, "settings.json"), '{ "retainClosedDays": 30 }');
@@ -45,6 +45,70 @@ describe("loadSettings", () => {
       rmSync(file);
       mkdirSync(file);
       assert.equal(loadSettings(dir).settings.mode, "supervised");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the harness setting", () => {
+  it("names the harness to start, and asks when it is not a name", () => {
+    const dir = mkdtempSync(join(tmpdir(), "1harness-settings-"));
+    try {
+      writeFileSync(join(dir, "settings.json"), '{ "harness": "codex" }');
+      assert.equal(loadSettings(dir).settings.harness, "codex");
+      writeFileSync(join(dir, "settings.json"), '{ "harness": 3, "mode": "auto" }');
+      const loaded = loadSettings(dir);
+      assert.equal(loaded.settings.harness, null);
+      assert.equal(loaded.settings.mode, "auto");
+      assert.match(loaded.warnings[0] ?? "", /harness must be a harness's name/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the harness used last", () => {
+  it("is kept in the state folder, and is none before any", () => {
+    const dir = mkdtempSync(join(tmpdir(), "1harness-state-"));
+    try {
+      assert.equal(loadLastHarness(join(dir, "state")), null);
+      saveLastHarness(join(dir, "state"), "codex");
+      assert.equal(loadLastHarness(join(dir, "state")), "codex");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("saveSettings", () => {
+  it("sets a key and keeps the rest as written", () => {
+    const dir = mkdtempSync(join(tmpdir(), "1harness-settings-"));
+    const config = join(dir, "config");
+    try {
+      saveSettings(config, { harness: "opencode" });
+      assert.equal(loadSettings(config).settings.harness, "opencode");
+      writeFileSync(join(config, "settings.json"), '{ "mode": "auto", "other": [1] }');
+      saveSettings(config, { harness: "fx" });
+      assert.deepEqual(JSON.parse(readFileSync(join(config, "settings.json"), "utf8")), {
+        mode: "auto",
+        other: [1],
+        harness: "fx",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves a file it cannot read as settings alone", () => {
+    const dir = mkdtempSync(join(tmpdir(), "1harness-settings-"));
+    const file = join(dir, "settings.json");
+    try {
+      for (const text of ["{", "[]"]) {
+        writeFileSync(file, text);
+        assert.throws(() => saveSettings(dir, { harness: "codex" }));
+        assert.equal(readFileSync(file, "utf8"), text);
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
