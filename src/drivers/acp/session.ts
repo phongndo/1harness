@@ -22,6 +22,7 @@ import {
 import { errorMessage } from "../../core/thread.ts";
 import { ANSWER, ASK, askFor, askForChanges, fileName } from "../../core/wording.ts";
 import { JsonRpcProcess, RpcError } from "../jsonrpc.ts";
+import { OpenItems } from "../open-items.ts";
 import {
   AcpTranslator,
   approvalAction,
@@ -126,6 +127,7 @@ export class AcpSession implements HarnessSession {
   #version: string;
   #rpc: JsonRpcProcess | null = null;
   #events = new AsyncQueue<HarnessEvent>();
+  #open = new OpenItems();
   #translator = new AcpTranslator();
   #pending = new Map<string, Pending>();
   #modes: AcpMode[] = [];
@@ -514,6 +516,8 @@ export class AcpSession implements HarnessSession {
   }
 
   #closed(reason: string): void {
+    this.#emitAll(this.#translator.flush());
+    this.#emitAll(this.#open.settle());
     if (this.#turnId !== null) {
       this.#emit({
         type: "turn.ended",
@@ -550,6 +554,7 @@ export class AcpSession implements HarnessSession {
   }
 
   #emit(event: HarnessEvent): void {
+    this.#open.track(event);
     this.#events.push(event);
   }
 

@@ -107,4 +107,21 @@ describe("CodexSession", () => {
     assert.notEqual(await within(ended, 1_000), "timed out");
     assert.deepEqual(events, [{ type: "session.closed", error: null }]);
   });
+
+  it("ends what was running when Codex dies", async () => {
+    const session = new CodexSession(config());
+    const { events, ended } = collect(session);
+    await session.start();
+    await session.startTurn({ text: "die" });
+    assert.notEqual(await within(ended, 3_000), "timed out");
+    const settled = events.find(
+      (event) => event.type === "item.completed" && event.item.id === "cmd-1",
+    );
+    assert.equal(settled?.type === "item.completed" && "status" in settled.item, true);
+    assert.equal(
+      settled?.type === "item.completed" && "status" in settled.item && settled.item.status,
+      "failed",
+    );
+    assert.ok(events.findIndex((event) => event === settled) < events.length - 1);
+  });
 });

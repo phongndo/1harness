@@ -33,6 +33,7 @@ import { ANSWER, ASK, PLAN_TITLE, askForChanges, planOptions } from "../../core/
 import { HookServer } from "./hook-server.ts";
 import { INIT_PROMPT } from "./prompts.ts";
 import { JsonRpcProcess, RpcError, type RequestId } from "../jsonrpc.ts";
+import { OpenItems } from "../open-items.ts";
 import {
   CodexTranslator,
   codexRequestId,
@@ -143,6 +144,7 @@ export class CodexSession implements HarnessSession {
   #config: CodexSessionConfig;
   #rpc: JsonRpcProcess | null = null;
   #events = new AsyncQueue<HarnessEvent>();
+  #open = new OpenItems();
   #translator = new CodexTranslator();
   #pending = new Map<string, PendingRequest>();
   #fileChanges = new Map<string, FileChange[]>();
@@ -690,6 +692,7 @@ export class CodexSession implements HarnessSession {
   }
 
   #emit(event: HarnessEvent): void {
+    this.#open.track(event);
     this.#events.push(event);
   }
 
@@ -959,6 +962,7 @@ export class CodexSession implements HarnessSession {
       pending.resolve(codexResponse(pending, { kind: "cancel" }));
       this.#pending.delete(id);
     }
+    for (const event of this.#open.settle()) this.#emit(event);
     if (this.#turnId !== null) {
       const error = this.#closing ? null : reason;
       this.#emit({
