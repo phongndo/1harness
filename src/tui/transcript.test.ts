@@ -226,7 +226,29 @@ describe("agents", () => {
   });
 });
 
+/** The last bold heading in reasoning, read whole. */
+const lastHeading = (text: string) =>
+  [...text.matchAll(/\*\*([^*\n]{2,80})\*\*/g)].at(-1)?.[1]?.trim() ?? null;
+
 describe("ThreadView", () => {
+  it("heads the turn with the latest bold heading of its reasoning as it streams", () => {
+    const text =
+      "**Reading the parser**\nIt splits x**y**z and **a\nb** apart. " +
+      `${"word ".repeat(40)}**Planning the fix**${"more ".repeat(30)}**${"long ".repeat(20)}**` +
+      ` then **Checking  ** and **x**y**z** and **${"a".repeat(70)}**b**c** end`;
+    for (const size of [1, 3, 7, 40]) {
+      const view = new ThreadView("t1");
+      view.startTurn(0);
+      view.item({ kind: "reasoning", id: "r", text: "" }, false, true);
+      let heading: string | null = null;
+      for (let at = 0; at < text.length; at += size) {
+        view.delta("r", text.slice(at, at + size));
+        heading = lastHeading(text.slice(0, at + size)) ?? heading;
+        assert.equal(view.turn?.heading, heading, `${size} at ${at}`);
+      }
+    }
+  });
+
   it("groups agents started one after another", () => {
     const view = new ThreadView("t1");
     // A harness that does not say which call started an agent keeps the call's row too.

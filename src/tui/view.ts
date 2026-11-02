@@ -38,10 +38,33 @@ function estimateTokens(text: string): number {
   return text.length / 4;
 }
 
-/** The last bold heading in reasoning text, as Codex writes its summaries. */
-function reasoningHeading(text: string): string | null {
-  const headings = [...text.matchAll(/\*\*([^*\n]{2,80})\*\*/g)];
-  return headings.at(-1)?.[1]?.trim() ?? null;
+/** Reasoning so far, with its last bold heading, as Codex writes its summaries. */
+interface Reasoning {
+  text: string;
+  heading: string | null;
+  /** Where the last heading ends, before which nothing more is read. */
+  end: number;
+}
+
+/** The most characters a heading takes, its markers with it. */
+const HEADING_SPAN = 84;
+
+/**
+ * Reasoning grown to `text` from what `known` had read: only the text a new
+ * heading could start in is read, since reasoning arrives a few characters
+ * at a time and reading all of it for each would take ever longer.
+ */
+function reasoning(text: string, known?: Reasoning): Reasoning {
+  const pattern = /\*\*([^*\n]{2,80})\*\*/g;
+  let heading = known?.heading ?? null;
+  let end = known?.end ?? 0;
+  // A heading starting further back would have fit in the text already read.
+  pattern.lastIndex = known ? Math.max(end, known.text.length - HEADING_SPAN + 1) : 0;
+  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+    heading = match[1]?.trim() ?? null;
+    end = pattern.lastIndex;
+  }
+  return { text, heading, end };
 }
 
 /** How a message shows: the user's own, a task or message with who sent it, or a task's result. */
@@ -105,7 +128,7 @@ export class ThreadView {
   /** How many blocks the transcript had when the turn started. */
   #turnStart = 0;
   /** The turn's reasoning so far, by item, for its latest heading. */
-  #reasoning = new Map<string, string>();
+  #reasoning = new Map<string, Reasoning>();
   /** Tool groups with calls an open approval is for. */
   #waiting = new Set<Extract<Block, { kind: "tools" }>>();
   /** Log entries applied, which the terminal's own lines are placed among. */
@@ -451,10 +474,11 @@ export class ThreadView {
         return;
       }
       case "reasoning": {
-        this.#reasoning.set(item.id, item.text);
+        const read = reasoning(item.text);
+        this.#reasoning.set(item.id, read);
         if (this.turn) {
           this.turn.phase = "Thinking";
-          this.turn.heading = reasoningHeading(item.text) ?? this.turn.heading;
+          this.turn.heading = read.heading ?? this.turn.heading;
         }
         // A thought shows where it came, as a quiet line.
         const block =
@@ -532,17 +556,17 @@ export class ThreadView {
       if (this.turn) this.turn.phase = "Generating";
       return;
     }
-    const reasoning = this.#reasoning.get(itemId);
-    if (reasoning === undefined) return;
-    const text = reasoning + chunk;
-    this.#reasoning.set(itemId, text);
+    const known = this.#reasoning.get(itemId);
+    if (known === undefined) return;
+    const read = reasoning(known.text + chunk, known);
+    this.#reasoning.set(itemId, read);
     if (block?.kind === "thinking") {
-      block.text = text;
+      block.text = read.text;
       this.transcript.touch(block);
     }
     if (this.turn) {
       this.turn.phase = "Thinking";
-      this.turn.heading = reasoningHeading(text) ?? this.turn.heading;
+      this.turn.heading = read.heading ?? this.turn.heading;
     }
   }
 }
