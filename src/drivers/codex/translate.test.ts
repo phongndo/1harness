@@ -32,12 +32,7 @@ function sent(clientId: string | null): CodexThreadItem {
 }
 
 function pending(method: string, params: object, decisions: [string, unknown][] = []) {
-  return {
-    method,
-    params: params as Record<string, unknown>,
-    decisions: new Map(decisions),
-    resolve: () => {},
-  };
+  return { method, params: params as Record<string, unknown>, decisions: new Map(decisions) };
 }
 
 describe("toItem", () => {
@@ -117,13 +112,14 @@ describe("toItem", () => {
         { type: "exitedReviewMode", id: "x1", review: "No issues found." },
         { kind: "assistant_message", id: "x1", text: "No issues found." },
       ],
-      [{ type: "hookPrompt", id: "h1" }, null],
+      // A type this driver does not read, as Codex sends it.
+      [{ type: "hookPrompt", id: "h1" } as unknown as CodexThreadItem, null],
     ];
     for (const [native, expected] of cases) assert.deepEqual(toItem(native), expected);
   });
 
   it("shows status notices once, when the item finishes", () => {
-    const compaction = { type: "contextCompaction", id: "k" };
+    const compaction: CodexThreadItem = { type: "contextCompaction", id: "k" };
     assert.equal(toItem(compaction, false), null);
     assert.deepEqual(toItem(compaction, true), {
       kind: "notice",

@@ -57,23 +57,41 @@ export function registerDriver(driver: DriverDefinition): () => void {
 }
 
 /**
+ * A harness's executable: a path as given, else the one `variable` names, else
+ * `command` on PATH. `unavailable` says why there is none; `find` throws it.
+ */
+function executable(
+  label: string,
+  command: string,
+  variable?: string,
+): Pick<DriverDefinition, "unavailable"> & { find(environment: DriverEnvironment): string } {
+  const lookup = (env: NodeJS.ProcessEnv) =>
+    command.includes("/")
+      ? command
+      : ((variable ? env[variable] : undefined) ?? findExecutable(command, env["PATH"]));
+  const missing = `${label} is not installed: no \`${command}\` on PATH${variable ? ` (set ${variable})` : ""}`;
+  return {
+    unavailable: (env) => (lookup(env) ? null : missing),
+    find: (environment) => {
+      const found = lookup(environment.env ?? process.env);
+      if (!found) throw new Error(missing);
+      return found;
+    },
+  };
+}
+
+/**
  * A driver for an agent that speaks the Agent Client Protocol, such as fx or
  * any agent in the ACP registry: one generic driver, configured per agent.
  */
 export function acpDriver(spec: AcpAgentSpec): DriverDefinition {
-  const command = (env: NodeJS.ProcessEnv) =>
-    spec.command.includes("/") ? spec.command : findExecutable(spec.command, env["PATH"]);
+  const { unavailable, find } = executable(spec.label, spec.command);
   return {
     id: spec.id,
     label: spec.label,
-    unavailable: (env) =>
-      command(env) ? null : `${spec.label} is not installed: no \`${spec.command}\` on PATH`,
-    create: (options, environment) => {
-      const resolved = command(environment.env ?? process.env);
-      if (!resolved)
-        throw new Error(`${spec.label} is not installed: no \`${spec.command}\` on PATH`);
-      return new AcpSession({ ...spec, command: resolved }, options, environment.version);
-    },
+    unavailable,
+    create: (options, environment) =>
+      new AcpSession({ ...spec, command: find(environment) }, options, environment.version),
   };
 }
 
@@ -155,38 +173,26 @@ registerDriver({
   },
 });
 
+const codex = executable("Codex", "codex", "ONEHARNESS_CODEX_PATH");
 registerDriver({
   id: "codex",
   label: "Codex",
-  unavailable: (env) =>
-    (env["ONEHARNESS_CODEX_PATH"] ?? findExecutable("codex", env["PATH"]))
-      ? null
-      : "Codex is not installed: no `codex` on PATH (set ONEHARNESS_CODEX_PATH)",
-  create: (options, environment) => {
-    const env = environment.env ?? process.env;
-    const command = env["ONEHARNESS_CODEX_PATH"] ?? findExecutable("codex", env["PATH"]);
-    if (!command)
-      throw new Error("Codex is not installed: no `codex` on PATH (set ONEHARNESS_CODEX_PATH)");
-    return new CodexSession({ ...options, command, version: environment.version });
-  },
+  unavailable: codex.unavailable,
+  create: (options, environment) =>
+    new CodexSession({
+      ...options,
+      command: codex.find(environment),
+      version: environment.version,
+    }),
 });
 
+const opencode = executable("OpenCode", "opencode", "ONEHARNESS_OPENCODE_PATH");
 registerDriver({
   id: "opencode",
   label: "OpenCode",
-  unavailable: (env) =>
-    (env["ONEHARNESS_OPENCODE_PATH"] ?? findExecutable("opencode", env["PATH"]))
-      ? null
-      : "OpenCode is not installed: no `opencode` on PATH (set ONEHARNESS_OPENCODE_PATH)",
-  create: (options, environment) => {
-    const env = environment.env ?? process.env;
-    const command = env["ONEHARNESS_OPENCODE_PATH"] ?? findExecutable("opencode", env["PATH"]);
-    if (!command)
-      throw new Error(
-        "OpenCode is not installed: no `opencode` on PATH (set ONEHARNESS_OPENCODE_PATH)",
-      );
-    return new OpenCodeSession({ ...options, command });
-  },
+  unavailable: opencode.unavailable,
+  create: (options, environment) =>
+    new OpenCodeSession({ ...options, command: opencode.find(environment) }),
 });
 
 // fx speaks ACP through `fx acp`.

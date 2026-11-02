@@ -173,12 +173,11 @@ async function print(
   return status;
 }
 
-/** A client of the server, which starts one in the background when none answers. */
 /**
  * Finds the server `spec` names, the local one when it names none, starting
  * a local one in the background when none answers.
  */
-async function reach(version: string, spec: string | undefined) {
+async function reach(spec: string | undefined) {
   const { target, label, local } = resolveServer(spec);
   // Only the local socket's server is started on demand; another machine's runs there.
   const autostart = local && "socket" in target && target.socket === socketFile();
@@ -192,28 +191,34 @@ async function reach(version: string, spec: string | undefined) {
   return { target, label, local, hello, revive };
 }
 
+/**
+ * A client of a server `reach` found. Extension modules are this machine's
+ * files, so only a local server is given them.
+ */
+function socketClient(
+  server: Awaited<ReturnType<typeof reach>>,
+  options: { cwd: string; version: string; extensions: string[] },
+): HostClient {
+  const id = newClientId();
+  return new HostClient(
+    new SocketConnection(server.target, id, server.revive ? { revive: server.revive } : {}),
+    { ...options, extensions: server.local ? options.extensions : [] },
+    id,
+  );
+}
+
 /** A client of the server `spec` names; it says hello when connected. */
 async function connectClient(
   version: string,
   extensions: string[],
   spec: string | undefined,
 ): Promise<HostClient> {
-  const { target, local, revive } = await reach(version, spec);
-  const id = newClientId();
-  return new HostClient(
-    new SocketConnection(target, id, revive ? { revive } : {}),
-    // On another machine, this folder is not there; threads start in its home.
-    { cwd: local ? process.cwd() : "~", version, extensions: local ? extensions : [] },
-    id,
-  );
+  const server = await reach(spec);
+  // On another machine, this folder is not there; threads start in its home.
+  return socketClient(server, { cwd: server.local ? process.cwd() : "~", version, extensions });
 }
 
-/**
- * Runs the terminal UI: through the 1harness server, started in the
- * background when none is running, so threads keep working after it quits;
- * or all in this process with ONEHARNESS_AUTOSTART=0.
- */
-async function interactive(options: {
+interface TerminalOptions {
   harness: HarnessId;
   session: SessionOptions;
   prompt: string | null;
@@ -224,7 +229,14 @@ async function interactive(options: {
   server: string | undefined;
   /** Whether `-C` named the folder, which on another machine is that machine's. */
   cwdGiven: string | undefined;
-}): Promise<void> {
+}
+
+/**
+ * Runs the terminal UI: through the 1harness server, started in the
+ * background when none is running, so threads keep working after it quits;
+ * or all in this process with ONEHARNESS_AUTOSTART=0.
+ */
+async function interactive(options: TerminalOptions): Promise<void> {
   const extensions = options.extensions.map((path) => resolve(path));
   const here = options.session.cwd;
   let server = options.server;
@@ -253,30 +265,22 @@ async function interactive(options: {
 }
 
 /** One terminal session on one server; resolves with the server /connect chose next. */
-async function terminal(options: {
-  harness: HarnessId;
-  session: SessionOptions;
-  prompt: string | null;
-  version: string;
-  extensions: string[];
-  warnings: string[];
-  server: string | undefined;
-  cwdGiven: string | undefined;
-}): Promise<string | undefined> {
-  const { session, version, extensions } = options;
-  const id = newClientId();
+async function terminal(options: TerminalOptions): Promise<string | undefined> {
+  const { version, extensions } = options;
+  let session = options.session;
   let client: HostClient;
   let server: ServerInfo;
   const warnings: string[] = [];
   const notes: string[] = [];
   if (process.env["ONEHARNESS_AUTOSTART"] === "0") {
     let store: Store | null = null;
+    const hostWarnings = [...options.warnings];
     try {
       store = Store.open(storeFile());
     } catch (error) {
       // Another 1harness keeps the threads; this one keeps nothing, and leaves those alone.
       if (!(error instanceof StoreLocked)) throw error;
-      options.warnings.push(
+      hostWarnings.push(
         "Another 1harness is keeping threads, so this one keeps none of its own; they end when it exits.",
       );
     }
@@ -284,9 +288,10 @@ async function terminal(options: {
       version,
       cwd: session.cwd,
       extensions,
-      warnings: options.warnings,
+      warnings: hostWarnings,
       store,
     });
+    const id = newClientId();
     client = new HostClient(
       new LocalConnection(host, id, { owns: true }),
       { cwd: session.cwd, version, extensions },
@@ -301,7 +306,8 @@ async function terminal(options: {
       pid: process.pid,
     };
   } else {
-    const { target, label, local, hello, revive } = await reach(version, options.server);
+    const reached = await reach(options.server);
+    const { target, label, local, hello } = reached;
     // The server reports problems with the config it read itself.
     if (hello.version !== version)
       warnings.push(
@@ -311,18 +317,14 @@ async function terminal(options: {
       );
     if (!local) {
       // Folders and extension modules are the other machine's.
-      session.cwd = options.cwdGiven ?? "~";
+      session = { ...session, cwd: options.cwdGiven ?? "~" };
       if (extensions.length > 0)
         warnings.push(
           `Extensions named with -x load on this machine only; ${label} does not load them.`,
         );
       notes.push(`Connected to ${label}${hello.identity ? ` as ${hello.identity}` : ""}.`);
     }
-    client = new HostClient(
-      new SocketConnection(target, id, revive ? { revive } : {}),
-      { cwd: session.cwd, version, extensions: local ? extensions : [] },
-      id,
-    );
+    client = socketClient(reached, { cwd: session.cwd, version, extensions });
     server = {
       label,
       local,
@@ -349,7 +351,7 @@ async function terminal(options: {
             hosts: () => loadHosts(),
             // A server that does not answer keeps the terminal where it is.
             check: async (spec: string) => {
-              await reach(version, spec || undefined);
+              await reach(spec || undefined);
             },
           },
         }),
@@ -357,7 +359,7 @@ async function terminal(options: {
 }
 
 try {
-  const manifestVersion = (
+  const version = (
     JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
       version: string;
     }
@@ -365,17 +367,17 @@ try {
   const { args, server } = serverFlag(process.argv.slice(2));
   const [command, ...rest] = args;
   if (command === "server") {
-    process.exitCode = await serverCommand(rest, manifestVersion);
+    process.exitCode = await serverCommand(rest, version);
   } else if (command === "threads") {
-    process.exitCode = await threadsCommand(rest, () => connectClient(manifestVersion, [], server));
+    process.exitCode = await threadsCommand(rest, () => connectClient(version, [], server));
   } else if (command === "watch") {
-    await watch(await connectClient(manifestVersion, [], server), process.stdout);
+    await watch(await connectClient(version, [], server), process.stdout);
   } else if (command === "hosts") {
     process.exitCode = await hostsCommand(rest);
   } else if (command === "whoami") {
     process.exitCode = await whoami(server);
   } else {
-    await main(args, server);
+    await main(args, server, version);
   }
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
@@ -405,7 +407,7 @@ function serverFlag(argv: string[]): { args: string[]; server: string | undefine
   return { args, server };
 }
 
-async function main(argv: string[], server: string | undefined): Promise<void> {
+async function main(argv: string[], server: string | undefined, version: string): Promise<void> {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
@@ -423,16 +425,11 @@ async function main(argv: string[], server: string | undefined): Promise<void> {
       version: { type: "boolean", short: "v" },
     },
   });
-  const manifest = JSON.parse(
-    readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-  ) as {
-    version: string;
-  };
 
   if (values.help) {
     process.stdout.write(help);
   } else if (values.version) {
-    process.stdout.write(`${manifest.version}\n`);
+    process.stdout.write(`${version}\n`);
   } else {
     // Harnesses from agents.json and extensions register later, so an unknown
     // name fails when the session starts, listing the ones there are.
@@ -458,7 +455,7 @@ async function main(argv: string[], server: string | undefined): Promise<void> {
       for (const warning of warnings) process.stderr.write(`1harness: ${warning}\n`);
     if (values.print) {
       if (!prompt) throw new Error("--print needs a prompt");
-      process.exitCode = await print(harness, session, prompt, manifest.version, extensions);
+      process.exitCode = await print(harness, session, prompt, version, extensions);
     } else if (!process.stdin.isTTY || !process.stdout.isTTY) {
       throw new Error(
         "the interactive UI needs a terminal; use --print to run a prompt without one",
@@ -468,7 +465,8 @@ async function main(argv: string[], server: string | undefined): Promise<void> {
         harness,
         session,
         prompt,
-        version: manifest.version,
+        version,
+
         extensions,
         warnings,
         server,

@@ -19,6 +19,10 @@ const MCP_ACTIONS: Record<McpAction, { description: string; progress: string }> 
   disable: { description: "turn a server off", progress: "Disabling" },
 };
 
+function isMcpAction(action: string): action is McpAction {
+  return Object.hasOwn(MCP_ACTIONS, action);
+}
+
 function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
@@ -46,7 +50,6 @@ function listed<T>(context: CommandContext, key: string, load: () => Promise<T[]
   return context.thread?.parked ? [] : context.lookup(key, load);
 }
 
-/** The harness's own earlier threads in this folder, where it lists them. */
 /** 1harness's threads, this folder's first, newest first, without the one on screen. */
 async function storedThreads(context: CommandContext): Promise<ThreadListing[]> {
   const cwd = context.info?.cwd;
@@ -390,7 +393,7 @@ const mcp: CommandDefinition = {
       };
     }
     const action = args.slice(0, space);
-    if (action !== "show" && !Object.hasOwn(MCP_ACTIONS, action)) return null;
+    if (action !== "show" && !isMcpAction(action)) return null;
     return {
       start: space + 1,
       items: listed(context, "mcp", () => mcpServers(context)).map((server: McpServer) =>
@@ -407,13 +410,13 @@ const mcp: CommandDefinition = {
       context.ui.report(mcpListReport(context.harness, servers, session.capabilities.mcpActions));
       return;
     }
-    const known = action === "show" || Object.hasOwn(MCP_ACTIONS, action);
+    const known = action === "show" || isMcpAction(action);
     let name = known ? rest : args;
     if (!name && known) {
       // Without a name, the servers to choose from.
       if (servers.length === 0) throw new Error("No MCP servers");
       const index = await context.ui.pick(
-        `MCP servers to ${action === "show" ? "show" : MCP_ACTIONS[action as McpAction].description.replace(/ a server$/, "")}`,
+        `MCP servers to ${isMcpAction(action) ? MCP_ACTIONS[action].description.replace(/ a server$/, "") : "show"}`,
         servers.map((server) => ({ label: server.name, detail: describeMcpServer(server) })),
         { filter: true },
       );
@@ -425,21 +428,20 @@ const mcp: CommandDefinition = {
       servers.find((candidate) => candidate.name === name) ??
       servers.find((candidate) => candidate.name.toLowerCase() === name.toLowerCase());
     if (!server) throw new Error(`No MCP server named ${name}. Type /mcp to list them.`);
-    if (!known || action === "show") {
+    if (!isMcpAction(action)) {
       context.ui.report(mcpServerReport(server));
       return;
     }
     // Every harness says the same when it keeps an action to itself.
-    if (!session.mcpAction || !session.capabilities.mcpActions.includes(action as McpAction))
+    if (!session.mcpAction || !session.capabilities.mcpActions.includes(action))
       throw new Error(
-        `${context.harness} does not let 1harness ${MCP_ACTIONS[action as McpAction].description}; do it in ${context.harness} itself`,
+        `${context.harness} does not let 1harness ${MCP_ACTIONS[action].description}; do it in ${context.harness} itself`,
       );
     // Actions can take seconds, so a line says what is happening and then how it went.
-    const settle = context.ui.progress(
-      `${MCP_ACTIONS[action as McpAction].progress} ${server.name}…`,
-    );
+    const settle = context.ui.progress(`${MCP_ACTIONS[action].progress} ${server.name}…`);
     try {
-      const result = await session.mcpAction(action as McpAction, server.name);
+      const result = await session.mcpAction(action, server.name);
+
       settle("info", result.url ? `${result.message}:\n${result.url}` : result.message);
     } catch (error) {
       settle("error", errorMessage(error));

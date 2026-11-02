@@ -14,15 +14,69 @@ import type {
   ToolCategory,
   Usage,
 } from "../../core/events.ts";
+import { unifiedDiff } from "../../core/diff.ts";
 import { ANSWER, askFor, askForChanges } from "../../core/wording.ts";
+import { record, summarizeInput, text, truncate } from "../text.ts";
 
 // OpenCode 2's server API in the parts 1harness reads. Events arrive on
 // `/api/event` as `{ type, data }`; tools are named by `session.tool.input.started`
-// and run with the input `session.tool.called` carries.
+// and run with the input `session.tool.called` carries. Events and messages of
+// other types reach the driver as well, typed as these, and are dropped.
 
-export interface OcEvent {
-  type: string;
-  data?: Record<string, unknown>;
+type OcEventOf<T extends string, D extends object> = {
+  type: T;
+  data: D & { sessionID?: string };
+};
+
+interface OcStreamPart {
+  assistantMessageID: string;
+  ordinal?: number;
+}
+
+interface OcError {
+  type?: string;
+  message?: string;
+}
+
+export type OcEvent =
+  | OcEventOf<"session.text.started" | "session.reasoning.started", OcStreamPart>
+  | OcEventOf<"session.text.delta" | "session.reasoning.delta", OcStreamPart & { delta: string }>
+  | OcEventOf<"session.text.ended" | "session.reasoning.ended", OcStreamPart & { text: string }>
+  | OcEventOf<"session.tool.input.started", { id: string; name: string }>
+  | OcEventOf<"session.tool.called", { id: string; input: unknown }>
+  | OcEventOf<
+      "session.tool.success" | "session.tool.failed",
+      { id: string; content?: OcContent[]; metadata?: Record<string, unknown>; error?: OcError }
+    >
+  | OcEventOf<"session.step.ended", { tokens?: OcTokens }>
+  | OcEventOf<"session.usage.updated", { tokens?: OcTokens; cost?: number }>
+  | OcEventOf<
+      "session.retry.scheduled",
+      { assistantMessageID: string; attempt: number; error?: OcError }
+    >
+  | OcEventOf<"session.compaction.ended", object>
+  | OcEventOf<"session.compaction.failed", { error?: OcError }>
+  | OcEventOf<"session.created", { parentID?: string | null }>
+  | OcEventOf<"session.execution.started" | "session.execution.succeeded", object>
+  | OcEventOf<"session.execution.failed", { error?: OcError }>
+  | OcEventOf<"session.execution.interrupted", { reason?: string }>
+  | OcEventOf<
+      "session.inbox.enqueued",
+      { inboxID: string; item: { type: string; payload?: { text?: string } } }
+    >
+  | OcEventOf<"session.inbox.delivered" | "session.inbox.cancelled", { inboxID: string }>
+  | OcEventOf<"session.model.selected", { model: OcModelRef }>
+  | OcEventOf<"session.agent.selected", { agent: string }>
+  | OcEventOf<"permission.asked", OcPermission>
+  | OcEventOf<"permission.replied", { requestID: string }>
+  | OcEventOf<"form.created", { form: OcForm }>
+  | OcEventOf<"form.replied" | "form.cancelled", { id: string }>;
+
+/** A model as a session names it, with the variant that sets its effort. */
+export interface OcModelRef {
+  providerID: string;
+  id: string;
+  variant?: string;
 }
 
 export interface OcTokens {
@@ -90,7 +144,9 @@ interface OcFileDiff {
   status: "added" | "modified" | "deleted" | string;
 }
 
-interface OcContent {
+type Streamed = Extract<Item, { kind: "assistant_message" | "reasoning" }>;
+
+export interface OcContent {
   type: string;
   text?: string;
   uri?: string;
@@ -126,8 +182,7 @@ export type OcMessage =
       status: string;
       exit?: number | string;
       output?: { output: string };
-    }
-  | { type: string; id: string };
+    };
 
 const CATEGORIES: Record<string, ToolCategory> = {
   read: "read",
@@ -235,17 +290,7 @@ export function findModel(models: readonly OcModel[], name: string): OcModel | u
   return others.length === 0 ? only : undefined;
 }
 
-function record(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-}
-
-function text(value: unknown): string {
-  return typeof value === "string" ? value : "";
-}
-
-function truncate(value: string, limit: number): string {
-  return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
-}
+const SUMMARY_KEYS = ["path", "url", "pattern", "query", "name", "description"];
 
 function contentText(content: unknown): string {
   if (!Array.isArray(content)) return "";
@@ -268,24 +313,6 @@ function changesFrom(files: readonly OcFileDiff[] | undefined, cwd: string): Fil
   }));
 }
 
-function lines(prefix: string, value: string): string {
-  if (value === "") return "";
-  return value
-    .replace(/\n$/, "")
-    .split("\n")
-    .map((line) => `${prefix}${line}`)
-    .join("\n");
-}
-
-function summarize(input: Record<string, unknown>): string {
-  for (const key of ["path", "url", "pattern", "query", "name", "description"]) {
-    const value = input[key];
-    if (typeof value === "string" && value !== "") return truncate(value, 120);
-  }
-  const json = JSON.stringify(input);
-  return json === "{}" ? "" : truncate(json, 120);
-}
-
 /** A tool call as 1harness shows it, or null for one another item shows. */
 export function toolItem(
   id: string,
@@ -305,9 +332,7 @@ export function toolItem(
         status: "running",
       };
     case "edit": {
-      const diff = [lines("-", text(input["oldString"])), lines("+", text(input["newString"]))]
-        .filter(Boolean)
-        .join("\n");
+      const diff = unifiedDiff(text(input["oldString"]), text(input["newString"]));
       return {
         kind: "file_change",
         id,
@@ -320,7 +345,11 @@ export function toolItem(
         kind: "file_change",
         id,
         changes: [
-          { path: text(input["path"]), kind: "update", diff: lines("+", text(input["content"])) },
+          {
+            path: text(input["path"]),
+            kind: "update",
+            diff: unifiedDiff("", text(input["content"])),
+          },
         ],
         status: "running",
       };
@@ -355,7 +384,7 @@ export function toolItem(
         tool: mcp?.tool ?? name,
         server: mcp?.server ?? null,
         category: mcp ? "other" : (CATEGORIES[name] ?? "other"),
-        summary: summarize(input),
+        summary: summarizeInput(input, SUMMARY_KEYS),
         output: "",
         status: "running",
       };
@@ -404,7 +433,7 @@ function finished(
 }
 
 /** What an approval is for, from the permission and the call that asks it. */
-export function permissionAction(permission: OcPermission, call: Item | undefined): ApprovalAction {
+function permissionAction(permission: OcPermission, call: Item | undefined): ApprovalAction {
   if (permission.action === "shell")
     return {
       type: "command",
@@ -538,7 +567,8 @@ export class OpenCodeTranslator {
   #tools = new Map<string, Item>();
   /** Diffs a permission showed for a call, for writes whose result has none. */
   #diffs = new Map<string, OcFileDiff[]>();
-  #open = new Map<string, Item>();
+  /** Replies and reasoning streaming in. */
+  #open = new Map<string, Streamed>();
   #usage: Usage = {
     inputTokens: 0,
     outputTokens: 0,
@@ -570,45 +600,44 @@ export class OpenCodeTranslator {
   }
 
   translate(event: OcEvent): HarnessEvent[] {
-    const data = event.data ?? {};
     switch (event.type) {
       case "session.text.started":
       case "session.reasoning.started": {
         const kind = event.type === "session.text.started" ? "assistant_message" : "reasoning";
-        const item: Item = { kind, id: streamId(data, kind), text: "" };
+        const item: Streamed = { kind, id: streamId(event.data, kind), text: "" };
         this.#open.set(item.id, item);
         return [{ type: "item.started", item }];
       }
       case "session.text.delta":
       case "session.reasoning.delta": {
         const kind = event.type === "session.text.delta" ? "assistant_message" : "reasoning";
-        const id = streamId(data, kind);
+        const id = streamId(event.data, kind);
         const open = this.#open.get(id);
-        const chunk = text(data["delta"]);
-        if (!open || !("text" in open) || !chunk) return [];
+        const chunk = text(event.data.delta);
+        if (!open || !chunk) return [];
         this.#open.set(id, { ...open, text: open.text + chunk });
         return [{ type: "item.delta", itemId: id, chunk }];
       }
       case "session.text.ended":
       case "session.reasoning.ended": {
         const kind = event.type === "session.text.ended" ? "assistant_message" : "reasoning";
-        const id = streamId(data, kind);
+        const id = streamId(event.data, kind);
         this.#open.delete(id);
-        return [{ type: "item.completed", item: { kind, id, text: text(data["text"]) } }];
+        return [{ type: "item.completed", item: { kind, id, text: text(event.data.text) } }];
       }
       case "session.tool.input.started":
-        this.#names.set(text(data["id"]), text(data["name"]));
+        this.#names.set(event.data.id, event.data.name);
         return [];
       case "session.tool.called": {
-        const id = text(data["id"]);
-        const item = toolItem(id, this.#names.get(id) ?? "", data["input"], this.mcpServers);
+        const { id, input } = event.data;
+        const item = toolItem(id, this.#names.get(id) ?? "", input, this.mcpServers);
         if (!item) return [];
         this.#tools.set(id, item);
         return [{ type: "item.started", item }];
       }
       case "session.tool.success":
       case "session.tool.failed": {
-        const id = text(data["id"]);
+        const { id, error = {} } = event.data;
         const item = this.#tools.get(id);
         this.#tools.delete(id);
         this.#names.delete(id);
@@ -616,11 +645,10 @@ export class OpenCodeTranslator {
         this.#diffs.delete(id);
         if (!item) return [];
         const failed = event.type === "session.tool.failed";
-        const error = record(data["error"]);
         const declined =
-          error["type"] === "permission.rejected" ||
-          error["message"] === "The user declined this tool call";
-        const metadata = { ...(diffs ? { files: diffs } : {}), ...record(data["metadata"]) };
+          error.type === "permission.rejected" ||
+          error.message === "The user declined this tool call";
+        const metadata = { ...(diffs ? { files: diffs } : {}), ...record(event.data.metadata) };
         const status: ItemStatus = !failed ? "completed" : declined ? "declined" : "failed";
         return [
           {
@@ -628,22 +656,22 @@ export class OpenCodeTranslator {
             item: finished(
               item,
               status,
-              data["content"],
+              event.data.content,
               metadata,
-              text(error["message"]),
+              text(error.message),
               this.cwd,
             ),
           },
         ];
       }
       case "permission.asked": {
-        const permission = data as unknown as OcPermission;
+        const permission = event.data;
         if (permission.source?.id && permission.metadata?.files)
           this.#diffs.set(permission.source.id, permission.metadata.files);
         return [];
       }
       case "session.step.ended": {
-        const tokens = data["tokens"] as OcTokens | undefined;
+        const tokens = event.data.tokens;
         if (!tokens) return [];
         this.#usage = {
           ...this.#usage,
@@ -653,37 +681,33 @@ export class OpenCodeTranslator {
         return [{ type: "usage.updated", usage: { ...this.#usage } }];
       }
       case "session.usage.updated": {
-        const tokens = data["tokens"] as OcTokens | undefined;
+        const { tokens, cost } = event.data;
         if (!tokens) return [];
         this.#usage = {
           ...this.#usage,
           inputTokens: tokens.input + tokens.cache.read + tokens.cache.write,
           outputTokens: tokens.output + tokens.reasoning,
           contextWindow: this.contextWindow,
-          costUsd: typeof data["cost"] === "number" ? data["cost"] : this.#usage.costUsd,
+          costUsd: typeof cost === "number" ? cost : this.#usage.costUsd,
         };
         return [{ type: "usage.updated", usage: { ...this.#usage } }];
       }
-      case "session.retry.scheduled": {
-        const error = record(data["error"]);
+      case "session.retry.scheduled":
         return [
           {
             type: "item.updated",
             item: {
               kind: "notice",
-              id: `opencode-retry-${text(data["assistantMessageID"])}`,
+              id: `opencode-retry-${text(event.data.assistantMessageID)}`,
               level: "warning",
-              text: `Retrying (attempt ${String(data["attempt"])}): ${text(error["message"])}`,
+              text: `Retrying (attempt ${String(event.data.attempt)}): ${text(event.data.error?.message)}`,
             },
           },
         ];
-      }
       case "session.compaction.ended":
         return [this.notice("info", "Compacted the conversation")];
       case "session.compaction.failed":
-        return [
-          this.notice("error", `Compaction failed: ${text(record(data["error"])["message"])}`),
-        ];
+        return [this.notice("error", `Compaction failed: ${text(event.data.error?.message)}`)];
       default:
         return [];
     }
@@ -709,12 +733,12 @@ export class OpenCodeTranslator {
   history(messages: readonly OcMessage[]): HarnessEvent[] {
     const events: HarnessEvent[] = [];
     for (const message of messages) {
-      if (message.type === "user" && "text" in message) {
+      if (message.type === "user") {
         events.push({
           type: "item.completed",
           item: { kind: "user_message", id: message.id, text: message.text },
         });
-      } else if (message.type === "assistant" && "content" in message) {
+      } else if (message.type === "assistant") {
         message.content.forEach((part, index) => {
           if (part.type === "text" && part.text.trim() !== "") {
             events.push({
@@ -742,7 +766,7 @@ export class OpenCodeTranslator {
             });
           }
         });
-      } else if (message.type === "shell" && "command" in message) {
+      } else if (message.type === "shell") {
         const exit = typeof message.exit === "number" ? message.exit : null;
         events.push({
           type: "item.completed",
@@ -768,7 +792,7 @@ export class OpenCodeTranslator {
   }
 }
 
-function streamId(data: Record<string, unknown>, kind: "assistant_message" | "reasoning"): string {
+function streamId(data: OcStreamPart, kind: "assistant_message" | "reasoning"): string {
   const part = kind === "assistant_message" ? "text" : "reasoning";
-  return `${text(data["assistantMessageID"])}:${part}:${String(data["ordinal"] ?? 0)}`;
+  return `${text(data.assistantMessageID)}:${part}:${String(data.ordinal ?? 0)}`;
 }

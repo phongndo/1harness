@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { extname, join } from "node:path";
+import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import {
   getSessionInfo,
@@ -48,14 +48,17 @@ import {
   type UserInput,
 } from "../../core/events.ts";
 import { errorMessage } from "../../core/thread.ts";
-import { toolAction } from "../../core/tools.ts";
+import { policyHookOutput, toolAction } from "../../core/tools.ts";
 import { ANSWER, ASK, PLAN_TITLE, fileName, planOptions } from "../../core/wording.ts";
+import { readImage } from "../images.ts";
+import { SessionEvents } from "../session-events.ts";
+import { summarizeInput } from "../text.ts";
 import {
   ClaudeTranslator,
+  SUMMARY_KEYS,
   claudeRuntimeModes,
   permissionModeFor,
   runtimeModeFor,
-  summarizeInput,
   toMcpServer,
   toolItem,
 } from "./translate.ts";
@@ -129,7 +132,7 @@ export class ClaudeSession implements HarnessSession {
   #config: ClaudeSessionConfig;
   #query: Query | null = null;
   #input = new AsyncQueue<SDKUserMessage>();
-  #events = new AsyncQueue<HarnessEvent>();
+  #events = new SessionEvents("claude");
   #translator = new ClaudeTranslator();
   #pending = new Map<string, (response: RequestResponse) => void>();
   #turn: Turn | null = null;
@@ -141,7 +144,7 @@ export class ClaudeSession implements HarnessSession {
   #allowed: RuntimeMode[];
   #generation = 0;
   #stderr = "";
-  #closed = false;
+  #closing = false;
   /**
    * Commands bound to Claude Code's own terminal, which this client cannot run,
    * and the names that are skills. Claude reports both with its first turn.
@@ -181,15 +184,15 @@ export class ClaudeSession implements HarnessSession {
   }
 
   get events(): AsyncIterable<HarnessEvent> {
-    return this.#events;
+    return this.#events.stream;
   }
 
   async start(): Promise<void> {
     if (this.#config.resume) await this.#replayHistory(this.#config.resume);
     // After any history, where the user is looking.
-    if (this.#stepDown) this.#emit(this.#translator.notice("warning", this.#stepDown));
+    if (this.#stepDown) this.#events.notice("warning", this.#stepDown);
     this.#open(this.#config.resume);
-    this.#emitInfo();
+    this.#events.info(this.info);
   }
 
   async startTurn(input: UserInput): Promise<void> {
@@ -199,7 +202,7 @@ export class ClaudeSession implements HarnessSession {
     const uuid = randomUUID();
     this.#interruptRequested = false;
     this.#turn = { id: uuid, outstanding: new Set([uuid]), synthetic: false };
-    this.#emit({ type: "turn.started", turnId: uuid });
+    this.#events.emit({ type: "turn.started", turnId: uuid });
     this.#sendPrompt(uuid, input, content);
   }
 
@@ -224,13 +227,13 @@ export class ClaudeSession implements HarnessSession {
   async setModel(model: string | null): Promise<void> {
     await this.#require().setModel(model ?? undefined);
     this.info.model = model;
-    this.#emitInfo();
+    this.#events.info(this.info);
   }
 
   async setEffort(effort: string | null): Promise<void> {
     await this.#require().applyFlagSettings({ effortLevel: effort as EffortLevel | null });
     this.info.effort = effort;
-    this.#emitInfo();
+    this.#events.info(this.info);
   }
 
   async setRuntimeMode(mode: RuntimeMode): Promise<void> {
@@ -283,10 +286,6 @@ export class ClaudeSession implements HarnessSession {
     return this.#turn ? [] : this.#translator.backgroundWork;
   }
 
-  async runCommand(name: string): Promise<void> {
-    throw new Error(`/${name} runs as a turn`);
-  }
-
   async listMcpServers(): Promise<McpServer[]> {
     const statuses = await this.#require().mcpServerStatus();
     const added = this.#config.mcpServers ?? {};
@@ -333,12 +332,12 @@ export class ClaudeSession implements HarnessSession {
   }
 
   async close(): Promise<void> {
-    if (this.#closed) return;
-    this.#closed = true;
+    if (this.#events.closed) return;
+    this.#closing = true;
     for (const resolve of this.#pending.values()) resolve({ kind: "cancel" });
     this.#input.end();
     this.#query?.close();
-    this.#finish(null);
+    this.#finish("closed");
   }
 
   #require(): Query {
@@ -390,25 +389,12 @@ export class ClaudeSession implements HarnessSession {
       if (tail) failure = `${failure}\n${tail}`;
     }
     // A restart replaces the query; only the current one may close the session.
-    if (generation === this.#generation && !this.#closed) {
-      this.#closed = true;
-      this.#finish(failure ?? "Claude Code exited");
-    }
+    if (generation === this.#generation) this.#finish(failure ?? "Claude Code exited");
   }
 
-  #finish(error: string | null): void {
-    if (this.#turn) {
-      for (const event of this.#translator.settleOpenTools(true)) this.#emit(event);
-      this.#emit({
-        type: "turn.ended",
-        turnId: this.#turn.id,
-        status: error ? "failed" : "interrupted",
-        error,
-      });
-      this.#turn = null;
-    }
-    this.#emit({ type: "session.closed", error });
-    this.#events.end();
+  #finish(reason: string): void {
+    this.#events.close(this.#turn?.id ?? null, reason, this.#closing);
+    this.#turn = null;
   }
 
   #handle(message: SDKMessage): void {
@@ -421,33 +407,33 @@ export class ClaudeSession implements HarnessSession {
       if (!sameSet(terminal, this.#terminalCommands) || !sameSet(skills, this.#skills)) {
         this.#terminalCommands = terminal;
         this.#skills = skills;
-        this.#emit({ type: "commands.updated" });
+        this.#events.emit({ type: "commands.updated" });
       }
       this.info.version = message.claude_code_version;
       if (message.effort !== undefined) this.info.effort = message.effort;
       this.#syncPermissionMode(message.permissionMode);
-      this.#emitInfo();
+      this.#events.info(this.info);
     } else if (
       message.type === "system" &&
       message.subtype === "status" &&
       message.permissionMode
     ) {
       this.#syncPermissionMode(message.permissionMode);
-      this.#emitInfo();
+      this.#events.info(this.info);
     }
     if (message.type === "conversation_reset") {
       // /clear starts a new conversation in the same session.
       this.info.threadId = message.new_conversation_id;
-      this.#emitInfo();
-      this.#emit(this.#translator.notice("info", "Conversation cleared"));
+      this.#events.info(this.info);
+      this.#events.notice("info", "Conversation cleared");
     }
     if (!this.#turn && (message.type === "assistant" || message.type === "stream_event")) {
       // Claude started work on its own, such as after a background task finished.
       const id = randomUUID();
       this.#turn = { id, outstanding: new Set(), synthetic: true };
-      this.#emit({ type: "turn.started", turnId: id });
+      this.#events.emit({ type: "turn.started", turnId: id });
     }
-    for (const event of this.#translator.translate(message)) this.#emit(event);
+    this.#events.emit(...this.#translator.translate(message));
     if (message.type === "result") this.#result(message);
   }
 
@@ -466,7 +452,7 @@ export class ClaudeSession implements HarnessSession {
     const interrupted = this.#interruptRequested || aborted;
     const failed = result.subtype !== "success" || result.is_error;
     const status = interrupted ? "interrupted" : failed ? "failed" : "completed";
-    for (const event of this.#translator.settleOpenTools(status !== "completed")) this.#emit(event);
+    this.#events.emit(...this.#translator.settleOpenTools(status !== "completed"));
     // A command such as /cost can answer only in the result.
     const sawText = this.#translator.takeSawText();
     if (
@@ -475,13 +461,13 @@ export class ClaudeSession implements HarnessSession {
       result.subtype === "success" &&
       result.result.trim()
     ) {
-      this.#emit({
+      this.#events.emit({
         type: "item.completed",
         item: { kind: "assistant_message", id: `${result.uuid}-result`, text: result.result },
       });
     }
     this.#translator.endTurn();
-    this.#emit({
+    this.#events.emit({
       type: "turn.ended",
       turnId: turn.id,
       status,
@@ -497,7 +483,7 @@ export class ClaudeSession implements HarnessSession {
    * prompt whose ID its transcript already has.
    */
   #sendPrompt(uuid: string, input: UserInput, content: SDKUserMessage["message"]["content"]): void {
-    this.#emit({
+    this.#events.emit({
       type: "item.completed",
       item: {
         kind: "user_message",
@@ -543,7 +529,7 @@ export class ClaudeSession implements HarnessSession {
       this.info.runtimeMode = runtimeMode;
       this.info.interactionMode = interactionMode;
     }
-    this.#emitInfo();
+    this.#events.info(this.info);
   }
 
   async #replayHistory(sessionId: string): Promise<void> {
@@ -551,9 +537,7 @@ export class ClaudeSession implements HarnessSession {
     try {
       messages = await getSessionMessages(sessionId, { dir: this.info.cwd });
     } catch (error) {
-      this.#emit(
-        this.#translator.notice("warning", `Could not load history: ${errorMessage(error)}`),
-      );
+      this.#events.notice("warning", `Could not load history: ${errorMessage(error)}`);
       return;
     }
     // An unknown session reads as empty, and Claude would only fail on the first message.
@@ -564,14 +548,11 @@ export class ClaudeSession implements HarnessSession {
       // Compaction summaries and other entries Claude Code keeps out of the transcript.
       if (message.type === "system" || (message as { is_meta?: boolean }).is_meta) continue;
       for (const event of replay.translate(message as unknown as SDKMessage)) {
-        if (event.type === "item.completed" || event.type === "item.updated") this.#emit(event);
+        if (event.type === "item.completed" || event.type === "item.updated")
+          this.#events.emit(event);
       }
     }
-    for (const event of replay.settleOpenTools(false)) this.#emit(event);
-  }
-
-  #emit(event: HarnessEvent): void {
-    this.#events.push(event);
+    this.#events.emit(...replay.settleOpenTools(false));
   }
 
   /**
@@ -581,17 +562,13 @@ export class ClaudeSession implements HarnessSession {
    */
   async #readTitle(again: boolean): Promise<void> {
     const id = this.info.threadId;
-    if (!id || this.#closed) return;
+    if (!id || this.#events.closed) return;
     const title = await claudeSessionTitle(this.info.cwd, id);
-    if (title && title !== this.info.title && !this.#closed) {
+    if (title && title !== this.info.title && !this.#events.closed) {
       this.info.title = title;
-      this.#emitInfo();
+      this.#events.info(this.info);
     } else if (!title && again)
       setTimeout(() => void this.#readTitle(false), TITLE_RETRY_MS).unref();
-  }
-
-  #emitInfo(): void {
-    this.#emit({ type: "session.updated", info: { ...this.info } });
   }
 
   #ask(request: HarnessRequest, signal: AbortSignal): Promise<RequestResponse> {
@@ -599,33 +576,20 @@ export class ClaudeSession implements HarnessSession {
       const settle = (response: RequestResponse) => {
         if (!this.#pending.delete(request.id)) return;
         signal.removeEventListener("abort", abort);
-        this.#emit({ type: "request.resolved", requestId: request.id });
+        this.#events.emit({ type: "request.resolved", requestId: request.id });
         resolve(response);
       };
       const abort = () => settle({ kind: "cancel" });
       this.#pending.set(request.id, settle);
       signal.addEventListener("abort", abort);
-      this.#emit({ type: "request.opened", request });
+      this.#events.emit({ type: "request.opened", request });
     });
   }
 
   #checkTool: HookCallback = async (hook) => {
     const policy = this.#config.toolPolicy;
     if (!policy || hook.hook_event_name !== "PreToolUse") return {};
-    const reason = await policy({
-      tool: hook.tool_name,
-      input: hook.tool_input,
-      action: toolAction(hook.tool_name, hook.tool_input),
-    });
-    return reason
-      ? {
-          hookSpecificOutput: {
-            hookEventName: "PreToolUse",
-            permissionDecision: "deny",
-            permissionDecisionReason: reason,
-          },
-        }
-      : {};
+    return policyHookOutput(policy, hook.tool_name, hook.tool_input);
   };
 
   #canUseTool: CanUseTool = async (tool, input, context) => {
@@ -741,7 +705,7 @@ export class ClaudeSession implements HarnessSession {
   ): Promise<PermissionResult> {
     const plan = typeof input["plan"] === "string" ? input["plan"] : "";
     if (plan)
-      this.#emit({
+      this.#events.emit({
         type: "item.completed",
         item: { kind: "plan", id: `plan-${context.toolUseID}`, text: plan },
       });
@@ -773,7 +737,7 @@ export class ClaudeSession implements HarnessSession {
         : permissionModeFor(mode, "default");
     this.info.runtimeMode = runtimeModeFor(permissionMode) ?? mode;
     this.info.interactionMode = "default";
-    this.#emitInfo();
+    this.#events.info(this.info);
     return {
       behavior: "allow",
       updatedInput: input,
@@ -833,7 +797,7 @@ function approvalPrompt(
     default: {
       const mcp = /^mcp__(.+?)__(.+)$/.exec(tool);
       const name = mcp ? `${mcp[1]} · ${mcp[2]}` : tool;
-      return { title: ASK.tool(name), detail: [summarizeInput(input)] };
+      return { title: ASK.tool(name), detail: [summarizeInput(input, SUMMARY_KEYS)] };
     }
   }
 }
@@ -871,25 +835,13 @@ function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   return a.size === b.size && [...a].every((value) => b.has(value));
 }
 
-const IMAGE_TYPES: Record<string, "image/png" | "image/jpeg" | "image/gif" | "image/webp"> = {
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-};
-
 /** The message content: plain text, or text with images ahead of it as Claude Code sends them. */
 function userContent(input: UserInput): SDKUserMessage["message"]["content"] {
   if (!input.images?.length) return input.text;
   return [
-    ...input.images.map((path) => ({
+    ...input.images.map(readImage).map(({ type, data }) => ({
       type: "image" as const,
-      source: {
-        type: "base64" as const,
-        media_type: IMAGE_TYPES[extname(path).toLowerCase()] ?? ("image/png" as const),
-        data: readFileSync(path).toString("base64"),
-      },
+      source: { type: "base64" as const, media_type: type, data },
     })),
     { type: "text" as const, text: input.text },
   ];
@@ -919,8 +871,9 @@ function claudeMcpServers(
  * off. Policy that arrives another way, such as a macOS profile or from the
  * server, is not read here; the mode Claude Code reports once it starts is.
  */
-function claudeSettings(cwd: string, env: NodeJS.ProcessEnv = process.env): unknown[] {
-  const home = env["CLAUDE_CONFIG_DIR"] || join(homedir(), ".claude");
+function claudeSettings(cwd: string): unknown[] {
+  const home = process.env["CLAUDE_CONFIG_DIR"] || join(homedir(), ".claude");
+
   const managed =
     process.platform === "darwin"
       ? "/Library/Application Support/ClaudeCode"

@@ -1,7 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { extname } from "node:path";
-import { AsyncQueue } from "../../core/async-queue.ts";
 import {
   fitRuntimeMode,
   type ApprovalOption,
@@ -21,8 +18,9 @@ import {
 } from "../../core/events.ts";
 import { errorMessage } from "../../core/thread.ts";
 import { ANSWER, ASK, askFor, askForChanges, fileName } from "../../core/wording.ts";
+import { readImage } from "../images.ts";
 import { JsonRpcProcess, RpcError } from "../jsonrpc.ts";
-import { OpenItems } from "../open-items.ts";
+import { SessionEvents, started } from "../session-events.ts";
 import {
   AcpTranslator,
   approvalAction,
@@ -85,13 +83,6 @@ const KIND_LABELS: Record<string, string> = {
   allow_once: ANSWER.yes,
   reject_once: ANSWER.no,
 };
-const IMAGE_TYPES: Record<string, string> = {
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-};
 
 function modeFor(modes: readonly AcpMode[], names: readonly string[]): AcpMode | undefined {
   return modes.find((mode) => names.includes(mode.id.toLowerCase()));
@@ -126,8 +117,7 @@ export class AcpSession implements HarnessSession {
   #options: SessionOptions;
   #version: string;
   #rpc: JsonRpcProcess | null = null;
-  #events = new AsyncQueue<HarnessEvent>();
-  #open = new OpenItems();
+  #events = new SessionEvents("acp");
   #translator = new AcpTranslator();
   #pending = new Map<string, Pending>();
   #modes: AcpMode[] = [];
@@ -144,7 +134,8 @@ export class AcpSession implements HarnessSession {
       harness: spec.id,
       threadId: options.resume,
       cwd: options.cwd,
-      model: options.model,
+      // What the agent reports once it starts; one without a model option reports none.
+      model: null,
       effort: null,
       runtimeMode: options.runtimeMode,
       interactionMode: "default",
@@ -153,7 +144,7 @@ export class AcpSession implements HarnessSession {
   }
 
   get events(): AsyncIterable<HarnessEvent> {
-    return this.#events;
+    return this.#events.stream;
   }
 
   async start(): Promise<void> {
@@ -167,7 +158,7 @@ export class AcpSession implements HarnessSession {
     rpc.onNotification((method, params) => this.#notification(method, params));
     rpc.onRequest((method, params) => this.#serverRequest(method, params));
     rpc.onError((error) =>
-      this.#notice(
+      this.#events.notice(
         "error",
         `1harness could not read a message from ${this.#spec.label}: ${errorMessage(error)}`,
       ),
@@ -211,10 +202,13 @@ export class AcpSession implements HarnessSession {
         CONTROL_TIMEOUT_MS,
       );
       session.sessionId ??= resume;
-      this.#emitAll(this.#translator.flush());
+      this.#events.emit(...this.#translator.flush());
     } else {
       if (resume)
-        this.#notice("warning", `${this.#spec.label} cannot resume sessions; starting a new one`);
+        this.#events.notice(
+          "warning",
+          `${this.#spec.label} cannot resume sessions; starting a new one`,
+        );
       session = await rpc.request(
         "session/new",
         { cwd: this.info.cwd, mcpServers },
@@ -224,16 +218,19 @@ export class AcpSession implements HarnessSession {
     this.info.threadId = session.sessionId ?? null;
     this.#applyModes(session.modes ?? null);
     this.#config = session.configOptions ?? [];
-    this.info.model =
-      this.#config.find((option) => option.id === "model")?.currentValue ?? this.info.model;
-    if (this.#options.model) await this.setModel(this.#options.model).catch(() => {});
+    this.info.model = this.#modelOption()?.currentValue ?? null;
+    const model = this.#options.model;
+    if (model)
+      await this.setModel(model).catch((error: unknown) =>
+        this.#events.notice("warning", `Could not use ${model}: ${errorMessage(error)}`),
+      );
     // A mode the agent lacks steps down to the broadest one it has below it. The
     // thread manager refuses the thread if the agent still runs broader than asked.
     const requested = this.#options.runtimeMode;
     const mode = fitRuntimeMode(requested, this.capabilities.runtimeModes);
     if (mode && mode !== this.info.runtimeMode) await this.setRuntimeMode(mode).catch(() => {});
     if (mode && mode !== requested && this.info.runtimeMode === mode)
-      this.#notice(
+      this.#events.notice(
         "warning",
         `${this.#spec.label} has no ${requested} mode, so this thread runs in ${mode}`,
       );
@@ -241,24 +238,23 @@ export class AcpSession implements HarnessSession {
     if (this.#options.interactionMode === "plan" && this.capabilities.planMode) {
       await this.setInteractionMode("plan").catch(() => {});
     }
-    this.#emitInfo();
+    this.#events.info(this.info);
   }
 
   async startTurn(input: UserInput): Promise<void> {
-    const sessionId = this.#sessionId();
-    // Read first: an image that cannot be read fails the send, not a turn already begun.
-    const prompt: unknown[] = [{ type: "text", text: input.text }];
-    for (const path of input.images ?? []) {
-      prompt.push({
+    const sessionId = started(this.info);
+    const prompt: unknown[] = [
+      { type: "text", text: input.text },
+      ...(input.images ?? []).map(readImage).map(({ type, data }) => ({
         type: "image",
-        mimeType: IMAGE_TYPES[extname(path).toLowerCase()] ?? "image/png",
-        data: readFileSync(path).toString("base64"),
-      });
-    }
+        mimeType: type,
+        data,
+      })),
+    ];
     const turnId = randomUUID();
     this.#turnId = turnId;
-    this.#emit({ type: "turn.started", turnId });
-    this.#emit({
+    this.#events.emit({ type: "turn.started", turnId });
+    this.#events.emit({
       type: "item.completed",
       item: {
         kind: "user_message",
@@ -288,7 +284,7 @@ export class AcpSession implements HarnessSession {
     for (const [id, pending] of this.#pending) {
       pending.resolve({ outcome: { outcome: "cancelled" } });
       this.#pending.delete(id);
-      this.#emit({ type: "request.resolved", requestId: id });
+      this.#events.emit({ type: "request.resolved", requestId: id });
     }
   }
 
@@ -306,16 +302,16 @@ export class AcpSession implements HarnessSession {
         ? { outcome: { outcome: "selected", optionId } }
         : { outcome: { outcome: "cancelled" } },
     );
-    this.#emit({ type: "request.resolved", requestId });
+    this.#events.emit({ type: "request.resolved", requestId });
   }
 
   async setRuntimeMode(mode: RuntimeMode): Promise<void> {
     const target = modeFor(this.#modes, MODE_NAMES[mode]);
     if (!target) throw new Error(`${this.#spec.label} has no ${mode} mode`);
-    await this.#request("session/set_mode", { sessionId: this.#sessionId(), modeId: target.id });
+    await this.#request("session/set_mode", { sessionId: started(this.info), modeId: target.id });
     this.info.runtimeMode = mode;
     this.info.interactionMode = "default";
-    this.#emitInfo();
+    this.#events.info(this.info);
   }
 
   async setInteractionMode(mode: InteractionMode): Promise<void> {
@@ -324,25 +320,26 @@ export class AcpSession implements HarnessSession {
         ? modeFor(this.#modes, PLAN_NAMES)
         : modeFor(this.#modes, MODE_NAMES[this.info.runtimeMode]);
     if (!target) throw new Error(`${this.#spec.label} has no plan mode`);
-    await this.#request("session/set_mode", { sessionId: this.#sessionId(), modeId: target.id });
+    await this.#request("session/set_mode", { sessionId: started(this.info), modeId: target.id });
     this.info.interactionMode = mode;
-    this.#emitInfo();
+    this.#events.info(this.info);
   }
 
   async setModel(model: string | null): Promise<void> {
-    const option = this.#config.find((entry) => entry.id === "model");
-    if (!option || !model) return;
+    if (!this.#modelOption())
+      throw new Error(`${this.#spec.label} does not let 1harness choose its model`);
+    if (!model) throw new Error(`${this.#spec.label} has no default model to go back to`);
     await this.#request("session/set_config_option", {
-      sessionId: this.#sessionId(),
+      sessionId: started(this.info),
       configId: "model",
       value: model,
     });
     this.info.model = model;
-    this.#emitInfo();
+    this.#events.info(this.info);
   }
 
   async listModels(): Promise<ModelOption[]> {
-    const option = this.#config.find((entry) => entry.id === "model");
+    const option = this.#modelOption();
     return (option?.options ?? []).map((choice) => ({
       id: choice.value,
       aliases: [],
@@ -376,6 +373,12 @@ export class AcpSession implements HarnessSession {
       pending.resolve({ outcome: { outcome: "cancelled" } });
     this.#pending.clear();
     await this.#rpc?.close();
+    // A session whose start failed before the agent ran has no process to report the end.
+    this.#events.close(this.#turnId, "closed", true);
+  }
+
+  #modelOption(): AcpConfigOption | undefined {
+    return this.#config.find((option) => option.id === "model");
   }
 
   #applyModes(modes: SessionResponse["modes"]): void {
@@ -405,14 +408,14 @@ export class AcpSession implements HarnessSession {
   #endTurn(turnId: string, stopReason: string, error: string | null): void {
     if (this.#turnId !== turnId) return;
     this.#turnId = null;
-    this.#emitAll(this.#translator.flush());
+    this.#events.emit(...this.#translator.flush());
     const status =
       stopReason === "cancelled"
         ? "interrupted"
         : error || stopReason === "refusal"
           ? "failed"
           : "completed";
-    this.#emit({
+    this.#events.emit({
       type: "turn.ended",
       turnId,
       status,
@@ -431,19 +434,18 @@ export class AcpSession implements HarnessSession {
     }
     const update = params.update;
     if (update.sessionUpdate === "current_mode_update") {
-      this.#currentMode(String((update as { currentModeId: string }).currentModeId));
-      this.#emitInfo();
+      this.#currentMode(update.currentModeId);
+      this.#events.info(this.info);
       return;
     }
     if (update.sessionUpdate === "usage_update") {
-      const usage = update as { used: number; size: number };
-      this.#emit({
+      this.#events.emit({
         type: "usage.updated",
         usage: {
           inputTokens: 0,
           outputTokens: 0,
-          contextTokens: usage.used,
-          contextWindow: usage.size,
+          contextTokens: update.used,
+          contextWindow: update.size,
           costUsd: null,
           limits: [],
         },
@@ -452,7 +454,7 @@ export class AcpSession implements HarnessSession {
     }
     // The turn already shows its prompt, so an agent that echoes it would show it twice.
     if (update.sessionUpdate === "user_message_chunk" && this.#turnId !== null) return;
-    this.#emitAll(this.#translator.translate(update));
+    this.#events.emit(...this.#translator.translate(update));
   }
 
   async #serverRequest(method: string, raw: unknown): Promise<unknown> {
@@ -492,7 +494,7 @@ export class AcpSession implements HarnessSession {
     const action = approvalAction(params.toolCall);
     return new Promise((resolve) => {
       this.#pending.set(id, { options: params.options, resolve });
-      this.#emit({
+      this.#events.emit({
         type: "request.opened",
         request: {
           kind: "approval",
@@ -517,24 +519,9 @@ export class AcpSession implements HarnessSession {
   }
 
   #closed(reason: string): void {
-    this.#emitAll(this.#translator.flush());
-    this.#emitAll(this.#open.settle());
-    if (this.#turnId !== null) {
-      this.#emit({
-        type: "turn.ended",
-        turnId: this.#turnId,
-        status: this.#closing ? "interrupted" : "failed",
-        error: this.#closing ? null : reason,
-      });
-      this.#turnId = null;
-    }
-    this.#emit({ type: "session.closed", error: this.#closing ? null : reason });
-    this.#events.end();
-  }
-
-  #sessionId(): string {
-    if (!this.info.threadId) throw new Error("The session has not started");
-    return this.info.threadId;
+    this.#pending.clear();
+    this.#events.close(this.#turnId, reason, this.#closing);
+    this.#turnId = null;
   }
 
   /** A request the agent answers right away; a prompt, answered when its turn ends, passes null. */
@@ -545,25 +532,5 @@ export class AcpSession implements HarnessSession {
   ): Promise<T> {
     if (!this.#rpc) return Promise.reject(new Error("The session has not started"));
     return this.#rpc.request<T>(method, params, timeoutMs ?? undefined);
-  }
-
-  #notice(level: "info" | "warning" | "error", text: string): void {
-    this.#emit({
-      type: "item.completed",
-      item: { kind: "notice", id: `acp-notice-${randomUUID()}`, level, text },
-    });
-  }
-
-  #emit(event: HarnessEvent): void {
-    this.#open.track(event);
-    this.#events.push(event);
-  }
-
-  #emitAll(events: HarnessEvent[]): void {
-    for (const event of events) this.#emit(event);
-  }
-
-  #emitInfo(): void {
-    this.#emit({ type: "session.updated", info: { ...this.info } });
   }
 }

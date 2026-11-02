@@ -124,6 +124,7 @@ describe("OpenCodeTranslator", () => {
       type: "permission.asked",
       data: {
         id: "per_1",
+        sessionID: "ses_1",
         action: "edit",
         resources: ["new.txt"],
         metadata: { files: [{ file: "new.txt", patch: "@@ -0,0 +1,1 @@\n+x\n", status: "added" }] },

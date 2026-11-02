@@ -9,15 +9,16 @@ import {
   type McpServerState,
   type RateLimit,
   type RuntimeMode,
-  type TodoStep,
   type TurnStatus,
   type Usage,
 } from "../../core/events.ts";
 import { limitNotice } from "../../core/wording.ts";
+import { todoStatus, truncate } from "../text.ts";
 import { INIT_PROMPT } from "./prompts.ts";
 
 // The subset of the app-server protocol this driver reads. Generate the full
 // bindings with `codex app-server generate-ts --experimental --out <dir>`.
+// Items of other types reach the translator as well, typed as these, and are dropped.
 
 type JsonValue = unknown;
 
@@ -87,8 +88,7 @@ export type CodexThreadItem =
   | { type: "imageView"; id: string; path: string }
   | { type: "enteredReviewMode"; id: string; review: string }
   | { type: "exitedReviewMode"; id: string; review: string }
-  | { type: "contextCompaction"; id: string }
-  | { type: string; id: string };
+  | { type: "contextCompaction"; id: string };
 
 export type CodexUserInput =
   | { type: "text"; text: string; text_elements: unknown[] }
@@ -206,7 +206,7 @@ export function grantedRuntimeMode(asked: RuntimeMode, sandbox: CodexSandboxPoli
   }
 }
 
-export function itemStatus(status: string): ItemStatus {
+function itemStatus(status: string): ItemStatus {
   switch (status) {
     case "completed":
       return "completed";
@@ -220,9 +220,8 @@ export function itemStatus(status: string): ItemStatus {
   }
 }
 
-function compact(value: JsonValue, limit = 120): string {
-  const text = typeof value === "string" ? value : (JSON.stringify(value) ?? "");
-  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+function compact(value: JsonValue): string {
+  return truncate(typeof value === "string" ? value : (JSON.stringify(value) ?? ""), 120);
 }
 
 function contentText(content: JsonValue[]): string {
@@ -355,8 +354,7 @@ function webSearchItem(item: Extract<CodexThreadItem, { type: "webSearch" }>, do
 export function toItem(item: CodexThreadItem, done = true): Item | null {
   switch (item.type) {
     case "userMessage": {
-      const { content, clientId } = item as Extract<CodexThreadItem, { type: "userMessage" }>;
-      const text = content
+      const text = item.content
         // The text already names any skill or mention the message selects.
         .filter((part) => part.type !== "skill" && part.type !== "mention")
         .map((part) => (part.type === "text" ? String(part.text) : `[${part.type}]`))
@@ -366,84 +364,70 @@ export function toItem(item: CodexThreadItem, done = true): Item | null {
         kind: "user_message",
         id: item.id,
         text: text === INIT_PROMPT ? "/init" : text,
-        ...(clientId ? { inputId: clientId } : {}),
+        ...(item.clientId ? { inputId: item.clientId } : {}),
       };
     }
     case "agentMessage":
-      return {
-        kind: "assistant_message",
-        id: item.id,
-        text: (item as Extract<CodexThreadItem, { type: "agentMessage" }>).text,
-      };
+      return { kind: "assistant_message", id: item.id, text: item.text };
     case "plan":
-      return { kind: "plan", id: item.id, text: (item as { text: string }).text };
+      return { kind: "plan", id: item.id, text: item.text };
     case "reasoning": {
-      const { summary, content } = item as Extract<CodexThreadItem, { type: "reasoning" }>;
-      const text = (summary.length > 0 ? summary : content).join("\n\n");
+      const text = (item.summary.length > 0 ? item.summary : item.content).join("\n\n");
       return { kind: "reasoning", id: item.id, text };
     }
-    case "commandExecution": {
-      const command = item as Extract<CodexThreadItem, { type: "commandExecution" }>;
+    case "commandExecution":
       return {
         kind: "command",
         id: item.id,
-        command: unwrapShell(command.command),
-        output: command.aggregatedOutput ?? "",
-        exitCode: command.exitCode,
-        status: itemStatus(command.status),
-        actions: commandActions(command.commandActions),
+        command: unwrapShell(item.command),
+        output: item.aggregatedOutput ?? "",
+        exitCode: item.exitCode,
+        status: itemStatus(item.status),
+        actions: commandActions(item.commandActions),
       };
-    }
-    case "fileChange": {
-      const change = item as Extract<CodexThreadItem, { type: "fileChange" }>;
+    case "fileChange":
       return {
         kind: "file_change",
         id: item.id,
-        changes: fileChanges(change.changes),
-        status: itemStatus(change.status),
+        changes: fileChanges(item.changes),
+        status: itemStatus(item.status),
       };
-    }
-    case "mcpToolCall": {
-      const call = item as Extract<CodexThreadItem, { type: "mcpToolCall" }>;
+    case "mcpToolCall":
       return {
         kind: "tool_call",
         id: item.id,
-        tool: call.tool,
-        server: call.server,
+        tool: item.tool,
+        server: item.server,
         category: "other",
-        summary: compact(call.arguments),
-        output: call.error?.message ?? (call.result ? contentText(call.result.content) : ""),
-        status: call.error ? "failed" : itemStatus(call.status),
+        summary: compact(item.arguments),
+        output: item.error?.message ?? (item.result ? contentText(item.result.content) : ""),
+        status: item.error ? "failed" : itemStatus(item.status),
       };
-    }
-    case "dynamicToolCall": {
-      const call = item as Extract<CodexThreadItem, { type: "dynamicToolCall" }>;
+    case "dynamicToolCall":
       return {
         kind: "tool_call",
         id: item.id,
-        tool: call.tool,
+        tool: item.tool,
         server: null,
         category: "other",
-        summary: compact(call.arguments),
-        output: (call.contentItems ?? []).map((part) => part.text ?? `[${part.type}]`).join("\n"),
-        status: itemStatus(call.status),
+        summary: compact(item.arguments),
+        output: (item.contentItems ?? []).map((part) => part.text ?? `[${part.type}]`).join("\n"),
+        status: itemStatus(item.status),
       };
-    }
     case "collabAgentToolCall": {
-      const call = item as Extract<CodexThreadItem, { type: "collabAgentToolCall" }>;
-      const messages = Object.values(call.agentsStates ?? {})
+      const messages = Object.values(item.agentsStates ?? {})
         .map((state) => state?.message?.trim())
         .filter((message): message is string => Boolean(message));
       return {
         kind: "agent",
         id: item.id,
-        description: call.prompt ? `${call.tool}: ${compact(call.prompt)}` : call.tool,
+        description: item.prompt ? `${item.tool}: ${compact(item.prompt)}` : item.tool,
         summary: messages.join("\n"),
-        status: itemStatus(call.status),
+        status: itemStatus(item.status),
       };
     }
     case "webSearch":
-      return webSearchItem(item as Extract<CodexThreadItem, { type: "webSearch" }>, done);
+      return webSearchItem(item, done);
     case "imageView":
       return {
         kind: "tool_call",
@@ -451,26 +435,24 @@ export function toItem(item: CodexThreadItem, done = true): Item | null {
         tool: "View image",
         server: null,
         category: "read",
-        summary: (item as { path: string }).path,
+        summary: item.path,
         output: "",
         status: "completed",
       };
-    case "enteredReviewMode": {
+    case "enteredReviewMode":
       if (!done) return null;
-      const { review } = item as Extract<CodexThreadItem, { type: "enteredReviewMode" }>;
       return {
         kind: "notice",
         id: item.id,
         level: "info",
-        text: review ? `Reviewing ${review}` : "Review started",
+        text: item.review ? `Reviewing ${item.review}` : "Review started",
       };
-    }
-    case "exitedReviewMode": {
+    case "exitedReviewMode":
       if (!done) return null;
-      const { review } = item as Extract<CodexThreadItem, { type: "exitedReviewMode" }>;
       // The review's findings, written for the user.
-      return review.trim() === "" ? null : { kind: "assistant_message", id: item.id, text: review };
-    }
+      return item.review.trim() === ""
+        ? null
+        : { kind: "assistant_message", id: item.id, text: item.review };
     case "contextCompaction":
       return done
         ? { kind: "notice", id: item.id, level: "info", text: "Context compacted" }
@@ -484,10 +466,6 @@ function turnStatus(status: CodexTurn["status"]): TurnStatus {
   return status === "interrupted" ? "interrupted" : status === "failed" ? "failed" : "completed";
 }
 
-function todoStatus(status: string): TodoStep["status"] {
-  return status === "completed" ? "completed" : status === "inProgress" ? "in_progress" : "pending";
-}
-
 function windowLabel(minutes: number | null, fallback: string): string {
   if (minutes === null) return fallback;
   if (minutes % 10_080 === 0) return minutes === 10_080 ? "weekly" : `${minutes / 10_080}-week`;
@@ -497,7 +475,7 @@ function windowLabel(minutes: number | null, fallback: string): string {
 }
 
 /** Describes a turn error, preferring Codex's detailed explanation. */
-export function errorText(error: CodexTurnError | null): string | null {
+function errorText(error: CodexTurnError | null): string | null {
   if (!error) return null;
   const details = error.additionalDetails?.trim();
   return details && details !== error.message ? `${error.message}\n${details}` : error.message;
@@ -599,21 +577,16 @@ export class CodexTranslator {
         return [{ type: done ? "item.completed" : "item.started", item }];
       }
       case "item/agentMessage/delta":
-        if (this.#repeats.has(String(params["itemId"]))) return [];
-        return [
-          { type: "item.delta", itemId: String(params["itemId"]), chunk: String(params["delta"]) },
-        ];
       case "item/plan/delta":
       case "item/reasoning/summaryTextDelta":
       case "item/reasoning/textDelta":
-      case "item/commandExecution/outputDelta":
-        return [
-          {
-            type: "item.delta",
-            itemId: String(params["itemId"]),
-            chunk: String(params["delta"]),
-          },
-        ];
+      case "item/commandExecution/outputDelta": {
+        const itemId = String(params["itemId"]);
+        // Only agent messages are held back as repeats of a review.
+        if (this.#repeats.has(itemId)) return [];
+        return [{ type: "item.delta", itemId, chunk: String(params["delta"]) }];
+      }
+
       case "item/reasoning/summaryPartAdded":
         return Number(params["summaryIndex"]) > 0
           ? [{ type: "item.delta", itemId: String(params["itemId"]), chunk: "\n\n" }]

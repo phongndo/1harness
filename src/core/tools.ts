@@ -1,4 +1,4 @@
-import type { ApprovalAction } from "./events.ts";
+import type { ApprovalAction, ToolPolicy } from "./events.ts";
 
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
 
@@ -16,4 +16,34 @@ export function toolAction(tool: string, input: unknown): ApprovalAction {
     return { type: "file_change", paths: [path] };
   const mcp = /^mcp__(.+?)__(.+)$/.exec(tool);
   return { type: "tool", tool: mcp?.[2] ?? tool, server: mcp?.[1] ?? null, input };
+}
+
+/** A PreToolUse hook's output, as Claude Code and Codex read it. */
+export interface HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: "PreToolUse";
+    permissionDecision: "deny";
+    permissionDecisionReason: string;
+  };
+}
+
+/** The hook output that blocks a call, telling the agent why. */
+export function denyHookOutput(reason: string): HookOutput {
+  return {
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: reason,
+    },
+  };
+}
+
+/** A PreToolUse hook's output for a call, as a tool policy decides it. */
+export async function policyHookOutput(
+  policy: ToolPolicy,
+  tool: string,
+  input: unknown,
+): Promise<HookOutput> {
+  const reason = await policy({ tool, input, action: toolAction(tool, input) });
+  return reason ? denyHookOutput(reason) : {};
 }

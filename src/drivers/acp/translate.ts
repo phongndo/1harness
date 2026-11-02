@@ -5,12 +5,13 @@ import type {
   Item,
   ItemStatus,
   NativeCommand,
-  TodoStep,
   ToolCategory,
 } from "../../core/events.ts";
 import { unifiedDiff } from "../../core/diff.ts";
+import { todoStatus } from "../text.ts";
 
-// The subset of the Agent Client Protocol (v1) this driver reads.
+// The subset of the Agent Client Protocol (v1) this driver reads. Updates of
+// other kinds reach the translator as well, typed as these, and are dropped.
 
 export interface AcpContent {
   type: string;
@@ -47,12 +48,11 @@ export type AcpUpdate =
       availableCommands: { name: string; description: string; input?: { hint?: string } | null }[];
     }
   | { sessionUpdate: "current_mode_update"; currentModeId: string }
-  | { sessionUpdate: "usage_update"; used: number; size: number }
-  | { sessionUpdate: string; [key: string]: unknown };
+  | { sessionUpdate: "usage_update"; used: number; size: number };
 
 const CATEGORIES: Record<string, ToolCategory> = { read: "read", search: "search", fetch: "fetch" };
 
-export function toolStatus(status: string | null | undefined): ItemStatus {
+function toolStatus(status: string | null | undefined): ItemStatus {
   if (status === "completed") return "completed";
   if (status === "failed") return "failed";
   return "running";
@@ -175,41 +175,35 @@ export class AcpTranslator {
       case "agent_message_chunk":
       case "agent_thought_chunk":
       case "user_message_chunk": {
-        const chunk = update as { content: AcpContent; messageId?: string };
         const kind =
           update.sessionUpdate === "agent_message_chunk"
             ? "assistant_message"
             : update.sessionUpdate === "agent_thought_chunk"
               ? "reasoning"
               : "user_message";
-        return this.#chunk(kind, chunk.content.text ?? "", chunk.messageId);
+        return this.#chunk(kind, update.content.text ?? "", update.messageId);
       }
       case "tool_call":
       case "tool_call_update": {
-        const call = update as AcpToolCall;
-        const merged = { ...this.#tools.get(call.toolCallId), ...stripNulls(call) } as AcpToolCall;
-        this.#tools.set(call.toolCallId, merged);
+        const merged = {
+          ...this.#tools.get(update.toolCallId),
+          ...stripNulls(update),
+        } as AcpToolCall;
+        this.#tools.set(update.toolCallId, merged);
         const item = toolItem(merged);
         const done = merged.status === "completed" || merged.status === "failed";
-        if (done) this.#tools.delete(call.toolCallId);
-        const type =
-          update.sessionUpdate === "tool_call"
+        if (done) this.#tools.delete(update.toolCallId);
+        const type = done
+          ? "item.completed"
+          : update.sessionUpdate === "tool_call"
             ? "item.started"
-            : done
-              ? "item.completed"
-              : "item.updated";
-        return [...this.flush(), { type: done ? "item.completed" : type, item }];
+            : "item.updated";
+        return [...this.flush(), { type, item }];
       }
       case "plan": {
-        const entries = (update as { entries: { content: string; status: string }[] }).entries;
-        const steps: TodoStep[] = entries.map((entry) => ({
+        const steps = update.entries.map((entry) => ({
           text: entry.content,
-          status:
-            entry.status === "completed"
-              ? "completed"
-              : entry.status === "in_progress"
-                ? "in_progress"
-                : "pending",
+          status: todoStatus(entry.status),
         }));
         return [
           ...this.flush(),
@@ -217,16 +211,7 @@ export class AcpTranslator {
         ];
       }
       case "available_commands_update": {
-        const commands = (
-          update as {
-            availableCommands: {
-              name: string;
-              description: string;
-              input?: { hint?: string } | null;
-            }[];
-          }
-        ).availableCommands;
-        this.#commands = commands.map((command) => ({
+        this.#commands = update.availableCommands.map((command) => ({
           name: command.name,
           aliases: [],
           description: command.description,

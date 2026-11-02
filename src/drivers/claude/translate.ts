@@ -21,7 +21,9 @@ import {
   type ToolCategory,
   type Usage,
 } from "../../core/events.ts";
+import { unifiedDiff } from "../../core/diff.ts";
 import { limitNotice } from "../../core/wording.ts";
+import { record, summarizeInput, text, todoStatus, truncate } from "../text.ts";
 
 type ContentBlock = SDKAssistantMessage["message"]["content"][number];
 type StreamEvent = SDKPartialAssistantMessage["event"];
@@ -94,46 +96,17 @@ export function runtimeModeFor(mode: PermissionMode): RuntimeMode | null {
   }
 }
 
-function record(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
-}
-
-function text(value: unknown): string {
-  return typeof value === "string" ? value : "";
-}
-
-function truncate(value: string, limit: number): string {
-  return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
-}
-
-function lines(prefix: string, value: string): string {
-  return value === ""
-    ? ""
-    : value
-        .replace(/\n$/, "")
-        .split("\n")
-        .map((line) => prefix + line)
-        .join("\n");
-}
-
-/** A short description of a tool call's input, like `Read(src/cli.ts)`. */
-export function summarizeInput(input: Record<string, unknown>): string {
-  for (const key of ["file_path", "notebook_path", "path", "url", "pattern", "query", "skill"]) {
-    const value = input[key];
-    if (typeof value === "string" && value !== "") return truncate(value, 120);
-  }
-  if (typeof input["description"] === "string") return truncate(input["description"], 120);
-  const json = JSON.stringify(input);
-  return json === "{}" ? "" : truncate(json, 120);
-}
-
-function todoStatus(status: unknown): TodoStep["status"] {
-  return status === "completed"
-    ? "completed"
-    : status === "in_progress"
-      ? "in_progress"
-      : "pending";
-}
+/** The inputs that best say what a call of one of Claude Code's tools is about, best first. */
+export const SUMMARY_KEYS = [
+  "file_path",
+  "notebook_path",
+  "path",
+  "url",
+  "pattern",
+  "query",
+  "skill",
+  "description",
+];
 
 /** Maps a Claude tool call to a shared item, or null for tools 1harness renders through requests. */
 export function toolItem(id: string, name: string, rawInput: unknown): Item | null {
@@ -153,11 +126,8 @@ export function toolItem(id: string, name: string, rawInput: unknown): Item | nu
     case "MultiEdit": {
       const edits = Array.isArray(input["edits"]) ? input["edits"].map(record) : [input];
       const diff = edits
-        .map((edit) =>
-          [lines("-", text(edit["old_string"])), lines("+", text(edit["new_string"]))]
-            .filter(Boolean)
-            .join("\n"),
-        )
+        .map((edit) => unifiedDiff(text(edit["old_string"]), text(edit["new_string"])))
+        .filter(Boolean)
         .join("\n");
       return {
         kind: "file_change",
@@ -171,7 +141,11 @@ export function toolItem(id: string, name: string, rawInput: unknown): Item | nu
         kind: "file_change",
         id,
         changes: [
-          { path: text(input["file_path"]), kind: "add", diff: lines("+", text(input["content"])) },
+          {
+            path: text(input["file_path"]),
+            kind: "add",
+            diff: unifiedDiff("", text(input["content"])),
+          },
         ],
         status: "running",
       };
@@ -183,7 +157,7 @@ export function toolItem(id: string, name: string, rawInput: unknown): Item | nu
           {
             path: text(input["notebook_path"]),
             kind: "update",
-            diff: lines("+", text(input["new_source"])),
+            diff: unifiedDiff("", text(input["new_source"])),
           } satisfies FileChange,
         ],
         status: "running",
@@ -224,7 +198,7 @@ export function toolItem(id: string, name: string, rawInput: unknown): Item | nu
         tool: mcp?.[2] ?? name,
         server: mcp?.[1] ?? null,
         category: mcp ? "other" : (TOOL_CATEGORIES[name] ?? "other"),
-        summary: summarizeInput(input),
+        summary: summarizeInput(input, SUMMARY_KEYS),
         output: "",
         status: "running",
       };
@@ -268,7 +242,6 @@ function complete(item: Item, output: string, failed: boolean, result?: unknown)
   const status = failed ? "failed" : "completed";
   switch (item.kind) {
     case "command":
-      return { ...item, output: truncate(output, OUTPUT_LIMIT), status };
     case "tool_call":
       return { ...item, output: truncate(output, OUTPUT_LIMIT), status };
     case "file_change":
@@ -348,12 +321,12 @@ export class ClaudeTranslator {
     return saw;
   }
 
-  /** What each task Claude is still running does, such as a background agent. */
   /** Forgets background tasks, which end without word when Claude Code restarts. */
   clearBackgroundWork(): void {
     this.#work.clear();
   }
 
+  /** What each task Claude is still running does, such as a background agent. */
   get backgroundWork(): string[] {
     return [...this.#work.values()]
       .filter((task) => task.background)

@@ -11,7 +11,8 @@ let spec: AcpAgentSpec;
 
 /**
  * A stand-in for an ACP agent. A prompt's text says what it does: "die" starts
- * a tool call and a reply, then exits; anything else ends the turn.
+ * a tool call and a reply, then exits; anything else ends the turn. With
+ * FAKE_MODELS set, it offers models, and refuses the one named "missing".
  */
 const FAKE = `import { createInterface } from "node:readline";
 const send = (message) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\\n");
@@ -25,7 +26,17 @@ for await (const line of createInterface({ input: process.stdin })) {
       reply({ agentCapabilities: { promptCapabilities: { image: true } } });
       break;
     case "session/new":
-      reply({ sessionId: "s1" });
+      reply({
+        sessionId: "s1",
+        ...(process.env.FAKE_MODELS
+          ? { configOptions: [{ id: "model", currentValue: "small", options: [{ value: "small", name: "Small" }, { value: "big", name: "Big" }] }] }
+          : {}),
+      });
+      break;
+    case "session/set_config_option":
+      if (message.params.value === "missing")
+        send({ id: message.id, error: { code: -32602, message: "no such model" } });
+      else reply({});
       break;
     case "session/prompt":
       if (message.params.prompt[0].text === "die") {
@@ -67,6 +78,16 @@ function collect(session: AcpSession): { events: HarnessEvent[]; ended: Promise<
   return { events, ended };
 }
 
+function warnings(events: HarnessEvent[]): string[] {
+  return events.flatMap((event) =>
+    event.type === "item.completed" &&
+    event.item.kind === "notice" &&
+    event.item.level === "warning"
+      ? [event.item.text]
+      : [],
+  );
+}
+
 function within<T>(promise: Promise<T>, ms: number): Promise<T | "timed out"> {
   return Promise.race([
     promise,
@@ -90,6 +111,37 @@ describe("AcpSession", () => {
     assert.equal(tool && "status" in tool && tool.status, "failed");
     const reply = [...completed.values()].find((item) => item.kind === "assistant_message");
     assert.equal(reply?.kind === "assistant_message" && reply.text, "Looking");
+  });
+
+  it("reports only a model the agent took", async () => {
+    // An agent with no model option runs its own, which it does not name.
+    const plain = new AcpSession(spec, { ...options, cwd: root, model: "big" }, "test");
+    const plainEvents = collect(plain).events;
+    try {
+      await plain.start();
+      assert.equal(plain.info.model, null);
+      assert.match(warnings(plainEvents).join("\n"), /Could not use big/);
+      await assert.rejects(plain.setModel("big"), /does not let 1harness choose its model/);
+    } finally {
+      await plain.close();
+    }
+
+    process.env["FAKE_MODELS"] = "1";
+    try {
+      const chosen = new AcpSession(spec, { ...options, cwd: root, model: "big" }, "test");
+      await chosen.start();
+      assert.equal(chosen.info.model, "big");
+      await chosen.close();
+
+      const refused = new AcpSession(spec, { ...options, cwd: root, model: "missing" }, "test");
+      const refusedEvents = collect(refused).events;
+      await refused.start();
+      assert.equal(refused.info.model, "small");
+      assert.match(warnings(refusedEvents).join("\n"), /Could not use missing: no such model/);
+      await refused.close();
+    } finally {
+      delete process.env["FAKE_MODELS"];
+    }
   });
 
   it("ends no turn it never started when an attached image is missing", async () => {

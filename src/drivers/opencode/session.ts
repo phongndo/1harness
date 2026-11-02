@@ -1,7 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { basename, extname } from "node:path";
-import { AsyncQueue } from "../../core/async-queue.ts";
+import { basename } from "node:path";
 import {
   fitRuntimeMode,
   type Capabilities,
@@ -21,6 +19,8 @@ import {
   type UserInput,
 } from "../../core/events.ts";
 import { errorMessage } from "../../core/thread.ts";
+import { readImage } from "../images.ts";
+import { SessionEvents, started } from "../session-events.ts";
 import { OpenCodeServer } from "./server.ts";
 import {
   OpenCodeTranslator,
@@ -38,7 +38,7 @@ import {
   type OcForm,
   type OcMessage,
   type OcModel,
-  type OcPermission,
+  type OcModelRef,
   type OcRule,
 } from "./translate.ts";
 
@@ -46,17 +46,11 @@ export interface OpenCodeSessionConfig extends SessionOptions {
   command: string;
 }
 
-interface ModelRef {
-  providerID: string;
-  id: string;
-  variant?: string;
-}
-
 interface OcSession {
   id: string;
   title?: string;
   agent?: string;
-  model?: ModelRef;
+  model?: OcModelRef;
   permissions?: OcRule[];
   time: { updated: number };
 }
@@ -82,13 +76,6 @@ const MCP_STATES: Record<string, McpServerState> = {
   failed: "failed",
   needs_auth: "needs-login",
 };
-const IMAGE_TYPES: Record<string, string> = {
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-};
 
 /**
  * Drives OpenCode 2 through its server API: a private `opencode serve` per
@@ -107,7 +94,7 @@ export class OpenCodeSession implements HarnessSession {
   readonly info: SessionInfo;
   #config: OpenCodeSessionConfig;
   #server: OpenCodeServer | null = null;
-  #events = new AsyncQueue<HarnessEvent>();
+  #events = new SessionEvents("opencode");
   #translator: OpenCodeTranslator;
   #models: OcModel[] = [];
   #defaultModel: string | null = null;
@@ -126,7 +113,6 @@ export class OpenCodeSession implements HarnessSession {
   /** Esc came before the turn's execution started, so it stops once it does. */
   #interruptWanted = false;
   #closing = false;
-  #finished = false;
 
   constructor(config: OpenCodeSessionConfig) {
     this.#config = config;
@@ -144,7 +130,7 @@ export class OpenCodeSession implements HarnessSession {
   }
 
   get events(): AsyncIterable<HarnessEvent> {
-    return this.#events;
+    return this.#events.stream;
   }
 
   async start(): Promise<void> {
@@ -166,11 +152,9 @@ export class OpenCodeSession implements HarnessSession {
         this.#receive(event);
       } catch (error) {
         // An event read wrong should not end the session, so it is reported instead.
-        this.#emit(
-          this.#translator.notice(
-            "warning",
-            `Could not follow OpenCode's ${event.type}: ${errorMessage(error)}`,
-          ),
+        this.#events.notice(
+          "warning",
+          `Could not follow OpenCode's ${event.type}: ${errorMessage(error)}`,
         );
       }
     });
@@ -198,18 +182,15 @@ export class OpenCodeSession implements HarnessSession {
     const requested = this.#config.runtimeMode;
     const mode = fitRuntimeMode(requested, RUNTIME_MODES) ?? "supervised";
     if (mode !== requested)
-      this.#emit(
-        this.#translator.notice(
-          "warning",
-          `${LABEL} has no ${requested} mode, so this thread runs in ${mode}`,
-        ),
+      this.#events.notice(
+        "warning",
+        `${LABEL} has no ${requested} mode, so this thread runs in ${mode}`,
       );
     const plan = this.#config.interactionMode === "plan" && this.capabilities.planMode;
     this.#agent = plan ? PLAN_AGENT : this.#mainAgent;
     const { model: name, effort } = this.#config;
     const model = name ? findModel(models, name) : undefined;
-    if (name && !model)
-      this.#emit(this.#translator.notice("warning", `${this.#noModel(name)}; using its default`));
+    if (name && !model) this.#events.notice("warning", `${this.#noModel(name)}; using its default`);
 
     let session: OcSession;
     const resume = this.#config.resume;
@@ -227,7 +208,7 @@ export class OpenCodeSession implements HarnessSession {
         await this.#post(`/api/session/${session.id}/model`, { model: ref });
         session.model = ref;
       }
-      this.#emitAll(this.#translator.history(await this.#history(session.id)));
+      this.#events.emit(...this.#translator.history(await this.#history(session.id)));
     } else {
       const ref = this.#requestedModel(model, effort);
       session = await this.#data<OcSession>("/api/session", "POST", {
@@ -242,7 +223,7 @@ export class OpenCodeSession implements HarnessSession {
     this.info.runtimeMode = mode;
     this.info.interactionMode = plan ? "plan" : "default";
     this.#applyModel(session.model ?? this.#fallbackRef());
-    this.#emitInfo();
+    this.#events.info(this.info);
   }
 
   async startTurn(input: UserInput): Promise<void> {
@@ -290,13 +271,13 @@ export class OpenCodeSession implements HarnessSession {
     if (!RUNTIME_MODES.includes(mode)) throw new Error(`${LABEL} has no ${mode} mode`);
     await this.#applyRules(mode, this.info.interactionMode === "plan");
     this.info.runtimeMode = mode;
-    this.#emitInfo();
+    this.#events.info(this.info);
   }
 
   async setInteractionMode(mode: InteractionMode): Promise<void> {
     if (mode === "plan" && !this.capabilities.planMode)
       throw new Error(`${LABEL} has no plan mode`);
-    const sessionId = this.#sessionId();
+    const sessionId = started(this.info);
     const previous = this.#agent;
     // Set first, so OpenCode's word of the switch is known as this one.
     this.#agent = mode === "plan" ? PLAN_AGENT : this.#mainAgent;
@@ -308,7 +289,7 @@ export class OpenCodeSession implements HarnessSession {
     }
     await this.#applyRules(this.info.runtimeMode, mode === "plan");
     this.info.interactionMode = mode;
-    this.#emitInfo();
+    this.#events.info(this.info);
   }
 
   async setModel(model: string | null): Promise<void> {
@@ -316,9 +297,9 @@ export class OpenCodeSession implements HarnessSession {
     if (model && !target) throw new Error(this.#noModel(model));
     const ref = target ? this.#modelRef(target, this.info.effort) : this.#fallbackRef();
     if (!ref) return;
-    await this.#post(`/api/session/${this.#sessionId()}/model`, { model: ref });
+    await this.#post(`/api/session/${started(this.info)}/model`, { model: ref });
     this.#applyModel(ref);
-    this.#emitInfo();
+    this.#events.info(this.info);
   }
 
   async setEffort(effort: string | null): Promise<void> {
@@ -327,13 +308,13 @@ export class OpenCodeSession implements HarnessSession {
     const ref = this.#modelRef(current, effort);
     if (effort && ref.variant !== effort)
       throw new Error(`${modelName(current)} has no effort ${effort}`);
-    await this.#post(`/api/session/${this.#sessionId()}/model`, { model: ref });
+    await this.#post(`/api/session/${started(this.info)}/model`, { model: ref });
     this.#applyModel(ref);
-    this.#emitInfo();
+    this.#events.info(this.info);
   }
 
   async compact(): Promise<void> {
-    await this.#post(`/api/session/${this.#sessionId()}/compact`, {});
+    await this.#post(`/api/session/${started(this.info)}/compact`, {});
   }
 
   async listModels(): Promise<ModelOption[]> {
@@ -388,12 +369,12 @@ export class OpenCodeSession implements HarnessSession {
   async close(): Promise<void> {
     this.#closing = true;
     await this.#server?.close();
-    this.#finish(null);
+    this.#finish("closed");
   }
 
   /** Sends a message, or the command or skill it names, and notes it to match its echo. */
   async #send(input: UserInput, delivery: "queue" | "steer"): Promise<void> {
-    const sessionId = this.#sessionId();
+    const sessionId = started(this.info);
     const named = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(input.text);
     const command = named ? this.#commands.find((entry) => entry.name === named[1]) : undefined;
     const args = named?.[2]?.trim() ?? "";
@@ -429,16 +410,15 @@ export class OpenCodeSession implements HarnessSession {
   }
 
   #receive(event: OcEvent): void {
-    const data = event.data ?? {};
     if (event.type === "form.created") {
-      const form = data["form"] as OcForm;
+      const form = event.data.form;
       if (!this.#family.has(form.sessionID)) return;
       this.#pending.set(form.id, { kind: "form", sessionId: form.sessionID, form });
-      this.#emit({ type: "request.opened", request: formRequest(form) });
+      this.#events.emit({ type: "request.opened", request: formRequest(form) });
       return;
     }
-    const sessionId = typeof data["sessionID"] === "string" ? data["sessionID"] : "";
-    if (event.type === "session.created" && this.#family.has(String(data["parentID"]))) {
+    const sessionId = event.data.sessionID ?? "";
+    if (event.type === "session.created" && this.#family.has(String(event.data.parentID))) {
       this.#family.add(sessionId);
       return;
     }
@@ -446,23 +426,23 @@ export class OpenCodeSession implements HarnessSession {
     const own = sessionId === this.info.threadId;
     switch (event.type) {
       case "permission.asked": {
-        const permission = data as unknown as OcPermission;
-        if (own) this.#emitAll(this.#translator.translate(event));
+        const permission = event.data;
+        if (own) this.#events.emit(...this.#translator.translate(event));
         const call =
           own && permission.source ? this.#translator.tool(permission.source.id) : undefined;
         this.#pending.set(permission.id, { kind: "permission", sessionId });
-        this.#emit({
+        this.#events.emit({
           type: "request.opened",
           request: permissionRequest(permission, call, this.info.cwd),
         });
         return;
       }
       case "permission.replied":
-        this.#resolve(String(data["requestID"]));
+        this.#resolve(event.data.requestID);
         return;
       case "form.replied":
       case "form.cancelled":
-        this.#resolve(String(data["id"]));
+        this.#resolve(event.data.id);
         return;
     }
     // A subagent's own work shows in the call that started it.
@@ -471,30 +451,28 @@ export class OpenCodeSession implements HarnessSession {
       case "session.execution.started":
         if (this.#turnId !== null) return;
         this.#turnId = randomUUID();
-        this.#emit({ type: "turn.started", turnId: this.#turnId });
+        this.#events.emit({ type: "turn.started", turnId: this.#turnId });
         if (this.#interruptWanted) {
           this.#interruptWanted = false;
-          void this.interrupt().catch(() => {});
+          void this.interrupt().catch((error: unknown) =>
+            this.#events.notice("warning", `Interrupt failed: ${errorMessage(error)}`),
+          );
         }
         return;
       case "session.execution.succeeded":
         this.#endTurn("completed", null);
         return;
       case "session.execution.failed":
-        this.#endTurn(
-          "failed",
-          String((data["error"] as { message?: string })?.message ?? "OpenCode failed"),
-        );
+        this.#endTurn("failed", event.data.error?.message ?? "OpenCode failed");
         return;
       case "session.execution.interrupted":
-        if (data["reason"] === "inactivity")
+        if (event.data.reason === "inactivity")
           this.#endTurn("failed", `${LABEL} stopped a turn that went quiet`);
         else this.#endTurn("interrupted", null);
         return;
       case "session.inbox.enqueued": {
-        const item = data["item"] as { type: string; payload?: { text?: string } };
+        const { item, inboxID: id } = event.data;
         if (item.type !== "user") return;
-        const id = String(data["inboxID"]);
         const text = item.payload?.text ?? "";
         this.#inbox.set(id, text);
         if (this.#sent.some((entry) => entry.inboxId === id)) return;
@@ -505,38 +483,36 @@ export class OpenCodeSession implements HarnessSession {
         return;
       }
       case "session.inbox.delivered":
-        this.#delivered(String(data["inboxID"]));
+        this.#delivered(event.data.inboxID);
         return;
       case "session.inbox.cancelled": {
-        const id = String(data["inboxID"]);
+        const id = event.data.inboxID;
         this.#inbox.delete(id);
         this.#sent = this.#sent.filter((entry) => entry.inboxId !== id);
         return;
       }
       case "session.model.selected":
-        this.#applyModel(data["model"] as ModelRef);
-        this.#emitInfo();
+        this.#applyModel(event.data.model);
+        this.#events.info(this.info);
         return;
       case "session.agent.selected": {
-        const agent = String(data["agent"]);
+        const agent = event.data.agent;
         if (agent === this.#agent) return;
         // OpenCode switched by itself, as for a command that names an agent; the rules follow.
         this.#agent = agent;
         const plan = agent === PLAN_AGENT;
         this.info.interactionMode = plan ? "plan" : "default";
-        this.#emitInfo();
+        this.#events.info(this.info);
         this.#applyRules(this.info.runtimeMode, plan).catch((error: unknown) =>
-          this.#emit(
-            this.#translator.notice(
-              "warning",
-              `Could not apply ${this.info.runtimeMode} to agent ${agent}: ${errorMessage(error)}`,
-            ),
+          this.#events.notice(
+            "warning",
+            `Could not apply ${this.info.runtimeMode} to agent ${agent}: ${errorMessage(error)}`,
           ),
         );
         return;
       }
       default:
-        this.#emitAll(this.#translator.translate(event));
+        this.#events.emit(...this.#translator.translate(event));
     }
   }
 
@@ -547,7 +523,7 @@ export class OpenCodeSession implements HarnessSession {
     this.#inbox.delete(inboxId);
     if (sent) this.#sent = this.#sent.filter((entry) => entry !== sent);
     if (!text) return;
-    this.#emit({
+    this.#events.emit({
       type: "item.completed",
       item: {
         kind: "user_message",
@@ -563,37 +539,25 @@ export class OpenCodeSession implements HarnessSession {
     if (turnId === null) return;
     this.#turnId = null;
     this.#interruptWanted = false;
-    this.#emitAll(this.#translator.flush());
+    this.#events.emit(...this.#translator.flush());
     // A request of the session's own still open will not be answered; a
     // subagent's may be, since subagents can work on in the background.
     for (const [id, pending] of this.#pending)
       if (pending.sessionId === this.info.threadId) this.#resolve(id);
     // A command whose entry never came adds nothing to the inbox, so it waits for nothing.
     this.#sent = this.#sent.filter((entry) => entry.text !== null || entry.inboxId !== null);
-    this.#emit({ type: "turn.ended", turnId, status, error });
+    this.#events.emit({ type: "turn.ended", turnId, status, error });
   }
 
   #resolve(requestId: string): void {
-    if (this.#pending.delete(requestId)) this.#emit({ type: "request.resolved", requestId });
+    if (this.#pending.delete(requestId)) this.#events.emit({ type: "request.resolved", requestId });
   }
 
-  #finish(reason: string | null): void {
-    if (this.#finished) return;
-    this.#finished = true;
-    const error = this.#closing ? null : reason;
-    if (this.#turnId !== null) {
-      this.#emitAll(this.#translator.flush());
-      this.#emit({
-        type: "turn.ended",
-        turnId: this.#turnId,
-        status: error ? "failed" : "interrupted",
-        error,
-      });
-      this.#turnId = null;
-    }
+  #finish(reason: string): void {
+    if (this.#events.closed) return;
     this.#pending.clear();
-    this.#emit({ type: "session.closed", error });
-    this.#events.end();
+    this.#events.close(this.#turnId, reason, this.#closing);
+    this.#turnId = null;
     void this.#server?.close();
   }
 
@@ -620,12 +584,7 @@ export class OpenCodeSession implements HarnessSession {
       await this.#request("PUT", `/api/experimental/mcp/${encodeURIComponent(name)}`, {
         config,
       }).catch((error: unknown) =>
-        this.#emit(
-          this.#translator.notice(
-            "warning",
-            `Could not add MCP server ${name}: ${errorMessage(error)}`,
-          ),
-        ),
+        this.#events.notice("warning", `Could not add MCP server ${name}: ${errorMessage(error)}`),
       );
     });
     await Promise.all(added);
@@ -678,7 +637,7 @@ export class OpenCodeSession implements HarnessSession {
     return messages;
   }
 
-  #modelRef(model: OcModel, effort: string | null): ModelRef {
+  #modelRef(model: OcModel, effort: string | null): OcModelRef {
     const variant =
       effort && model.variants.some((entry) => entry.id === effort) ? effort : undefined;
     return { providerID: model.providerID, id: model.id, ...(variant ? { variant } : {}) };
@@ -688,14 +647,14 @@ export class OpenCodeSession implements HarnessSession {
    * The model a thread asks for, with its effort: the named model or the one it
    * runs, or nothing when it asks for neither, so OpenCode keeps its own choice.
    */
-  #requestedModel(model: OcModel | undefined, effort: string | null): ModelRef | undefined {
+  #requestedModel(model: OcModel | undefined, effort: string | null): OcModelRef | undefined {
     if (!model && !effort) return undefined;
     const base =
       model ?? (this.#defaultModel ? findModel(this.#models, this.#defaultModel) : undefined);
     if (!base) return undefined;
     const ref = this.#modelRef(base, effort);
     if (effort && ref.variant !== effort)
-      this.#emit(this.#translator.notice("warning", `${modelName(base)} has no effort ${effort}`));
+      this.#events.notice("warning", `${modelName(base)} has no effort ${effort}`);
     return model || ref.variant ? ref : undefined;
   }
 
@@ -709,7 +668,7 @@ export class OpenCodeSession implements HarnessSession {
 
   /** Puts the rules for a mode on the session, keeping the ones OpenCode added. */
   async #applyRules(mode: RuntimeMode, plan: boolean): Promise<void> {
-    const sessionId = this.#sessionId();
+    const sessionId = started(this.info);
     const current = (await this.#data<OcSession>(`/api/session/${sessionId}`)).permissions ?? [];
     const permissions = mergeRules(
       current,
@@ -719,12 +678,12 @@ export class OpenCodeSession implements HarnessSession {
     await this.#request("PATCH", `/api/session/${sessionId}`, { permissions });
   }
 
-  #fallbackRef(): ModelRef | undefined {
+  #fallbackRef(): OcModelRef | undefined {
     const model = this.#defaultModel ? findModel(this.#models, this.#defaultModel) : undefined;
     return model ? this.#modelRef(model, null) : undefined;
   }
 
-  #applyModel(ref: ModelRef | undefined): void {
+  #applyModel(ref: OcModelRef | undefined): void {
     if (!ref) return;
     this.info.model = modelName(ref);
     this.info.effort = ref.variant && ref.variant !== "default" ? ref.variant : null;
@@ -735,11 +694,6 @@ export class OpenCodeSession implements HarnessSession {
 
   #agentInfo(): OcAgent | undefined {
     return this.#agents.find((agent) => agent.id === this.#agent);
-  }
-
-  #sessionId(): string {
-    if (!this.info.threadId) throw new Error("The session has not started");
-    return this.info.threadId;
   }
 
   /** A request's `data`, which every read answers with. */
@@ -755,25 +709,10 @@ export class OpenCodeSession implements HarnessSession {
     if (!this.#server) return Promise.reject(new Error("The session has not started"));
     return this.#server.request<T>(method, path, body);
   }
-
-  #emit(event: HarnessEvent): void {
-    this.#events.push(event);
-  }
-
-  #emitAll(events: HarnessEvent[]): void {
-    for (const event of events) this.#emit(event);
-  }
-
-  #emitInfo(): void {
-    this.#emit({ type: "session.updated", info: { ...this.info } });
-  }
 }
 
 /** An image as a prompt attachment, inline. */
 function imageFile(path: string): { uri: string; name: string } {
-  const type = IMAGE_TYPES[extname(path).toLowerCase()] ?? "image/png";
-  return {
-    uri: `data:${type};base64,${readFileSync(path).toString("base64")}`,
-    name: basename(path),
-  };
+  const { type, data } = readImage(path);
+  return { uri: `data:${type};base64,${data}`, name: basename(path) };
 }

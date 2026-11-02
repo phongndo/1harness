@@ -121,7 +121,8 @@ export interface ExtensionAPI {
   /**
    * Sees every tool call before it runs, in every permission mode, on harnesses
    * whose sessions have `capabilities.toolChecks`. Codex asks the user once to
-   * trust the hook this needs. Applies to sessions started after it registers.
+   * trust the hook this needs, and blocks a call whose check takes over four
+   * minutes. Applies to sessions started after it registers.
    */
   onToolCall(handler: ToolCallHandler): void;
   /**

@@ -469,14 +469,11 @@ export class ExtensionHost {
   async #filterInput(input: UserInput, context: ExtensionContext): Promise<UserInput | null> {
     let current = input;
     for (const entry of this.#inputs) {
-      try {
-        const result = await entry.handler(current, context);
-        if (result === null) return null;
-        if (result) current = result;
-      } catch (error) {
-        this.#notify("warning", `Extension ${entry.extension} failed: ${errorMessage(error)}`);
-      }
+      const result = await this.#guard(entry.extension, () => entry.handler(current, context));
+      if (result === null) return null;
+      if (result) current = result;
     }
+
     return current;
   }
 

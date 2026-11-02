@@ -417,6 +417,17 @@ describe("toolItem", () => {
     assert.equal(read?.kind === "tool_call" ? read.category : null, "read");
   });
 
+  it("shows an edit before it runs as a diff with its context", () => {
+    const edit = toolItem("e", "Edit", {
+      file_path: "/a.ts",
+      old_string: "one\ntwo\nthree",
+      new_string: "one\n2\nthree",
+    });
+    assert.deepEqual(edit?.kind === "file_change" && edit.changes, [
+      { path: "/a.ts", kind: "update", diff: "@@ -1,3 +1,3 @@\n one\n-two\n+2\n three" },
+    ]);
+  });
+
   it("says what an approval is for", () => {
     assert.deepEqual(toolAction("Bash", { command: "ls" }), {
       type: "command",

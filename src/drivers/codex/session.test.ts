@@ -12,9 +12,11 @@ let codex: string;
 /**
  * A stand-in for `codex app-server`. A turn's text says what it does: "plan"
  * proposes a plan, "hold" keeps running, "slow" is answered late and keeps
- * running, "die" starts a command and exits.
+ * running, "die" starts a command and exits. A review, like "slow", is
+ * answered late and keeps running.
  * Turn IDs name the thread they ran on. A second thread/start, the swap to a
- * thread that runs the tool hook, answers late.
+ * thread that runs the tool hook, answers late. With FAKE_NO_HOOKS set,
+ * listing hooks fails.
  */
 const FAKE = `import { createInterface } from "node:readline";
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
@@ -37,6 +39,10 @@ for await (const line of createInterface({ input: process.stdin })) {
       break;
     }
     case "hooks/list":
+      if (process.env.FAKE_NO_HOOKS) {
+        send({ id: message.id, error: { code: -32603, message: "hooks are off" } });
+        break;
+      }
       reply({ data: [{ hooks: [{ key: "k", source: "sessionFlags", command: hook, trustStatus: "untrusted", currentHash: "h" }] }] });
       break;
     case "turn/start": {
@@ -60,6 +66,14 @@ for await (const line of createInterface({ input: process.stdin })) {
       }
       if (text === "plan") note("item/completed", { item: { type: "plan", id: "plan-1", text: "1. do it" } });
       note("turn/completed", { turn: { ...turn, status: "completed" } });
+      break;
+    }
+    case "review/start": {
+      const turn = { id: "turn-" + ++turns + "-on-" + params.threadId, items: [], status: "inProgress", error: null, startedAt: 1 };
+      setTimeout(() => {
+        reply({ turn });
+        send({ method: "turn/started", params: { threadId: params.threadId, turnId: turn.id, turn } });
+      }, 300);
       break;
     }
     default:
@@ -194,6 +208,62 @@ describe("CodexSession", () => {
         ),
       );
     } finally {
+      await session.close();
+    }
+  });
+
+  it("does not start the plan's implementation while a review is starting", async () => {
+    const session = new CodexSession(config({ model: "gpt", interactionMode: "plan" }));
+    const { events } = collect(session);
+    try {
+      await session.start();
+      await session.startTurn({ text: "plan" });
+      await until(
+        () =>
+          events.some((event) => event.type === "request.opened") &&
+          events.some((event) => event.type === "turn.ended"),
+        "the offer to implement the plan",
+      );
+      const offer = events.find((event) => event.type === "request.opened");
+      assert.ok(offer?.type === "request.opened");
+      // Codex has not answered the review yet when the plan is accepted.
+      const review = session.startTurn({ text: "/review" });
+      await session.respond(offer.request.id, { kind: "approval", optionId: "supervised" });
+      await review;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(events.filter((event) => event.type === "turn.started").length, 2);
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "item.completed" &&
+            event.item.kind === "notice" &&
+            /turn is running/.test(event.item.text),
+        ),
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("warns that tool calls go unchecked when Codex does not list its hooks", async () => {
+    process.env["FAKE_NO_HOOKS"] = "1";
+    const session = new CodexSession(config({ toolPolicy: async () => undefined }));
+    const { events } = collect(session);
+    try {
+      await session.start();
+      await until(
+        () =>
+          events.some(
+            (event) =>
+              event.type === "item.completed" &&
+              event.item.kind === "notice" &&
+              event.item.level === "warning" &&
+              /cannot check this thread's tool calls/.test(event.item.text),
+          ),
+        "the warning",
+      );
+    } finally {
+      delete process.env["FAKE_NO_HOOKS"];
       await session.close();
     }
   });
