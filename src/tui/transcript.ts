@@ -146,9 +146,23 @@ function mediaKey(media: MediaContext | undefined): string {
     : "text";
 }
 
+/**
+ * A streaming reply's rows up to its last blank line between blocks, which
+ * what streams after cannot change, for the next frame to render only the
+ * rest: by the layout they were rendered for.
+ */
+interface Settled {
+  layout: string;
+  text: string;
+  rows: string[];
+  pictures: Shown[];
+  spots: Spot[];
+}
+
 interface Entry {
   block: Block;
   version: number;
+  settled?: Settled | null;
   cache: {
     width: number;
     version: number;
@@ -237,7 +251,10 @@ export class Transcript {
 
   /** Drops every cached row, for a theme change. */
   invalidate(): void {
-    for (const entry of this.#entries) entry.cache = null;
+    for (const entry of this.#entries) {
+      entry.cache = null;
+      entry.settled = null;
+    }
   }
 
   /** Whether any block shows work in progress and needs the blink. */
@@ -336,11 +353,18 @@ export class Transcript {
     }
     const pictures: Shown[] = [];
     const spots: Spot[] = [];
-    const rows = renderBlock(entry.block, {
+    const marking: RenderContext = {
       ...context,
       collect: (shown) => pictures.push(shown),
       mark: (target, start, end) => spots.push({ start, end, target }),
-    });
+    };
+    const rows =
+      entry.block.kind === "assistant"
+        ? replyRows(entry, entry.block.text, marking, `${context.width}\0${details}\0${media}`, {
+            pictures,
+            spots,
+          })
+        : renderBlock(entry.block, marking);
     entry.cache = {
       width: context.width,
       version: entry.version,
@@ -353,6 +377,58 @@ export class Transcript {
     };
     return entry.cache;
   }
+}
+
+/**
+ * A reply's rows, rendering only what came after the rows it had settled at
+ * this layout, while the reply has only grown since; `into` takes the
+ * pictures and spots, as `context` collects and marks them.
+ */
+function replyRows(
+  entry: Entry,
+  text: string,
+  context: RenderContext,
+  layout: string,
+  into: { pictures: Shown[]; spots: Spot[] },
+): string[] {
+  if (text.trim() === "") return [];
+  const known = entry.settled;
+  const base: Settled =
+    known && known.layout === layout && text.startsWith(known.text)
+      ? known
+      : { layout, text: "", rows: [], pictures: [], spots: [] };
+  into.pictures.push(...base.pictures);
+  into.spots.push(...base.spots);
+  const tail = text.slice(base.text.length);
+  const marks: { line: number; rows: number; pictures: number; spots: number }[] = [];
+  const rows = renderMarkdown(tail, context.width, "  ", {
+    ...markdownOptions(context, base.rows.length),
+    settled: (line, at) =>
+      marks.push({ line, rows: at, pictures: into.pictures.length, spots: into.spots.length }),
+  });
+  entry.settled = base;
+  const settle = marks.at(-1);
+  if (settle && settle.rows <= rows.length) {
+    let end = -1;
+    for (let line = 0; line <= settle.line; line++) {
+      end = tail.indexOf("\n", end + 1);
+      if (end === -1) break;
+    }
+    // A line without its newline may yet grow; escapes and carriage returns can reach across lines.
+    const done = end === -1 ? "" : tail.slice(0, end + 1);
+    if (done !== "" && !["\r", "\x1b", "\x9b"].some((char) => done.includes(char)))
+      entry.settled = {
+        layout,
+        text: base.text + done,
+        rows: [...base.rows, ...rows.slice(0, settle.rows)],
+        pictures: into.pictures.slice(0, settle.pictures),
+        spots: into.spots.slice(0, settle.spots),
+      };
+  }
+  if (rows.length > 0) return [...base.rows, ...rows];
+  const all = [...base.rows];
+  while (all.at(-1) === "") all.pop();
+  return all;
 }
 
 function isAnimated(block: Block): boolean {

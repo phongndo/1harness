@@ -71,6 +71,37 @@ describe("Transcript", () => {
     assert.deepEqual(plain(transcript.view(context, 10, 0).rows), ["  final"]);
   });
 
+  it("renders a streaming reply as it would whole, chunk by chunk", () => {
+    const reply = [
+      "# Plan",
+      "Some **bold** text that runs on long enough to wrap past the width of the row.",
+      "```mermaid\nflowchart LR\n  A --> B\n\n  B --> C\n```",
+      "- one\n- two",
+      "| a | b |\n| - | - |\n| 1 | 2 |",
+      "```ts\nconst a = 1;\n\nconst b = 2;\n```",
+      "$$\nx^2\n$$",
+      "Done.\r\n\r\nAfter a carriage return.",
+    ].join("\n\n");
+    const streaming = { ...context, figure: () => ({ rows: ["<figure>", ""] }) };
+    const transcript = new Transcript();
+    const block = transcript.add({ kind: "assistant", text: "" });
+    for (let at = 0; at < reply.length; at += 7) {
+      block.text = reply.slice(0, at + 7);
+      transcript.touch(block);
+      const whole = new Transcript();
+      whole.add({ kind: "assistant", text: block.text });
+      assert.deepEqual(
+        transcript.view(streaming, 200, 0),
+        whole.view(streaming, 200, 0),
+        JSON.stringify(block.text),
+      );
+    }
+    // Text that does not only grow, as a reply replaced when it completes, renders afresh.
+    block.text = "Short.";
+    transcript.touch(block);
+    assert.deepEqual(plain(transcript.view(streaming, 200, 0).rows), ["  Short."]);
+  });
+
   it("skips empty blocks without leaving gaps", () => {
     const transcript = new Transcript();
     transcript.add({ kind: "user", text: "hi" });

@@ -370,6 +370,12 @@ export interface MarkdownOptions {
   image?: (src: string, alt: string, columns: number) => string[] | null;
   /** Told where each code block, figure, and image is, so a click on one can copy or enlarge it. */
   region?: (region: MarkdownRegion) => void;
+  /**
+   * Told of each blank line between blocks, by its index among the lines and
+   * the rows before what follows it: nothing after it changes what came
+   * before, so the text after it renders alone the same.
+   */
+  settled?: (line: number, rows: number) => void;
 }
 
 /** A display's delimiters: `$$…$$` and `\[…\]`. */
@@ -555,6 +561,7 @@ export function renderMarkdown(
     if (raw.trim() === "") {
       if (!blank) rows.push("");
       blank = true;
+      options.settled?.(index, rows.length);
       continue;
     }
     // Closing #s come after a space, so `C#` keeps its own.
