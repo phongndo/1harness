@@ -194,6 +194,9 @@ export class CodexSession implements HarnessSession {
     this.#rpc = rpc;
     rpc.onNotification((method, params) => this.#notification(method, params));
     rpc.onRequest((method, params, id) => this.#serverRequest(method, params, id));
+    rpc.onError((error) =>
+      this.#notice("error", `1harness could not read a message from Codex: ${errorMessage(error)}`),
+    );
     void rpc.exited.then((reason) => this.#closed(reason));
 
     const initialized = await rpc.request<{ userAgent: string }>(

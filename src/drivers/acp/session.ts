@@ -162,6 +162,12 @@ export class AcpSession implements HarnessSession {
     this.#rpc = rpc;
     rpc.onNotification((method, params) => this.#notification(method, params));
     rpc.onRequest((method, params) => this.#serverRequest(method, params));
+    rpc.onError((error) =>
+      this.#notice(
+        "error",
+        `1harness could not read a message from ${this.#spec.label}: ${errorMessage(error)}`,
+      ),
+    );
     void rpc.exited.then((reason) => this.#closed(reason));
 
     const init = await rpc.request<{
