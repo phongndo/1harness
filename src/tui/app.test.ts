@@ -208,3 +208,50 @@ describe("App", () => {
     assert.doesNotMatch(session.terminal.raw, /Resume with/);
   });
 });
+
+describe("App commands", () => {
+  it("narrows the command menu to what is typed after the slash", async () => {
+    const session = await start();
+    await session.sees("Ask anything");
+    await session.type("/");
+    const all = await session.sees(/Commands \d+/);
+    assert.match(all, /\/new\s+start a new thread/);
+    assert.match(all, /\/quit\s+exit/);
+    await session.type("he");
+    const narrowed = await session.sees("Commands 1");
+    assert.match(narrowed, /\/help\s+show commands and keys/);
+    assert.doesNotMatch(narrowed, /\/new/);
+  });
+
+  it("lists commands with their arguments, and keys, in /help", async () => {
+    const session = await start();
+    // Some commands are listed only once the thread's session runs.
+    await session.sees("supervised · scripted · big");
+    await session.type("/help\r");
+    const help = await session.sees("tab category");
+    assert.match(help, /\[All\]\s+Threads\s+Model\s+Permissions\s+Tools\s+General\s+Keys/);
+    assert.match(help, /\/rename <title>\s+rename this thread/);
+    // Esc closes the panel and leaves the composer as it was.
+    await session.type("\x1b");
+    assert.doesNotMatch(session.terminal.text(), /tab category/);
+    assert.match(session.terminal.text(), /┃ Ask anything/);
+  });
+
+  it("shows the session in /status and switches modes from /mode", async () => {
+    const session = await start({ prompt: "hello" });
+    await session.sees("Done with hello");
+    await session.type("/status\r");
+    const status = await session.sees(/Status\n/);
+    assert.match(status, /Harness\s+Scripted/);
+    assert.match(status, /Session\s+native-\d+/);
+    assert.match(status, /Model\s+big \(default\)/);
+    assert.match(status, /Server\s+in this process, keeping nothing/);
+    await session.type("\x1b");
+    await session.type("/mode\r");
+    const modes = await session.sees("Permission modes 2");
+    assert.match(modes, /supervised\s+read freely; ask before edits and commands\s+current/);
+    await session.type("\x1b[B");
+    await session.type("\r");
+    await session.sees("Mode: full-access");
+  });
+});
