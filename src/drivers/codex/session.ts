@@ -163,6 +163,8 @@ export class CodexSession implements HarnessSession {
   #hooks: HookServer | null = null;
   #threadParams: Record<string, unknown> | null = null;
   #turnsStarted = false;
+  /** turn/start requests Codex has not answered, whose turn has no ID yet. */
+  #turnsStarting = 0;
   /** The swap to a thread that runs the tool hook, while Codex starts it. */
   #swap: Promise<void> | null = null;
 
@@ -312,6 +314,15 @@ export class CodexSession implements HarnessSession {
   /** Starts a turn; Codex echoes `clientId` on the user message, so the thread can match it. */
   async #startTurn(input: unknown[], clientId: string | null): Promise<void> {
     this.#turnsStarted = true;
+    this.#turnsStarting++;
+    try {
+      await this.#turnStart(input, clientId);
+    } finally {
+      this.#turnsStarting--;
+    }
+  }
+
+  async #turnStart(input: unknown[], clientId: string | null): Promise<void> {
     await this.#swap;
     const policy = codexRuntimePolicy(this.info.runtimeMode, this.#sandbox);
     this.#interruptRequested = false;
@@ -849,7 +860,7 @@ export class CodexSession implements HarnessSession {
   /** Leaves plan mode in the chosen runtime mode and starts the implementation turn. */
   async #implementPlan(mode: RuntimeMode): Promise<void> {
     // This turn starts outside the thread's queue, so it must not race one the queue started.
-    if (this.#turnId !== null)
+    if (this.#turnId !== null || this.#turnsStarting > 0)
       throw new Error(`A turn is running; send "${IMPLEMENT_PLAN}" once it ends`);
     if (mode !== this.info.runtimeMode) await this.setRuntimeMode(mode);
     this.info.interactionMode = "default";

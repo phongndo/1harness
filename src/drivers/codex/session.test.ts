@@ -11,7 +11,8 @@ let codex: string;
 
 /**
  * A stand-in for `codex app-server`. A turn's text says what it does: "plan"
- * proposes a plan, "hold" keeps running, "die" starts a command and exits.
+ * proposes a plan, "hold" keeps running, "slow" is answered late and keeps
+ * running, "die" starts a command and exits.
  * Turn IDs name the thread they ran on. A second thread/start, the swap to a
  * thread that runs the tool hook, answers late.
  */
@@ -41,8 +42,15 @@ for await (const line of createInterface({ input: process.stdin })) {
     case "turn/start": {
       const text = params.input?.[0]?.text ?? "";
       const turn = { id: "turn-" + ++turns + "-on-" + params.threadId, items: [], status: "inProgress", error: null, startedAt: 1 };
-      reply({ turn });
       const note = (method, extra) => send({ method, params: { threadId: params.threadId, turnId: turn.id, ...extra } });
+      if (text === "slow") {
+        setTimeout(() => {
+          reply({ turn });
+          note("turn/started", { turn });
+        }, 300);
+        break;
+      }
+      reply({ turn });
       note("turn/started", { turn });
       if (text === "hold") break;
       if (text === "die") {
@@ -152,6 +160,39 @@ describe("CodexSession", () => {
       assert.equal(session.info.threadId, "thread-2");
       const started = events.find((event) => event.type === "turn.started");
       assert.equal(started?.type === "turn.started" && started.turnId, "turn-1-on-thread-2");
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("does not start the plan's implementation while another turn is starting", async () => {
+    const session = new CodexSession(config({ model: "gpt", interactionMode: "plan" }));
+    const { events } = collect(session);
+    try {
+      await session.start();
+      await session.startTurn({ text: "plan" });
+      await until(
+        () =>
+          events.some((event) => event.type === "request.opened") &&
+          events.some((event) => event.type === "turn.ended"),
+        "the offer to implement the plan",
+      );
+      const offer = events.find((event) => event.type === "request.opened");
+      assert.ok(offer?.type === "request.opened");
+      // Codex has not answered this one yet when the plan is accepted.
+      const slow = session.startTurn({ text: "slow" });
+      await session.respond(offer.request.id, { kind: "approval", optionId: "supervised" });
+      await slow;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(events.filter((event) => event.type === "turn.started").length, 2);
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "item.completed" &&
+            event.item.kind === "notice" &&
+            /turn is running/.test(event.item.text),
+        ),
+      );
     } finally {
       await session.close();
     }
