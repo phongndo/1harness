@@ -3,7 +3,13 @@ import { stripVTControlCharacters } from "node:util";
 import { describe, it } from "node:test";
 import type { Key } from "./input.ts";
 import { Menu, entry } from "./menu.ts";
-import { ChoicePrompt, type ChoiceResult } from "./prompt.ts";
+import {
+  ChoicePrompt,
+  QuestionPrompt,
+  type ChoiceConfig,
+  type ChoiceResult,
+  type QuestionsResult,
+} from "./prompt.ts";
 import { visibleWidth } from "./text.ts";
 
 /** A key as the decoder reports it: `ctrl+d`, a typed character such as `G`, or a name such as `down`. */
@@ -283,14 +289,40 @@ describe("ChoicePrompt edge cases", () => {
     assert.deepEqual(result, { kind: "other", text: "first second", indexes: [] });
   });
 
-  it("moves up on shift+tab", () => {
+  it("answers with a comment written on the selected option with tab", () => {
     let result: ChoiceResult | null = null;
-    const asked = threeWay({}, (chosen) => {
+    const asked = threeWay({ commentable: (index) => index === 1 }, (chosen) => {
       result = chosen;
     });
-    asked.key({ name: "tab", text: "", ctrl: false, meta: false, shift: true });
+    asked.key(key("tab"));
+    assert.ok(!asked.typing, "the first option takes no comment");
+    asked.key(key("down"));
+    for (const spec of ["tab", "n", "o", "t", " ", "t", "h", "i", "s"]) asked.key(key(spec));
+    assert.ok(asked.typing);
+    const shown = asked
+      .render(80)
+      .rows.map((row) => stripVTControlCharacters(row))
+      .join("\n");
+    assert.match(shown, /2 {2}B\n {5}↳ not this/);
+    assert.match(shown, /enter confirm with comment/);
     asked.key(key("return"));
-    assert.deepEqual(result, { kind: "options", indexes: [2] });
+    assert.deepEqual(result, {
+      kind: "options",
+      indexes: [1],
+      comment: { index: 1, text: "not this" },
+    });
+  });
+
+  it("keeps a multi-select's comment, ticking its option, until the answer is confirmed", () => {
+    let result: ChoiceResult | null = null;
+    const asked = threeWay({ multiSelect: true, commentable: () => true }, (chosen) => {
+      result = chosen;
+    });
+    for (const spec of ["down", "down", "tab", "x", "return"]) asked.key(key(spec));
+    assert.equal(result, null, "a comment alone answers nothing");
+    // Esc leaves a comment being changed as it was.
+    for (const spec of ["tab", "y", "escape", "return"]) asked.key(key(spec));
+    assert.deepEqual(result, { kind: "options", indexes: [2], comment: { index: 2, text: "x" } });
   });
 });
 
@@ -347,5 +379,78 @@ describe("Menu clicks", () => {
     assert.equal(picker.entryAt(at("note")), false, "an informational row is not chosen");
     assert.equal(picker.entryAt(0), false, "the rule above the entries");
     assert.equal(picker.selected()?.label, "gamma");
+  });
+});
+
+/** A question of `labels` for a QuestionPrompt, named by its `tag`. */
+const question = (tag: string, labels: string[], multiSelect = false): ChoiceConfig => ({
+  header: "Question",
+  tag,
+  title: `Which ${tag}?`,
+  detail: [],
+  options: labels.map((label) => ({ label, description: "" })),
+  multiSelect,
+  allowOther: false,
+  secret: false,
+  initial: 0,
+  commentable: () => true,
+});
+
+/** A prompt's rows as plain text. */
+const text = (prompt: QuestionPrompt) =>
+  prompt
+    .render(80)
+    .rows.map((row) => stripVTControlCharacters(row))
+    .join("\n");
+
+/** Two questions, a single choice and then a multiple one. */
+const asked = (onDone: (result: QuestionsResult) => void) =>
+  new QuestionPrompt(
+    [question("Theme", ["Dark", "Light"]), question("Features", ["Math", "Images"], true)],
+    onDone,
+  );
+
+describe("QuestionPrompt", () => {
+  it("moves between questions, keeps each answer, and sends them once all are answered", () => {
+    let result: QuestionsResult | null = null;
+    const prompt = asked((chosen) => (result = chosen));
+    assert.match(text(prompt), /Question 1 of 2 +\[Theme\] +Features/);
+    prompt.key(key("2"));
+    assert.equal(result, null, "waits for the other question");
+    assert.match(text(prompt), /Question 2 of 2 +✓ Theme +\[Features\]/);
+    // Back to the first, which is changed; the second still has no answer, so on to it.
+    prompt.key(key("left"));
+    assert.match(text(prompt), /Which Theme\?/);
+    prompt.key(key("1"));
+    assert.match(text(prompt), /Which Features\?/);
+    for (const spec of ["1", "2", "return"]) prompt.key(key(spec));
+    assert.deepEqual(result, {
+      kind: "answers",
+      answers: [
+        { indexes: [0], text: null, comment: null },
+        { indexes: [0, 1], text: null, comment: null },
+      ],
+    });
+  });
+
+  it("keeps each question's comment with its answer", () => {
+    let result: QuestionsResult | null = null;
+    const prompt = asked((chosen) => (result = chosen));
+    for (const spec of ["down", "tab", "d", "i", "m", "return"]) prompt.key(key(spec));
+    assert.match(text(prompt), /Question 2 of 2/, "a comment on one choice answers it");
+    for (const spec of ["1", "return"]) prompt.key(key(spec));
+    assert.deepEqual(result, {
+      kind: "answers",
+      answers: [
+        { indexes: [1], text: null, comment: { index: 1, text: "dim" } },
+        { indexes: [0], text: null, comment: null },
+      ],
+    });
+  });
+
+  it("cancels every question on esc", () => {
+    let result: QuestionsResult | null = null;
+    asked((chosen) => (result = chosen)).key(key("escape"));
+    assert.deepEqual(result, { kind: "cancel" });
   });
 });

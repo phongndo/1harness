@@ -33,7 +33,7 @@ export interface MenuConfig {
 
 export type MenuResult = { kind: "choose"; index: number } | { kind: "close" } | null;
 
-const HINT_GAP = "     ";
+const HINT_GAP = "   ";
 /** Ctrl keys that move by pages, as in vim. */
 const PAGE_KEYS: Record<string, number> = { d: 0.5, u: -0.5, f: 1, b: -1 };
 /** Labels get at least this many columns before details take the rest. */
@@ -55,7 +55,7 @@ function most(sizes: readonly number[]): number {
  * The category tabs after the title: all of them when they fit, otherwise a
  * run around the selected one, with `‹` and `›` where more are.
  */
-function tabRow(tabs: readonly string[], current: number, room: number): string {
+export function tabRow(tabs: readonly string[], current: number, room: number): string {
   const paint = (index: number) =>
     index === current
       ? style.bold(style.strong(`[${tabs[index]}]`))
@@ -100,7 +100,11 @@ export function rule(width: number): string {
 }
 
 export function hints(parts: readonly string[], width: number): string {
-  return truncate(style.muted(parts.join(HINT_GAP)), width);
+  // Too wide, the first hints give way, the most familiar keys such as ↑↓,
+  // so the line keeps what ends it: how to confirm and how to leave.
+  let shown = [...parts];
+  while (shown.length > 2 && visibleWidth(shown.join(HINT_GAP)) > width) shown = shown.slice(1);
+  return truncate(style.muted(shown.join(HINT_GAP)), width);
 }
 
 /**
@@ -444,7 +448,7 @@ export function infoPanel(
   width: number,
 ): string[] {
   const labelWidth = Math.max(...rows.map(([label]) => visibleWidth(label))) + 6;
-  const lines = [rule(width), truncate(style.bold(style.strong(title)), width)];
+  const lines = [rule(width), truncate(style.bold(style.strong(title)), width), ""];
   for (const [label, value] of rows) {
     const indent = " ".repeat(labelWidth);
     const wrapped = value

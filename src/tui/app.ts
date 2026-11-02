@@ -44,7 +44,13 @@ import { agentRowOf, agentStatus, harnessLabel, treePrefixes } from "./agents.ts
 import { Editor, applyEditingKey } from "./editor.ts";
 import { InputDecoder, type InputEvent, type Key } from "./input.ts";
 import { Menu, entry, infoPanel, lineStep, type MenuEntry } from "./menu.ts";
-import { ChoicePrompt, type ChoiceConfig, type ChoiceResult } from "./prompt.ts";
+import {
+  ChoicePrompt,
+  QuestionPrompt,
+  type ChoiceConfig,
+  type ChoiceResult,
+  type QuestionsResult,
+} from "./prompt.ts";
 import { Screen, type CursorPosition } from "./screen.ts";
 import {
   STATUS_QUERY,
@@ -422,7 +428,7 @@ export class App {
   #defaultModels = new Map<string, string | null>();
 
   /** The prompt on screen, and the request it answers; request IDs are only unique per thread. */
-  #prompt: { prompt: ChoicePrompt; asking: OpenRequest } | null = null;
+  #prompt: { prompt: ChoicePrompt | QuestionPrompt; asking: OpenRequest } | null = null;
   /** Open requests from every thread, oldest first; background ones say whose they are. */
   #requests: OpenRequest[] = [];
   #panel:
@@ -2463,70 +2469,93 @@ export class App {
         request.options.findIndex((option) => option.id === request.defaultOptionId),
       );
       const command = /^\$ /m.test(request.detail);
+      const config: ChoiceConfig = {
+        header: "Permission needed",
+        tag: command ? "Command" : "",
+        title: request.title,
+        detail: request.detail ? [request.detail] : [],
+        options: request.options.map((option) => ({ label: option.label, description: "" })),
+        multiSelect: false,
+        allowOther: false,
+        secret: false,
+        initial,
+        // A refusal can say why, which the agent hears and goes on with.
+        commentable: (index) => request.options[index]?.effect === "deny",
+      };
       this.#showPrompt(
         next,
-        {
-          header: "Permission needed",
-          tag: command ? "Command" : "",
-          title: request.title,
-          detail: request.detail ? [request.detail] : [],
-          options: request.options.map((option) => ({ label: option.label, description: "" })),
-          multiSelect: false,
-          allowOther: false,
-          secret: false,
-          initial,
-        },
+        (done: (result: ChoiceResult) => void) => new ChoicePrompt(config, done),
         (result) => {
           const option =
             result.kind === "options" ? request.options[result.indexes[0] ?? 0] : undefined;
-          respond(option ? { kind: "approval", optionId: option.id } : { kind: "cancel" });
+          const reason = result.kind === "options" ? result.comment?.text : undefined;
+          respond(
+            !option
+              ? { kind: "cancel" }
+              : option.effect === "deny" && reason
+                ? { kind: "decline", reason }
+                : { kind: "approval", optionId: option.id },
+          );
         },
       );
       return;
     }
-    const answers: Record<string, string[]> = {};
-    const ask = (index: number) => {
-      const question = request.questions[index];
-      if (!question) {
+    // All of a request's questions in one prompt, to move between and annotate.
+    const configs: ChoiceConfig[] = request.questions.map((question) => ({
+      header: "Question",
+      tag: question.header,
+      title: question.question,
+      detail: [],
+      options: question.options,
+      multiSelect: question.multiSelect,
+      allowOther: question.allowOther,
+      secret: question.secret,
+      initial: 0,
+      commentable: () => true,
+    }));
+    this.#showPrompt(
+      next,
+      (done: (result: QuestionsResult) => void) => new QuestionPrompt(configs, done),
+      (result) => {
+        if (result.kind === "cancel") {
+          respond({ kind: "cancel" });
+          return;
+        }
+        const answers: Record<string, string[]> = {};
+        request.questions.forEach((question, index) => {
+          const answer = result.answers[index];
+          if (!answer) return;
+          // A comment goes beside the answer, as one more of its values, saying
+          // which option it is on where there could be more than one.
+          const { comment } = answer;
+          const on = question.options[comment?.index ?? -1]?.label;
+          answers[question.id] = [
+            ...answer.indexes.map((choice) => question.options[choice]?.label ?? ""),
+            ...(answer.text !== null ? [answer.text] : []),
+            ...(comment
+              ? [
+                  question.multiSelect && on
+                    ? `comment on ${on}: ${comment.text}`
+                    : `comment: ${comment.text}`,
+                ]
+              : []),
+          ];
+        });
         respond({ kind: "question", answers });
-        return;
-      }
-      this.#showPrompt(
-        next,
-        {
-          header: "Question",
-          tag: question.header,
-          title: question.question,
-          detail: [],
-          options: question.options,
-          multiSelect: question.multiSelect,
-          allowOther: question.allowOther,
-          secret: question.secret,
-          initial: 0,
-        },
-        (result) => {
-          if (result.kind === "cancel") {
-            respond({ kind: "cancel" });
-            return;
-          }
-          const ticked = result.indexes.map((choice) => question.options[choice]?.label ?? "");
-          answers[question.id] = result.kind === "other" ? [...ticked, result.text] : ticked;
-          ask(index + 1);
-        },
-      );
-    };
-    ask(0);
+      },
+    );
   }
 
-  #showPrompt(
+  /** Shows the prompt `make` builds, which calls `onDone` with its answer. */
+  #showPrompt<R>(
     asking: OpenRequest,
-    config: ChoiceConfig,
-    onDone: (result: ChoiceResult) => void,
+    make: (done: (result: R) => void) => ChoicePrompt | QuestionPrompt,
+    onDone: (result: R) => void,
   ): void {
-    const prompt = new ChoicePrompt(config, (result) => {
+    const prompt = make((result) => {
       if (this.#prompt?.prompt === prompt) this.#prompt = null;
       onDone(result);
-      // The prompt that follows an answer, such as a request's next question, takes keys at once.
+      // The prompt that follows an answer, such as the next request's, takes keys at once.
       this.#strayTyping = false;
       this.#schedule();
     });
@@ -3852,11 +3881,12 @@ export class App {
     let cursor: CursorPosition | null = null;
     let list: { menu: Menu; row: number } | undefined;
     if (this.#prompt) {
-      // The rows the footer has left, under the queue and the attention line.
-      const rendered = this.#prompt.prompt.render(width, height - rows.length);
+      // The rows the footer has left, under the queue and the attention line,
+      // less the status line, which keeps the bottom row under a prompt too.
+      const rendered = this.#prompt.prompt.render(width, height - rows.length - 2);
       if (rendered.cursor)
         cursor = { row: rows.length + rendered.cursor.row, column: rendered.cursor.column };
-      rows.push(...rendered.rows);
+      rows.push(...rendered.rows, "", this.#statusLine(width));
     } else {
       const limit = Math.max(1, Math.min(10, Math.floor(height / 3)));
       const layout = this.#editor.layout(`${style.strong("┃")} `, width);
