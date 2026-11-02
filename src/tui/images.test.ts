@@ -2,7 +2,15 @@ import assert from "node:assert/strict";
 import { deflateSync } from "node:zlib";
 import { describe, it } from "node:test";
 import { stripVTControlCharacters } from "node:util";
-import { fit, picture, placeVirtually, placeholderRow, pngSize, transmit } from "./images.ts";
+import {
+  fit,
+  picture,
+  pictureLater,
+  placeVirtually,
+  placeholderRow,
+  pngSize,
+  transmit,
+} from "./images.ts";
 import { InputDecoder } from "./input.ts";
 import { Screen } from "./screen.ts";
 import { visibleWidth } from "./text.ts";
@@ -35,6 +43,19 @@ export function solidPng(width: number, height: number): Uint8Array {
 const media = { graphics: true, cell: { width: 8, height: 16 }, maxRows: 20 };
 
 describe("images", () => {
+  it("draws a picture laid out ahead only once it is read, and once", () => {
+    let drawn = 0;
+    const later = pictureLater(40, 30, () => {
+      drawn++;
+      return solidPng(40, 30);
+    });
+    assert.equal(drawn, 0);
+    assert.notEqual(later.id, picture(solidPng(1, 1))?.id);
+    assert.ok(transmit(later).startsWith("\x1b_Ga=t"));
+    assert.equal(later.data, Buffer.from(solidPng(40, 30)).toString("base64"));
+    assert.equal(drawn, 1);
+  });
+
   it("reads a PNG's size and turns anything else away", () => {
     assert.deepEqual(pngSize(solidPng(40, 30)), { width: 40, height: 30 });
     assert.equal(picture(Buffer.from("GIF89a not a png at all")), null);

@@ -1,8 +1,8 @@
 import { renderMermaidASCII } from "beautiful-mermaid";
 import { render as renderMermaid } from "pele";
 import type { FigureRenderer } from "./figures.ts";
-import { picture, type CellSize, type Picture } from "./images.ts";
-import { figureFont, loadResvg, onCells, rasterize, svgSize } from "./svg.ts";
+import { pictureLater, type CellSize, type Picture } from "./images.ts";
+import { figureFont, loadResvg, onCells, rasterize, readable, svgSize } from "./svg.ts";
 
 // Mermaid diagrams as pictures: Pele lays a diagram out as SVG, resvg turns
 // it into a PNG, and the transcript shows it as an image. A terminal without
@@ -164,13 +164,16 @@ export class Diagrams implements FigureRenderer {
     const key = `${light ? "light" : "dark"}\0${drawnWidth}x${drawnHeight}\0${cell.width}x${cell.height}\0${source}`;
     const known = this.#pictures.get(key);
     if (known !== undefined) return known;
-    let drawn: Picture | null = null;
-    try {
-      const canvas = onCells(layout.svg, drawnWidth, drawnHeight, cell);
-      drawn = picture(rasterize(canvas, figureFont()));
-    } catch {
-      // Text with no font to draw it in.
-    }
+    const canvas = onCells(layout.svg, drawnWidth, drawnHeight, cell);
+    const size = svgSize(canvas);
+    // Rasterized once sent, so a resize does not draw every diagram off screen again.
+    const drawn = pictureLater(size.width, size.height, () => {
+      try {
+        return rasterize(canvas, figureFont());
+      } catch {
+        return new Uint8Array();
+      }
+    });
     remember(this.#pictures, key, drawn);
     return drawn;
   }
@@ -184,7 +187,7 @@ export class Diagrams implements FigureRenderer {
     try {
       const svg = renderMermaid(source).svg;
       const filled = fillVariables(floating(svg), THEMES[light ? "light" : "dark"]);
-      layout = { svg: filled, ...svgSize(svg) };
+      if (readable(filled, figureFont())) layout = { svg: filled, ...svgSize(svg) };
     } catch {
       // A diagram Pele cannot read.
     }

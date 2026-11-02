@@ -65,6 +65,26 @@ export function picture(bytes: Uint8Array): Picture | null {
   };
 }
 
+/**
+ * A picture `width` by `height` pixels whose PNG `draw` makes when it is first
+ * read, as when it is sent: one laid out but never on screen costs nothing.
+ */
+export function pictureLater(width: number, height: number, draw: () => Uint8Array): Picture {
+  let data: string | undefined;
+  return {
+    id: nextId++,
+    get data() {
+      data ??= Buffer.from(draw()).toString("base64");
+      return data;
+    },
+    set data(value) {
+      data = value;
+    },
+    pixelWidth: width,
+    pixelHeight: height,
+  };
+}
+
 /** The most rows an image takes on a screen of `height` rows. */
 export function maxImageRows(height: number): number {
   return Math.max(4, Math.floor(height * SCREEN_SHARE));
