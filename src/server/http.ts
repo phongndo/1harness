@@ -124,6 +124,14 @@ export class HostServer {
     authorize: Authorizer,
   ): Promise<void> {
     this.#options.onActivity?.();
+    // Only browsers send Origin, and no web page may drive the host: one the owner
+    // opens would otherwise act as them on any listener their browser can reach.
+    if (request.headers.origin !== undefined) {
+      send(response, 403, {
+        error: { code: "forbidden", message: "1harness does not answer web pages" },
+      });
+      return;
+    }
     const decision = await authorize(request);
     if ("refused" in decision) {
       send(response, 403, { error: { code: "forbidden", message: decision.refused } });

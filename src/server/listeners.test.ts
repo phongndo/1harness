@@ -54,6 +54,19 @@ function tailscale(callers: Record<string, string>): TailscaleRunner {
   };
 }
 
+/** The status of a hello sent to a local port with these headers. */
+function helloStatus(port: number | undefined, headers: Record<string, string>): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    const outgoing = request({ host: "127.0.0.1", port, path: "/v1/hello", headers });
+    outgoing.on("error", reject);
+    outgoing.on("response", (response) => {
+      response.resume();
+      resolve(response.statusCode ?? 0);
+    });
+    outgoing.end();
+  });
+}
+
 describe("listeners", () => {
   it("lets the node's owner in on the tailnet, and names them", async () => {
     start();
@@ -82,6 +95,28 @@ describe("listeners", () => {
       (await serverHello({ url: `http://127.0.0.1:${open.ports[0]}` })).identity,
       "friend@example.com",
     );
+  });
+
+  it("turns away web pages, and names other than the listener's own", async () => {
+    start();
+    const tailnet = await listen(server, "tailnet://127.0.0.1:0", {
+      tailscale: tailscale({ "127.0.0.1": "me@example.com" }),
+    });
+    const tcp = await listen(server, "tcp://127.0.0.1:0", { allowAnonymous: true });
+    // A page whose name the attacker points at this machine reaches it under that name.
+    for (const port of [tailnet.ports[0], tcp.ports[0]]) {
+      assert.equal(await helloStatus(port, { Host: `127.0.0.1:${port}` }), 200);
+      assert.equal(await helloStatus(port, { Host: `localhost:${port}` }), 200);
+      assert.equal(await helloStatus(port, { Host: `evil.example:${port}` }), 403);
+      assert.equal(
+        await helloStatus(port, { Host: `127.0.0.1:${port}`, Origin: "http://evil.example" }),
+        403,
+      );
+    }
+    const port = tailnet.ports[0];
+    assert.equal(await helloStatus(port, { Host: `box.tailnet.ts.net:${port}` }), 200);
+    assert.equal(await helloStatus(port, { Host: `box:${port}` }), 200);
+    assert.equal(await helloStatus(tcp.ports[0], { Host: `box:${tcp.ports[0]}` }), 403);
   });
 
   it("takes the caller from Tailscale Serve's headers on its socket", async () => {
