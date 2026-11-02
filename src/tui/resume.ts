@@ -10,7 +10,9 @@ import { pad, plainText, spread, truncate, visibleWidth } from "./text.ts";
 // pickers are: a search line, then a thread a row, when it last moved at the
 // left, what it is doing, and what it runs on at the right, with its folder
 // when every folder's threads show. This folder's threads come first; tab
-// shows every folder's. The agents a thread started are indented under it.
+// shows every folder's, then the archived ones. The agents a thread started
+// are indented under it. ctrl+r renames the selected thread, ctrl+a archives
+// it or brings it back.
 
 export interface ResumeEntry {
   id: string;
@@ -24,6 +26,8 @@ export interface ResumeEntry {
   depth: number;
   /** A status dot for a thread at work or waiting on you; empty otherwise. */
   dot: string;
+  /** Moved out of the lists with ctrl+a, so it shows only among the archived. */
+  archived?: boolean;
 }
 
 /** A stored thread's entry, as the host lists it. */
@@ -39,7 +43,22 @@ export function listedEntry(thread: ThreadListing): ResumeEntry {
   };
 }
 
-export type ResumeResult = { kind: "choose"; id: string } | { kind: "close" } | null;
+export type ResumeResult =
+  | { kind: "choose"; id: string }
+  | { kind: "close" }
+  /** A thread renamed, or archived or brought back; the list stays open. */
+  | { kind: "rename"; id: string; title: string }
+  | { kind: "archive"; id: string; archived: boolean }
+  | null;
+
+/** Which threads show: this folder's, every folder's, or the archived ones. */
+type Scope = "folder" | "all" | "archived";
+
+const SCOPES: { scope: Scope; label: string }[] = [
+  { scope: "folder", label: "This folder" },
+  { scope: "all", label: "All" },
+  { scope: "archived", label: "Archived" },
+];
 
 /** The columns the age takes at the left: `yesterday`, the longest, and a gap. */
 const AGE_WIDTH = 11;
@@ -76,9 +95,10 @@ export class ResumeView {
   #entries: ResumeEntry[];
   #cwd: string;
   #home: string;
-  /** Whether every folder's threads show, rather than this folder's. */
-  #all: boolean;
+  #scope: Scope;
   #query = "";
+  /** The title being written for the selected thread, while ctrl+r renames it. */
+  #renaming: { id: string; text: string } | null = null;
   #index = 0;
   /** The first entry in view, kept so the selection stays in it. */
   #top = 0;
@@ -93,7 +113,8 @@ export class ResumeView {
     this.#cwd = options.cwd;
     this.#home = options.home ?? "";
     // This folder's threads, unless it has none, or every folder's were asked for.
-    this.#all = options.all ?? !entries.some((entry) => entry.cwd === options.cwd);
+    const here = entries.some((entry) => !entry.archived && entry.cwd === options.cwd);
+    this.#scope = (options.all ?? !here) ? "all" : "folder";
     this.#index = Math.max(
       0,
       this.#visible().findIndex((entry) => entry.id === options.initial),
@@ -107,7 +128,11 @@ export class ResumeView {
     const scoped: ResumeEntry[] = [];
     let inScope = false;
     for (const entry of this.#entries) {
-      if (entry.depth === 0) inScope = this.#all || entry.cwd === this.#cwd;
+      if (entry.depth === 0)
+        inScope =
+          this.#scope === "archived"
+            ? entry.archived === true
+            : !entry.archived && (this.#scope === "all" || entry.cwd === this.#cwd);
       if (inScope) scoped.push(entry);
     }
     if (!query) return scoped;
@@ -128,9 +153,11 @@ export class ResumeView {
     return this.#query;
   }
 
-  /** Text pasted into the list searches it, as typing does. */
+  /** Text pasted into the list searches it, or goes into a title being written. */
   paste(text: string): void {
-    this.#setQuery(this.#query + text.replace(/\s+/g, " "));
+    const line = text.replace(/\s+/g, " ");
+    if (this.#renaming) this.#renaming.text += line;
+    else this.#setQuery(this.#query + line);
   }
 
   #setQuery(query: string): void {
@@ -141,10 +168,46 @@ export class ResumeView {
 
   #move(step: number): void {
     const count = this.#visible().length;
-    if (count > 0) this.#index = Math.max(0, Math.min(count - 1, this.#index + step));
+    this.#index = count > 0 ? Math.max(0, Math.min(count - 1, this.#index + step)) : 0;
+  }
+
+  /** Keys while renaming: typing writes the title, enter keeps it, esc leaves it as it was. */
+  #renameKey(key: Key): ResumeResult {
+    const renaming = this.#renaming!;
+    if (key.name === "escape" || (key.ctrl && key.name === "c")) {
+      this.#renaming = null;
+      return null;
+    }
+    if (key.name === "return") {
+      this.#renaming = null;
+      const title = renaming.text.replace(/\s+/g, " ").trim();
+      const entry = this.#entries.find((candidate) => candidate.id === renaming.id);
+      if (!title || !entry || title === entry.title) return null;
+      entry.title = title;
+      return { kind: "rename", id: renaming.id, title };
+    }
+    if (key.name === "backspace") renaming.text = renaming.text.slice(0, -1);
+    else if (key.ctrl && key.name === "u") renaming.text = "";
+    else if (!key.ctrl && !key.meta && key.text) renaming.text += key.text;
+    return null;
   }
 
   key(key: Key, page = 10): ResumeResult {
+    if (this.#renaming) return this.#renameKey(key);
+    if (key.ctrl && key.name === "r") {
+      const chosen = this.selected;
+      if (chosen) this.#renaming = { id: chosen.id, text: chosen.title };
+      return null;
+    }
+    if (key.ctrl && key.name === "a") {
+      const chosen = this.selected;
+      if (!chosen) return null;
+      // The entry itself changes, so it leaves this scope for the other.
+      const entry = this.#entries.find((candidate) => candidate.id === chosen.id);
+      if (entry) entry.archived = !entry.archived;
+      this.#move(0);
+      return { kind: "archive", id: chosen.id, archived: entry?.archived === true };
+    }
     const step = lineStep(key);
     if (step) {
       this.#move(step);
@@ -152,9 +215,10 @@ export class ResumeView {
     }
     switch (key.name) {
       case "tab": {
-        // This folder's threads, or every folder's, keeping the selection where it can.
+        // This folder's threads, every folder's, or the archived ones, keeping the selection.
         const chosen = this.selected?.id;
-        this.#all = !this.#all;
+        const at = SCOPES.findIndex((option) => option.scope === this.#scope);
+        this.#scope = SCOPES[(at + (key.shift ? SCOPES.length - 1 : 1)) % SCOPES.length]!.scope;
         this.#top = 0;
         this.#index = Math.max(
           0,
@@ -199,15 +263,19 @@ export class ResumeView {
   /** The list in at most `height` rows: heading, search line, threads, and hints. */
   render(width: number, height: number, now = Date.now()): string[] {
     const visible = this.#visible();
-    const scope = this.#all
-      ? `${style.muted("○ This folder")}  ${style.strong("◉ All")}`
-      : `${style.strong("◉ This folder")}  ${style.muted("○ All")}`;
-    const search = this.#query
-      ? `${style.strong(">")} ${style.text(this.#query)}${style.strong("▏")}`
-      : `${style.strong(">")} ${style.faint("type to search")}`;
+    const scopes = SCOPES.map((option) =>
+      option.scope === this.#scope
+        ? style.strong(`◉ ${option.label}`)
+        : style.muted(`○ ${option.label}`),
+    ).join("  ");
+    const search = this.#renaming
+      ? `${style.strong("rename ›")} ${style.text(this.#renaming.text)}${style.strong("▏")}`
+      : this.#query
+        ? `${style.strong(">")} ${style.text(this.#query)}${style.strong("▏")}`
+        : `${style.strong(">")} ${style.faint("type to search")}`;
     const rows = [
       rule(width),
-      spread(style.bold(style.strong(this.title)), scope, width),
+      spread(style.bold(style.strong(this.title)), scopes, width),
       "",
       truncate(search, width),
       "",
@@ -219,9 +287,11 @@ export class ResumeView {
         style.muted(
           this.#query
             ? "  No thread matches"
-            : this.#all
-              ? "  No threads yet"
-              : "  No threads in this folder · tab shows every folder's",
+            : this.#scope === "archived"
+              ? "  No archived threads"
+              : this.#scope === "all"
+                ? "  No threads yet"
+                : "  No threads in this folder · tab shows every folder's",
         ),
       );
     else {
@@ -236,10 +306,17 @@ export class ResumeView {
       );
     }
     const count = visible.length > 0 ? `${this.#index + 1} / ${visible.length}` : "0";
-    rows.push(
-      rule(width, count),
-      hints(["↑↓ navigate", "tab this folder / all", "enter resume", "esc close"], width),
-    );
+    const keys = this.#renaming
+      ? ["enter rename", "esc back"]
+      : [
+          "↑↓ navigate",
+          "tab scope",
+          "ctrl+r rename",
+          this.#scope === "archived" ? "ctrl+a unarchive" : "ctrl+a archive",
+          "enter resume",
+          "esc close",
+        ];
+    rows.push(rule(width, count), hints(keys, width));
     return rows;
   }
 
@@ -252,7 +329,8 @@ export class ResumeView {
     const widest = (pick: (entry: ResumeEntry) => string) =>
       Math.max(0, ...shown.map((entry) => visibleWidth(pick(entry))));
     const on = widest((entry) => entry.on);
-    const folder = this.#all ? widest((entry) => shortPath(entry.cwd, this.#home)) : 0;
+    const folder =
+      this.#scope === "folder" ? 0 : widest((entry) => shortPath(entry.cwd, this.#home));
     // The marker, the age, and room for a title of a few words.
     const fits = (right: number) => 4 + AGE_WIDTH + 24 + right <= width;
     if (fits(on + (folder ? folder + 2 : 0))) return { on, folder };

@@ -1205,9 +1205,14 @@ export class App {
     } else {
       // Listed first: the host names threads for their harness's titles as it lists them,
       // and the open threads below are read once those names have come.
-      const recent = await this.#client
-        .call("threads.list", { scope: "recent", limit: 100 })
-        .catch((): ThreadListing[] => []);
+      const [recent, archived] = await Promise.all([
+        this.#client
+          .call("threads.list", { scope: "recent", limit: 100 })
+          .catch((): ThreadListing[] => []),
+        this.#client
+          .call("threads.list", { scope: "archived", limit: 100 })
+          .catch((): ThreadListing[] => []),
+      ]);
       // The thread on screen with nothing in it yet is where you are, not one to go back to.
       const empty = (thread: { id: string; runCount: number }) =>
         thread.runCount === 0 && thread.id === this.#currentId;
@@ -1254,6 +1259,9 @@ export class App {
         .toSorted((a, b) => b.at - a.at)
         .flatMap((group) => group.rows)
         .flatMap(withAgents);
+      // Archived threads, which tab shows on their own.
+      for (const thread of archived)
+        if (thread.parentId === null) entries.push({ ...listedEntry(thread), archived: true });
     }
     if (loading.dismissed()) return;
     if (entries.length === 0) {
@@ -2650,6 +2658,15 @@ export class App {
     if (panel.kind === "resume") {
       const result = panel.view.key(key, Math.max(1, this.#screen.rows - 12));
       if (!result) return true;
+      // Renaming and archiving happen in the list, which stays open.
+      if (result.kind === "rename" || result.kind === "archive") {
+        const call =
+          result.kind === "rename"
+            ? this.#client.call("thread.rename", { threadId: result.id, title: result.title })
+            : this.#client.call("thread.flag", { threadId: result.id, archived: result.archived });
+        void call.catch((error: unknown) => this.#notice("error", errorMessage(error)));
+        return true;
+      }
       this.#panel = null;
       panel.onDone(result.kind === "choose" ? result.id : null);
       return true;

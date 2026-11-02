@@ -44,7 +44,7 @@ describe("ResumeView", () => {
   it("lists this folder's threads, a row each: age, title, and what it runs on", () => {
     const rows = plain(view().render(72, 20, NOW));
     assert.deepEqual(rows.slice(1, 9), [
-      "Resume                                              ◉ This folder  ○ All",
+      "Resume                                  ◉ This folder  ○ All  ○ Archived",
       "",
       "> type to search",
       "",
@@ -53,7 +53,7 @@ describe("ResumeView", () => {
       "    10d ago   Set up the repo                       claude · opus · high",
       "──────────────────────────────────────────────────────────────── 1 / 3 ─",
     ]);
-    assert.match(rows.at(-1) ?? "", /tab this folder \/ all/);
+    assert.match(rows.at(-1) ?? "", /tab scope/);
   });
 
   it("shows every folder's threads on tab, with their folders", () => {
@@ -80,6 +80,41 @@ describe("ResumeView", () => {
   it("starts on every folder's threads where this folder has none", () => {
     const shown = new ResumeView("Resume", ENTRIES, { cwd: "/elsewhere" });
     assert.match(plain(shown.render(72, 20, NOW)).join("\n"), /◉ All/);
+  });
+
+  it("archives the selected thread with ctrl+a, shows it among the archived, and brings it back", () => {
+    const shown = view();
+    assert.deepEqual(shown.key({ ...key("a", "a"), ctrl: true }), {
+      kind: "archive",
+      id: "t3",
+      archived: true,
+    });
+    assert.doesNotMatch(plain(shown.render(72, 20, NOW)).join("\n"), /Fix the login/);
+    shown.key(key("tab"));
+    shown.key(key("tab"));
+    const archived = plain(shown.render(72, 20, NOW)).join("\n");
+    assert.match(archived, /◉ Archived/);
+    assert.match(archived, /Fix the login redirect/);
+    assert.match(archived, /ctrl\+a unarchive/);
+    assert.deepEqual(shown.key({ ...key("a", "a"), ctrl: true }), {
+      kind: "archive",
+      id: "t3",
+      archived: false,
+    });
+  });
+
+  it("renames the selected thread with ctrl+r, keeping its title on esc", () => {
+    const shown = view();
+    shown.key({ ...key("r", "r"), ctrl: true });
+    assert.match(plain(shown.render(72, 20, NOW)).join("\n"), /rename › Fix the login redirect▏/);
+    shown.key({ ...key("u", "u"), ctrl: true });
+    for (const char of "Login fix") shown.key(key(char, char));
+    assert.deepEqual(shown.key(key("return")), { kind: "rename", id: "t3", title: "Login fix" });
+    assert.match(plain(shown.render(72, 20, NOW)).join("\n"), /› 1h ago +Login fix/);
+    shown.key({ ...key("r", "r"), ctrl: true });
+    shown.key(key("x", "x"));
+    assert.equal(shown.key(key("escape")), null);
+    assert.match(plain(shown.render(72, 20, NOW)).join("\n"), /Login fix /);
   });
 
   it("keeps the selection in view as it moves past the rows shown", () => {
