@@ -33,53 +33,31 @@ export interface JsonRpcOptions {
 }
 
 /**
- * Newline-delimited JSON-RPC 2.0 over a child process's stdio, as Codex's
- * app-server and ACP agents speak it. stdout is read continuously so the
- * child never blocks on a full pipe.
+ * One end of newline-delimited JSON-RPC 2.0 over a pair of streams: requests
+ * and notifications both ways, as ACP and MCP over stdio need.
  */
-export class JsonRpcProcess {
-  #child: ChildProcessWithoutNullStreams;
+export class JsonRpcPeer {
+  #write: (line: string) => void;
   #nextId = 1;
   #pending = new Map<RequestId, Pending>();
   #onNotification: NotificationHandler = () => {};
   #onRequest: RequestHandler = () => Promise.reject(new RpcError(-32601, "Method not found"));
   #onError: ErrorHandler = () => {};
-  #stderr = "";
-  #exited: Promise<string>;
-  /** Why the process exited, once it has; a request sent after that fails at once. */
-  #exitError: Error | null = null;
+  /** Why the other end went away; a request sent after that fails at once. */
+  #closedError: Error | null = null;
   #name: string;
   #jsonrpc: boolean;
 
-  constructor(command: string, args: string[], options: JsonRpcOptions) {
+  /** `write` sends one line; `jsonrpc` sends the `jsonrpc: "2.0"` member, which Codex leaves out. */
+  constructor(
+    input: NodeJS.ReadableStream,
+    write: (line: string) => void,
+    options: { name: string; jsonrpc: boolean },
+  ) {
+    this.#write = write;
     this.#name = options.name;
-    this.#jsonrpc = options.jsonrpc ?? false;
-    this.#child = spawn(command, args, { cwd: options.cwd, env: options.env, stdio: "pipe" });
-    // A write after the process died fails with EPIPE; the exit handler reports it.
-    this.#child.stdin.on("error", () => {});
-    this.#child.stderr.setEncoding("utf8");
-    this.#child.stderr.on("data", (chunk: string) => {
-      this.#stderr = (this.#stderr + chunk).slice(-STDERR_TAIL_BYTES);
-    });
-    createInterface({ input: this.#child.stdout }).on("line", (line) => this.#receive(line));
-    this.#exited = new Promise((resolve) => {
-      const finish = (reason: string) => {
-        const error = new Error(this.#describeExit(reason));
-        this.#exitError ??= error;
-        for (const pending of this.#pending.values()) pending.reject(error);
-        this.#pending.clear();
-        resolve(error.message);
-      };
-      this.#child.on("error", (error) => finish(error.message));
-      this.#child.on("exit", (code, signal) =>
-        finish(signal ? `signal ${signal}` : `code ${code}`),
-      );
-    });
-  }
-
-  /** Resolves with a description once the process has exited. */
-  get exited(): Promise<string> {
-    return this.#exited;
+    this.#jsonrpc = options.jsonrpc;
+    createInterface({ input }).on("line", (line) => this.#receive(line));
   }
 
   onNotification(handler: NotificationHandler): void {
@@ -97,7 +75,7 @@ export class JsonRpcProcess {
 
   /** Sends a request; with `timeoutMs`, rejects if no reply arrives in time. */
   request<T>(method: string, params: unknown, timeoutMs?: number): Promise<T> {
-    if (this.#exitError) return Promise.reject(this.#exitError);
+    if (this.#closedError) return Promise.reject(this.#closedError);
     const id = this.#nextId++;
     return new Promise<T>((resolve, reject) => {
       const timer =
@@ -127,19 +105,17 @@ export class JsonRpcProcess {
     this.#send(params === undefined ? { method } : { method, params });
   }
 
-  async close(): Promise<void> {
-    if (this.#child.exitCode !== null || this.#child.signalCode !== null) return;
-    this.#child.stdin.end();
-    this.#child.kill("SIGTERM");
-    const timer = setTimeout(() => this.#child.kill("SIGKILL"), 2_000);
-    await this.#exited;
-    clearTimeout(timer);
+  /** The other end went away: pending requests fail with `error`, and later ones at once. */
+  closed(error: Error): void {
+    this.#closedError ??= error;
+    for (const pending of this.#pending.values()) pending.reject(error);
+    this.#pending.clear();
   }
 
   #send(message: object): void {
-    if (!this.#child.stdin.writable) return;
+    if (this.#closedError) return;
     const framed = this.#jsonrpc ? { jsonrpc: "2.0", ...message } : message;
-    this.#child.stdin.write(`${JSON.stringify(framed)}\n`);
+    this.#write(`${JSON.stringify(framed)}\n`);
   }
 
   #receive(line: string): void {
@@ -185,6 +161,85 @@ export class JsonRpcProcess {
       if (message.error) pending.reject(new RpcError(message.error.code, message.error.message));
       else pending.resolve(message.result);
     }
+  }
+}
+
+/**
+ * Newline-delimited JSON-RPC 2.0 over a child process's stdio, as Codex's
+ * app-server and ACP agents speak it. stdout is read continuously so the
+ * child never blocks on a full pipe.
+ */
+export class JsonRpcProcess {
+  #child: ChildProcessWithoutNullStreams;
+  #peer: JsonRpcPeer;
+  #stderr = "";
+  #exited: Promise<string>;
+  #name: string;
+
+  constructor(command: string, args: string[], options: JsonRpcOptions) {
+    this.#name = options.name;
+    this.#child = spawn(command, args, { cwd: options.cwd, env: options.env, stdio: "pipe" });
+    // A write after the process died fails with EPIPE; the exit handler reports it.
+    this.#child.stdin.on("error", () => {});
+    this.#child.stderr.setEncoding("utf8");
+    this.#child.stderr.on("data", (chunk: string) => {
+      this.#stderr = (this.#stderr + chunk).slice(-STDERR_TAIL_BYTES);
+    });
+    const stdin = this.#child.stdin;
+    this.#peer = new JsonRpcPeer(
+      this.#child.stdout,
+      (line) => {
+        if (stdin.writable) stdin.write(line);
+      },
+      { name: options.name, jsonrpc: options.jsonrpc ?? false },
+    );
+    this.#exited = new Promise((resolve) => {
+      const finish = (reason: string) => {
+        const error = new Error(this.#describeExit(reason));
+        this.#peer.closed(error);
+        resolve(error.message);
+      };
+      this.#child.on("error", (error) => finish(error.message));
+      this.#child.on("exit", (code, signal) =>
+        finish(signal ? `signal ${signal}` : `code ${code}`),
+      );
+    });
+  }
+
+  /** Resolves with a description once the process has exited. */
+  get exited(): Promise<string> {
+    return this.#exited;
+  }
+
+  onNotification(handler: NotificationHandler): void {
+    this.#peer.onNotification(handler);
+  }
+
+  onRequest(handler: RequestHandler): void {
+    this.#peer.onRequest(handler);
+  }
+
+  /** Hears what a handler threw, which would otherwise crash the whole process. */
+  onError(handler: ErrorHandler): void {
+    this.#peer.onError(handler);
+  }
+
+  /** Sends a request; with `timeoutMs`, rejects if no reply arrives in time. */
+  request<T>(method: string, params: unknown, timeoutMs?: number): Promise<T> {
+    return this.#peer.request(method, params, timeoutMs);
+  }
+
+  notify(method: string, params?: unknown): void {
+    this.#peer.notify(method, params);
+  }
+
+  async close(): Promise<void> {
+    if (this.#child.exitCode !== null || this.#child.signalCode !== null) return;
+    this.#child.stdin.end();
+    this.#child.kill("SIGTERM");
+    const timer = setTimeout(() => this.#child.kill("SIGKILL"), 2_000);
+    await this.#exited;
+    clearTimeout(timer);
   }
 
   #describeExit(reason: string): string {
