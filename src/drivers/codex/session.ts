@@ -154,6 +154,7 @@ export class CodexSession implements HarnessSession {
   #endedTurns = new Set<string>();
   #interruptRequested = false;
   #closing = false;
+  #ended = false;
   /** Skill paths by name, from the last listing. */
   #skills = new Map<string, string>();
   /** Answers Codex's tool-call hook, when an extension checks tool calls. */
@@ -554,6 +555,8 @@ export class CodexSession implements HarnessSession {
     }
     await this.#rpc?.close();
     await this.#hooks?.close();
+    // A session whose start failed before Codex ran has no process to report the end.
+    this.#closed("closed");
   }
 
   /** Codex's PreToolUse hook input, checked against the session's tool policy. */
@@ -950,6 +953,8 @@ export class CodexSession implements HarnessSession {
   }
 
   #closed(reason: string): void {
+    if (this.#ended) return;
+    this.#ended = true;
     for (const [id, pending] of this.#pending) {
       pending.resolve(codexResponse(pending, { kind: "cancel" }));
       this.#pending.delete(id);
