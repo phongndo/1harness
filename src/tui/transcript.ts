@@ -1,4 +1,5 @@
-import { isAbsolute, relative } from "node:path";
+import { basename, isAbsolute, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ReportSpan } from "../commands/registry.ts";
 import type { CommandAction, FileChange, Item, TodoStep } from "../core/events.ts";
 import {
@@ -10,6 +11,7 @@ import {
   type AgentRow,
   type AgentStatus,
 } from "./agents.ts";
+import { FIGURE_NAMES, type Figure } from "./figures.ts";
 import { htmlText } from "./html.ts";
 import { fit, placeholderRow, type MediaContext, type Picture, type Shown } from "./images.ts";
 import { renderMarkdown, type MarkdownOptions } from "./markdown.ts";
@@ -74,7 +76,7 @@ export type Block =
 
 /**
  * What a row does when it is clicked: a picture opens on the whole screen,
- * where it can be drawn sharper (from its file, page, or diagram source);
+ * where it can be drawn sharper (from its file, page, or figure's source);
  * a code block is copied; tool calls show whole, or in brief again.
  */
 export type Target =
@@ -84,7 +86,7 @@ export type Target =
       title: string;
       path?: string;
       html?: string;
-      source?: string;
+      figure?: Figure;
     }
   | { kind: "code"; code: string; lang: string }
   /** Tool calls and the work a turn folded away, which show whole or in brief. */
@@ -115,10 +117,10 @@ export interface RenderContext {
   /** Whether images show, and the cells they are laid out in; without it, captions only. */
   media?: MediaContext;
   /**
-   * A Mermaid diagram's rows at a width: placeholder rows and the picture
-   * they show, or characters; null to show its source as code.
+   * A figure's rows at a width, a diagram's or an equation's: placeholder
+   * rows and the picture they show, or text; null to show its source.
    */
-  diagram?: (source: string, columns: number) => { rows: string[]; picture?: Shown } | null;
+  figure?: (figure: Figure, columns: number) => { rows: string[]; picture?: Shown } | null;
   /** Takes the pictures a block's rows show, for the screen to send ahead of them. */
   collect?: (shown: Shown) => void;
   /** Takes what rows `start` to before `end` of the block do when clicked. */
@@ -524,41 +526,92 @@ function marked(rows: string[], target: Target, context: RenderContext): string[
 }
 
 /**
+ * Where an image a reply links to is, on the machine the thread runs on: a
+ * path, or a `file:` URL, taken from the thread's folder; null for one on
+ * the web, which is not fetched.
+ */
+export function imagePath(src: string, cwd: string): string | null {
+  try {
+    if (/^file:/i.test(src)) return fileURLToPath(src);
+    if (/^[a-z][\w+.-]*:/i.test(src) || src.startsWith("//")) return null;
+    return resolve(cwd, decodeURI(src));
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Markdown's options for a block whose Markdown starts `offset` rows in:
- * diagrams drawn by the context, with their pictures collected, and code
- * blocks and diagrams marked as what a click on them does.
+ * figures and images drawn by the context, with their pictures collected,
+ * and code blocks, figures, and images marked as what a click on them does.
  */
 function markdownOptions(context: RenderContext, offset: number): MarkdownOptions {
-  const draw = context.diagram;
+  const draw = context.figure;
   const drawn = new Map<string, Shown>();
+  const images = new Map<string, { shown: Shown; path: string }>();
+  const media = context.media;
   return {
     ...(draw
       ? {
-          diagram: (source: string, columns: number) => {
-            const result = draw(source, columns);
+          figure: (figure: Figure, columns: number) => {
+            const result = draw(figure, columns);
             if (result?.picture) {
               context.collect?.(result.picture);
-              drawn.set(source, result.picture);
+              drawn.set(`${figure.kind}\0${figure.source}`, result.picture);
             }
             return result?.rows ?? null;
           },
         }
       : {}),
+    // An image shows where the terminal can draw it, once it has come; until
+    // then, and where it cannot, its description stands in for it.
+    image: (src: string, alt: string, columns: number) => {
+      if (!media?.graphics || !context.image) return null;
+      const path = imagePath(src, context.cwd);
+      const image = path ? context.image(path) : null;
+      if (!path || !image) return null;
+      const size = fit(image, columns, media);
+      const shown = { picture: image, ...size };
+      context.collect?.(shown);
+      images.set(src, { shown, path });
+      const rows = Array.from({ length: size.rows }, (_, row) =>
+        placeholderRow(image, row, size.columns),
+      );
+      if (alt.trim()) rows.push(style.muted(truncate(plainText(alt, true), columns)));
+      return rows;
+    },
     region: (region) => {
       if (!context.mark) return;
+      const start = region.start + offset;
+      const end = region.end + offset;
       if (region.kind === "code")
-        context.mark(
-          { kind: "code", code: region.code, lang: region.lang },
-          region.start + offset,
-          region.end + offset,
-        );
-      else {
-        const shown = drawn.get(region.source);
+        context.mark({ kind: "code", code: region.code, lang: region.lang }, start, end);
+      else if (region.kind === "figure") {
+        const { figure } = region;
+        const shown = drawn.get(`${figure.kind}\0${figure.source}`);
         if (shown)
           context.mark(
-            { kind: "picture", picture: shown.picture, title: "Diagram", source: region.source },
-            region.start + offset,
-            region.end + offset,
+            {
+              kind: "picture",
+              picture: shown.picture,
+              title: FIGURE_NAMES[figure.kind].title,
+              figure,
+            },
+            start,
+            end,
+          );
+      } else {
+        const image = images.get(region.src);
+        if (image)
+          context.mark(
+            {
+              kind: "picture",
+              picture: image.shown.picture,
+              title: region.alt.trim() || basename(image.path),
+              path: image.path,
+            },
+            start,
+            end,
           );
       }
     },

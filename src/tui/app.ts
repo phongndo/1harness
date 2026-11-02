@@ -67,7 +67,7 @@ import {
   type Selection,
 } from "./pointer.ts";
 import { runsScripts } from "../host/media.ts";
-import { Diagrams } from "./diagrams.ts";
+import { FIGURE_NAMES, Figures, type Figure } from "./figures.ts";
 import {
   CELL_QUERY,
   DEFAULT_CELL,
@@ -212,7 +212,10 @@ const KEYS: [string, string][] = [
   ["ctrl+z", "suspend"],
   ["drag", "select text and copy it; double-click a word, triple-click a row"],
   ["click code", "copy the code block"],
-  ["click a picture", "show it whole and sharp: a diagram, a page, an image; c copies its source"],
+  [
+    "click a picture",
+    "show it whole and sharp: a diagram, an equation, a page, an image; c copies its source",
+  ],
   ["click a live page", "it takes the click; its caption opens it whole, where it takes keys too"],
   ["click a list's row", "choose it"],
   ["click a tool call", "show tool calls whole, or in brief again, as ctrl+x does"],
@@ -413,8 +416,8 @@ export class App {
   #viewer: Viewer | null = null;
   /** Pages drawn as pictures, by theme, width, cell size, and content. */
   #pages = new Map<string, Picture | null | "loading">();
-  /** Mermaid diagrams drawn as pictures; once drawing can start, the views draw again. */
-  #diagrams = new Diagrams(() => this.#redrawViews());
+  /** Diagrams and equations drawn as pictures; as more can be shown, the views draw again. */
+  #figures = new Figures(() => this.#redrawViews());
   /** The default model's ID by thread, for a harness that names it only once a turn runs. */
   #defaultModels = new Map<string, string | null>();
 
@@ -1651,7 +1654,7 @@ export class App {
       now: Date.now(),
       details: this.#details,
       media: this.#media(),
-      diagram: (source: string, columns: number) => this.#diagram(source, columns),
+      figure: (figure: Figure, columns: number) => this.#figure(figure, columns),
       image: (path: string) => this.#image(path),
       html: (html: string, columns: number) => this.#page(html, columns),
     };
@@ -1903,22 +1906,28 @@ export class App {
   }
 
   /**
-   * A Mermaid diagram's rows: a picture where the terminal shows images, else
-   * box-drawing characters that fit, else null for its source as code.
+   * A figure's rows, centered in the column as a figure is: a picture where
+   * the terminal shows images, else text that fits (a diagram in box-drawing
+   * characters, an equation in Unicode), else null for its source.
    */
-  #diagram(source: string, columns: number): { rows: string[]; picture?: Shown } | null {
+  #figure(figure: Figure, columns: number): { rows: string[]; picture?: Shown } | null {
     const media = this.#media();
-    if (media.graphics && this.#diagrams.available) {
-      const drawn = this.#diagrams.picture(
-        source,
+    const renderer = this.#figures.renderer(figure.kind);
+    if (media.graphics && renderer.available) {
+      const drawn = renderer.picture(
+        figure.source,
         isLightTheme(),
         columns * media.cell.width,
         media.cell,
       );
-      if (drawn === undefined) return { rows: [style.muted("Drawing the diagram…")] };
+      if (drawn === undefined) {
+        // Until it is drawn, its text holds its place, or a line saying it is coming.
+        const text = figure.kind === "math" ? renderer.text(figure.source) : null;
+        if (text) return { rows: this.#centered(text.map(style.soft), columns) };
+        return { rows: [style.muted(FIGURE_NAMES[figure.kind].drawing)] };
+      }
       if (drawn) {
         const size = fit(drawn, columns, media);
-        // A diagram sits in the middle of the column, as a figure does.
         const indent = " ".repeat(Math.max(0, Math.floor((columns - size.columns) / 2)));
         return {
           rows: Array.from(
@@ -1929,13 +1938,20 @@ export class App {
         };
       }
     }
-    const art = this.#diagrams.ascii(source);
-    if (art && art.every((line) => visibleWidth(line) <= columns)) {
-      const widest = Math.max(0, ...art.map((line) => visibleWidth(line)));
-      const indent = " ".repeat(Math.max(0, Math.floor((columns - widest) / 2)));
-      return { rows: art.map((line) => indent + style.soft(line)) };
-    }
-    return null;
+    const text = renderer.text(figure.source);
+    if (!text) return null;
+    const paint = figure.kind === "math" ? style.text : style.soft;
+    // A diagram too wide for characters shows its source; an equation's text wraps.
+    if (figure.kind === "mermaid" && text.some((line) => visibleWidth(line) > columns)) return null;
+    return { rows: this.#centered(text.map(paint), columns) };
+  }
+
+  /** Lines set in the middle of `columns` together, keeping their alignment; wrapped where too wide. */
+  #centered(lines: string[], columns: number): string[] {
+    const widest = Math.max(0, ...lines.map((line) => visibleWidth(line)));
+    if (widest > columns) return lines.flatMap((line) => wrap(line, columns, "  "));
+    const indent = " ".repeat(Math.max(0, Math.floor((columns - widest) / 2)));
+    return lines.map((line) => indent + line);
   }
 
   /**
@@ -3336,14 +3352,10 @@ export class App {
       if (target.path) {
         const found = await this.#client.call("files.image", { path: target.path, ...box });
         sharper = found ? picture(Buffer.from(found.data, "base64")) : null;
-      } else if (target.source !== undefined) {
-        sharper = this.#diagrams.picture(
-          target.source,
-          isLightTheme(),
-          box.width,
-          media.cell,
-          box.height,
-        );
+      } else if (target.figure) {
+        sharper = this.#figures
+          .renderer(target.figure.kind)
+          .picture(target.figure.source, isLightTheme(), box.width, media.cell, box.height);
       } else if (target.html !== undefined) {
         const { width } = this.#pageSize(this.#column().width - IMAGE_INDENT * 2);
         const scale = Math.round(Math.min(4, Math.max(1, box.width / width)) * 100) / 100;
@@ -3433,8 +3445,8 @@ export class App {
     else if (key.text === "c") {
       const { target } = viewer;
       if (target.html !== undefined) this.#copy(target.html, "Copied the page's HTML");
-      else if (target.source !== undefined)
-        this.#copy(target.source, "Copied the diagram's source");
+      else if (target.figure)
+        this.#copy(target.figure.source, FIGURE_NAMES[target.figure.kind].copied);
       else if (target.path) this.#copy(target.path, "Copied the image's path");
     } else if (
       key.name === "escape" ||
@@ -3455,8 +3467,10 @@ export class App {
     const what =
       target.html !== undefined
         ? "HTML"
-        : target.source !== undefined
-          ? "source"
+        : target.figure
+          ? target.figure.kind === "math"
+            ? "TeX"
+            : "source"
           : target.path
             ? "path"
             : "";

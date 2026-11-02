@@ -35,6 +35,11 @@ From a checkout, run `pnpm dev` or `node dist/cli.js` after `pnpm build`.
 
 Every harness gets the same chat: streamed replies and reasoning, commands with
 their output, diffs, tool calls, todo lists, proposed plans, and agents.
+In terminals that speak the Kitty graphics protocol (Rex, kitty, Ghostty),
+replies draw Mermaid diagrams, typeset display math (`$$…$$`, `\[…\]`, and
+` ```math ` blocks), and show images linked on a line of their own; elsewhere
+they show as text. Inline math (`$…$`, `\(…\)`) reads as Unicode text, such as
+`x² + yᵢ ≤ √π`. Clicking a picture shows it on the whole screen.
 Approvals and questions offer each harness's own choices. While a turn runs, Enter
 adds a message to it and Tab queues one as the next turn. Esc stops the turn and
 the agents under it. Page Up, Page Down, and the mouse wheel scroll the

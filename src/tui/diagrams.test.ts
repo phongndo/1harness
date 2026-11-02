@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { inflateSync } from "node:zlib";
 import { render } from "pele";
 import { Diagrams, fillVariables, floating } from "./diagrams.ts";
+import type { Figure } from "./figures.ts";
 import { pngSize } from "./images.ts";
 import { renderMarkdown } from "./markdown.ts";
 
@@ -25,8 +26,8 @@ function cornerAlpha(png: Buffer): number {
   return inflateSync(Buffer.concat(data))[4] ?? -1;
 }
 
-/** Stands in for drawing: says how many lines it was given. */
-const diagram = (source: string) => [`<diagram of ${source.split("\n").length} lines>`];
+/** Stands in for drawing: says what it drew, and from how many lines. */
+const figure = ({ kind, source }: Figure) => [`<${kind} of ${source.split("\n").length} lines>`];
 
 describe("diagrams", () => {
   it("fills Pele's CSS variables, which resvg cannot read", () => {
@@ -51,7 +52,7 @@ describe("diagrams", () => {
     assert.ok(size && size.width <= 800 && size.width > 0);
     assert.equal(diagrams.picture(FLOW, false, 800, CELL), drawn, "kept");
     assert.equal(diagrams.picture("not a diagram at all", false, 800, CELL), null);
-    assert.match(diagrams.ascii(FLOW)?.join("\n") ?? "", /Terminal/);
+    assert.match(diagrams.text(FLOW)?.join("\n") ?? "", /Terminal/);
   });
 
   it("draws a diagram on whole cells, at the screen's density, with nothing behind it", async () => {
@@ -83,11 +84,11 @@ describe("diagrams", () => {
 
   it("shows a diagram in Markdown once its fence closes, and code while it streams", () => {
     const done = renderMarkdown(`Look:\n\n\`\`\`mermaid\n${FLOW}\n\`\`\`\n\nAfter.`, 60, "  ", {
-      diagram,
+      figure,
     });
-    assert.ok(done.includes("  <diagram of 3 lines>"), done.join("\n"));
+    assert.ok(done.includes("  <mermaid of 3 lines>"), done.join("\n"));
     assert.equal(done.at(-1), "  After.");
-    const streaming = renderMarkdown(`\`\`\`mermaid\n${FLOW}`, 60, "  ", { diagram });
-    assert.ok(!streaming.some((row) => row.includes("<diagram")));
+    const streaming = renderMarkdown(`\`\`\`mermaid\n${FLOW}`, 60, "  ", { figure });
+    assert.ok(!streaming.some((row) => row.includes("<mermaid")));
   });
 });

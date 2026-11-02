@@ -1,4 +1,6 @@
 import { stripVTControlCharacters } from "node:util";
+import { fenceFigure, type Figure } from "./figures.ts";
+import { texLines, texToUnicode } from "./math.ts";
 import { style } from "./theme.ts";
 import { plainText, visibleWidth, wrap } from "./text.ts";
 
@@ -162,7 +164,19 @@ export function inline(text: string): string {
     .replace(/(?<![\\`])(`+)(?!`)([\s\S]*?[^`])\1(?!`)/g, (_, _ticks: string, body: string) =>
       hold(style.strong(body)),
     )
-    .replace(/\\([\\`*_~[\]()#|<>!-])/g, (_, char: string) => hold(char))
+    // Math reads as Unicode text: `\(…\)`, `$$…$$` within a line, and `$…$` as
+    // Pandoc reads it, so `$5 and $10` stay prices: its dollars hug the TeX,
+    // and the closing one has no digit or letter after it.
+    .replace(
+      /\\\((.+?)\\\)|(?<![\\$])\$\$(?!\s)(.+?)(?<!\s)\$\$|(?<![\\$\w])\$(?![\s$])((?:[^$\\]|\\.)+?)(?<![\s\\])\$(?![\w$])/g,
+      (_, paren?: string, double?: string, single?: string) =>
+        hold(texToUnicode(paren ?? double ?? single ?? "")),
+    )
+    .replace(/\\([\\`*_~[\]()#|<>!$-])/g, (_, char: string) => hold(char))
+    // An image within a line is its description; one on a line of its own is drawn.
+    .replace(/!\[([^\]]*)\]\(<?([^)\s>]+)>?(?:\s+"[^"]*")?\)/g, (_, alt: string) =>
+      hold(style.muted(`▣ ${put(alt) || "image"}`)),
+    )
     .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label: string, url: string) =>
       hold(
         label === url
@@ -338,27 +352,89 @@ function renderTable(lines: string[], aligns: Align[], width: number, indent: st
   return out;
 }
 
-/**
- * Renders Markdown the way fx prints assistant replies: indented prose, faint
- * list markers and code rules, bold headings, and code in its own grays.
- * Returns rows already wrapped to `width`.
- */
-/** A code block or a drawn diagram, by the rows it takes, from `start` to before `end`. */
+/** A code block, a figure, or an image, by the rows it takes, from `start` to before `end`. */
 export type MarkdownRegion =
   | { kind: "code"; start: number; end: number; code: string; lang: string }
-  | { kind: "diagram"; start: number; end: number; source: string };
+  | { kind: "figure"; start: number; end: number; figure: Figure }
+  | { kind: "image"; start: number; end: number; src: string; alt: string };
 
-/** What Markdown can hand back to whoever shows it: a Mermaid diagram, as its own rows. */
+/** What Markdown hands to whoever shows it, to draw as its own rows. */
 export interface MarkdownOptions {
   /**
-   * The rows for a diagram `columns` wide, without the indent, or null to
-   * show its source as code.
+   * The rows for a figure (a diagram, an equation) `columns` wide, without
+   * the indent, or null to show its source: a diagram's as code, an
+   * equation's as Unicode text.
    */
-  diagram?: (source: string, columns: number) => string[] | null;
-  /** Told where each code block and diagram is, so a click on one can copy or enlarge it. */
+  figure?: (figure: Figure, columns: number) => string[] | null;
+  /** The rows for an image on a line of its own, without the indent; null for its description. */
+  image?: (src: string, alt: string, columns: number) => string[] | null;
+  /** Told where each code block, figure, and image is, so a click on one can copy or enlarge it. */
   region?: (region: MarkdownRegion) => void;
 }
 
+/** A display's delimiters: `$$…$$` and `\[…\]`. */
+const DISPLAYS: [string, string][] = [
+  ["$$", "$$"],
+  ["\\[", "\\]"],
+];
+
+/**
+ * A line's text before the display's `close` that ends it, and any
+ * punctuation after the closer, which goes inside, as TeX sets it: `\].`
+ * reads as `.\]`. Null when the line does not end the display.
+ */
+function closing(line: string, close: string): [string, string] | null {
+  const trimmed = line.trimEnd();
+  const tail = /[.,;:!?]*$/.exec(trimmed)?.[0] ?? "";
+  const body = trimmed.slice(0, trimmed.length - tail.length);
+  return body.endsWith(close) ? [body.slice(0, -close.length), tail] : null;
+}
+
+/**
+ * The display math starting at line `index`: its TeX, the last line it
+ * takes, and whether its closer has come, which it has not while it
+ * streams; null when the line opens none.
+ */
+function displayMath(
+  lines: string[],
+  index: number,
+): { tex: string; end: number; closed: boolean } | null {
+  const first = (lines[index] ?? "").trim();
+  const pair = DISPLAYS.find(([open]) => first.startsWith(open));
+  if (!pair) return null;
+  const [open, close] = pair;
+  const rest = first.slice(open.length);
+  // All on one line: `$$ x $$`.
+  const oneLine = rest.trim().length >= close.length ? closing(rest, close) : null;
+  if (oneLine !== null) {
+    const tex = oneLine[0].trim();
+    // `$$5 and $$10` is no display; a display's line holds only the display.
+    return tex.includes(open) ? null : { tex: tex + oneLine[1], end: index, closed: true };
+  }
+  const body = [rest];
+  for (let at = index + 1; at < lines.length; at++) {
+    const line = (lines[at] ?? "").trimEnd();
+    const last = closing(line, close);
+    if (last !== null) {
+      body.push(last[0]);
+      return { tex: body.join("\n").trim() + last[1], end: at, closed: true };
+    }
+    // A blank line ends the paragraph a display can be in; this one never closed.
+    if (line.trim() === "") return { tex: body.join("\n").trim(), end: at - 1, closed: false };
+    body.push(line);
+  }
+  return { tex: body.join("\n").trim(), end: lines.length - 1, closed: false };
+}
+
+/** An image on a line of its own: `![alt](src)`, with an optional title. */
+const IMAGE_LINE = /^\s*!\[([^\]]*)\]\(<?([^)\s>]+)>?(?:\s+"[^"]*")?\)\s*$/;
+
+/**
+ * Renders Markdown the way fx prints assistant replies: indented prose, faint
+ * list markers and code rules, bold headings, and code in its own grays.
+ * Diagrams, display math, and images on lines of their own are drawn by
+ * `options` where it can. Returns rows already wrapped to `width`.
+ */
 export function renderMarkdown(
   text: string,
   width: number,
@@ -383,6 +459,16 @@ export function renderMarkdown(
   const push = (line: string, hanging: string, hard = false) => {
     rows.push(...wrap(line, width, hanging, hard));
     blank = false;
+  };
+
+  // A figure stands apart from the text around it, a blank row on each side.
+  const figureRows = (drawn: string[], region: (start: number, end: number) => MarkdownRegion) => {
+    if (!blank && rows.at(-1) !== "") rows.push("");
+    const start = rows.length;
+    rows.push(...drawn.map((row) => (row === "" ? "" : indent + row)));
+    options.region?.(region(start, rows.length));
+    rows.push("");
+    blank = true;
   };
 
   const lines = plainText(text).split("\n");
@@ -416,29 +502,43 @@ export function renderMarkdown(
     }
     // A backtick fence's info string has no backticks, so inline ```code``` opens none.
     const open = /^\s*(?:(`{3,})\s*([\w+#.-]*)[^`]*|(~{3,})\s*([\w+#.-]*).*)$/.exec(raw);
-    // A Mermaid diagram, once its fence has closed, shows as a diagram; still
+    // A figure's fence, once it has closed, shows as the figure; still
     // streaming, or one that cannot be drawn, it shows as code.
     const fenceMarker = open?.[1] ?? open?.[3] ?? "";
-    if (open && (open[2] ?? open[4]) === "mermaid" && options.diagram) {
+    const kind = open ? fenceFigure(open[2] ?? open[4] ?? "") : null;
+    if (open && kind && options.figure) {
       const end = lines.findIndex(
         (line, at) =>
           at > index && (/^\s*(`{3,}|~{3,})\s*$/.exec(line)?.[1] ?? "").startsWith(fenceMarker),
       );
-      const drawn =
-        end === -1 ? null : options.diagram(lines.slice(index + 1, end).join("\n"), inner);
+      const figure: Figure = { kind, source: lines.slice(index + 1, end).join("\n") };
+      const drawn = end === -1 ? null : options.figure(figure, inner);
       if (drawn) {
-        if (!blank && rows.at(-1) !== "") rows.push("");
-        const start = rows.length;
-        rows.push(...drawn.map((row) => indent + row));
-        options.region?.({
-          kind: "diagram",
-          start,
-          end: rows.length,
-          source: lines.slice(index + 1, end).join("\n"),
-        });
-        rows.push("");
-        blank = true;
+        figureRows(drawn, (start, stop) => ({ kind: "figure", start, end: stop, figure }));
         index = end;
+        continue;
+      }
+    }
+    // Display math, once closed, is typeset; while it streams, it reads as text.
+    const display = open ? null : displayMath(lines, index);
+    if (display) {
+      const figure: Figure = { kind: "math", source: display.tex };
+      const drawn = display.closed
+        ? (options.figure?.(figure, inner) ?? texLines(display.tex).map((line) => style.text(line)))
+        : null;
+      if (drawn) figureRows(drawn, (start, stop) => ({ kind: "figure", start, end: stop, figure }));
+      // Still streaming: what has come, as text, until it closes.
+      else for (const line of texLines(display.tex)) push(indent + style.soft(line), indent);
+      index = display.end;
+      continue;
+    }
+    const image = IMAGE_LINE.exec(raw);
+    if (image) {
+      const alt = image[1] ?? "";
+      const src = image[2] ?? "";
+      const drawn = options.image?.(src, alt, inner);
+      if (drawn) {
+        figureRows(drawn, (start, stop) => ({ kind: "image", start, end: stop, src, alt }));
         continue;
       }
     }
