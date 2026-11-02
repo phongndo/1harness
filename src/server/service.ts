@@ -34,10 +34,14 @@ export function serverEnvironment(env: NodeJS.ProcessEnv = process.env): string 
   return `# Written by \`1harness server install\` from the shell it ran in.\n${lines.join("\n")}\n`;
 }
 
-/** The systemd user units: a service, and a socket that starts it on the first connection. */
+/**
+ * The systemd user units: a service, and a socket that starts it on the first
+ * connection, on the path clients look for it.
+ */
 export function systemdUnits(
   command: string[],
   envFile: string,
+  socket: string = socketFile(),
 ): { service: string; socket: string } {
   const quoted = command.map((part) => (/[\s"\\]/.test(part) ? JSON.stringify(part) : part));
   return {
@@ -62,7 +66,7 @@ WantedBy=default.target
 Description=1harness server socket
 
 [Socket]
-ListenStream=%t/1harness/server.sock
+ListenStream=${socket}
 SocketMode=0600
 DirectoryMode=0700
 
