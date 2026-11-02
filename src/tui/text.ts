@@ -139,6 +139,13 @@ export function visibleWidth(text: string): number {
   let width = 0;
   const plain = stripVTControlCharacters(text);
   for (let index = 0; index < plain.length;) {
+    // Most of what is measured is printable ASCII, a column each.
+    const unit = plain.charCodeAt(index);
+    if (unit >= 0x20 && unit < 0x7f) {
+      width++;
+      index++;
+      continue;
+    }
     const code = plain.codePointAt(index) ?? 0;
     const length = code > 0xffff ? 2 : 1;
     width += widthBefore(code, plain.codePointAt(index + length));
