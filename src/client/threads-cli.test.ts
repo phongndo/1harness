@@ -11,6 +11,19 @@ import { HostClient } from "./client.ts";
 import { LocalConnection } from "./connection.ts";
 import { THREADS_HELP, threadsCommand, transcriptText } from "./threads-cli.ts";
 
+/**
+ * A stream's `write` that keeps the text written to it. The test runner
+ * reports on stdout too, in binary, and that still goes out.
+ */
+function keep(stream: NodeJS.WriteStream, onText: (text: string) => void) {
+  const write = stream.write.bind(stream) as (...args: unknown[]) => boolean;
+  return (chunk: unknown, ...rest: unknown[]): boolean => {
+    if (typeof chunk !== "string") return write(chunk, ...rest);
+    onText(chunk);
+    return true;
+  };
+}
+
 const at = 0;
 const tokens = { up: 0, down: 0 };
 
@@ -178,10 +191,11 @@ describe("threadsCommand", () => {
 
   /** Runs the command against the host, with what it prints kept in `output`. */
   async function run(args: string[]): Promise<number> {
-    const write = mock.method(process.stdout, "write", (chunk: string) => {
-      output += chunk;
-      return true;
-    });
+    const write = mock.method(
+      process.stdout,
+      "write",
+      keep(process.stdout, (chunk) => (output += chunk)),
+    );
     try {
       return await threadsCommand(args, async () => client("cli"));
     } finally {
@@ -217,10 +231,11 @@ describe("threadsCommand", () => {
 
   it("prints its help without reaching the host", async () => {
     let connected = false;
-    const write = mock.method(process.stdout, "write", (chunk: string) => {
-      output += chunk;
-      return true;
-    });
+    const write = mock.method(
+      process.stdout,
+      "write",
+      keep(process.stdout, (chunk) => (output += chunk)),
+    );
     try {
       assert.equal(
         await threadsCommand(["--help"], async () => {
