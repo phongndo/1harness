@@ -815,6 +815,26 @@ describe("Managing threads over time", () => {
     await assert.rejects(client.call("thread.attach", { threadId: thread.id }), /No thread/);
   });
 
+  it("keeps nothing for a thread once it leaves memory, however it goes", async () => {
+    newHost([], store());
+    const client = await connect("tui");
+    // Shown, then left empty for another, it is dropped.
+    const empty = await client.call("thread.open", { harness: "scripted", settings });
+    await client.call("client.show", { threadId: empty.id });
+    const forgotten = await threadWith(client, "pin me");
+    await client.call("client.show", { threadId: forgotten.id });
+    assert.equal(host.manager.get(empty.id), undefined);
+    await client.call("thread.flag", { threadId: forgotten.id, pinned: true });
+    await client.call("thread.forget", { threadId: forgotten.id });
+    // Closed, it is stored and leaves memory, and flagging it there keeps it there.
+    const closed = await threadWith(client, "close me");
+    await client.call("thread.close", { threadId: closed.id });
+    await settle(5);
+    assert.equal(host.manager.get(closed.id), undefined);
+    await client.call("thread.flag", { threadId: closed.id, pinned: true });
+    assert.deepEqual(host.trackedThreads, []);
+  });
+
   it("deletes closed threads past the retention when it starts, but not pinned ones", async () => {
     const file = join(root, `manage-${++count}.db`);
     newHost([], Store.open(file));

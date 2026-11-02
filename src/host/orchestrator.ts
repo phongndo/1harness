@@ -1,6 +1,7 @@
 import { isRuntimeMode, modeRank } from "../core/events.ts";
 import { drivers, findDriver } from "../drivers/index.ts";
 import type { ToolContext, ToolDefinition } from "../extensions/api.ts";
+import type { TaskRow } from "../store/store.ts";
 import {
   ModeError,
   titleFrom,
@@ -369,13 +370,7 @@ export class Orchestrator {
   }
 
   /** Every task, for a store to keep. */
-  taskRows(): {
-    id: string;
-    parentId: string;
-    requestId: string | null;
-    seen: boolean;
-    delivered: boolean;
-  }[] {
+  taskRows(): TaskRow[] {
     return [...this.#tasks.values()].map(({ id, parentId, requestId, seen, delivered }) => ({
       id,
       parentId,
@@ -399,15 +394,7 @@ export class Orchestrator {
    * is not sent now: nothing starts by itself after a restart, so the parent
    * finds out with task_status when it runs again.
    */
-  restoreTasks(
-    rows: readonly {
-      id: string;
-      parentId: string;
-      requestId: string | null;
-      seen: boolean;
-      delivered: boolean;
-    }[],
-  ): void {
+  restoreTasks(rows: readonly TaskRow[]): void {
     for (const row of rows) {
       // After a restart a task reports nothing more, its later runs included.
       const task: Task = {
@@ -771,7 +758,12 @@ export class Orchestrator {
     const message = `[1harness] Task ${task.id} (${child.harness}: ${child.title}) ${said}:\n\n${outcome}`;
     const origin = { type: "report", from: child.id, status, result: outcome } as const;
     if (parent.thread.busy && parent.thread.capabilities.steer) {
-      void parent.thread.steer({ text: message }, origin);
+      // Steering reports its own failures to the thread; this only keeps one from crashing the host.
+      void parent.thread
+        .steer({ text: message }, origin)
+        .catch((error: unknown) =>
+          console.error(`1harness: could not report task ${task.id} to its thread:`, error),
+        );
     } else {
       parent.thread.send({ text: message }, origin);
     }

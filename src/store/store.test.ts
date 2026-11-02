@@ -50,6 +50,7 @@ function row(id: string, overrides: Partial<ThreadRow> = {}): ThreadRow {
     error: null,
     pinned: false,
     archived: false,
+    named: false,
     seenRuns: 0,
     usage: null,
     createdAt: 1,
@@ -103,14 +104,9 @@ describe("Store", () => {
   it("keeps queued messages in order until sent or dropped", () => {
     const store = Store.memory();
     store.saveThread(row("t1"));
-    store.recordMessage(
-      "t1",
-      { ...message("a"), requestId: "r1" },
-      { text: "a", id: "a" },
-      "queued",
-    );
-    store.recordMessage("t1", message("b"), { text: "b", id: "b" }, "queued");
-    store.recordMessage("t1", message("c"), { text: "c", id: "c" }, "queued");
+    store.recordMessage("t1", { ...message("a"), requestId: "r1" }, { text: "a", id: "a" });
+    store.recordMessage("t1", message("b"), { text: "b", id: "b" });
+    store.recordMessage("t1", message("c"), { text: "c", id: "c" });
     store.setMessageState("a", "dispatched");
     store.setMessageState("c", "dropped");
     assert.deepEqual(

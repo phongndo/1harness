@@ -222,7 +222,7 @@ export interface HelloResult {
   /** Where the host keeps its records; null when it keeps none. */
   store: string | null;
   /** Pages can run live here, with their scripts: the host has html2term and a Chromium. */
-  live?: boolean;
+  live: boolean;
 }
 
 /** A frame of a live page: a base64 PNG and its size, in device and CSS pixels. */
@@ -303,7 +303,7 @@ export interface Methods {
   /** The client is leaving; its threads keep working. */
   "client.bye": { params: Record<string, never>; result: null };
   "threads.list": {
-    params: { scope: "open" | "recent" | "archived"; cwd?: string; query?: string; limit?: number };
+    params: { scope: "open" | "recent" | "archived"; query?: string; limit?: number };
     result: ThreadListing[];
   };
   "thread.open": { params: OpenParams; result: ThreadState };
@@ -327,7 +327,7 @@ export interface Methods {
       /** The client's own ID for this message; a retry with the same ID sends nothing. */
       requestId?: string;
     };
-    result: { messageId: string | null };
+    result: { messageId: string };
   };
   "thread.respond": {
     params: { threadId: string; requestId: string; response: RequestResponse };

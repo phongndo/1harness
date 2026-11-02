@@ -133,6 +133,10 @@ export class SocketConnection implements HostConnection {
   /** Starts the server again when nothing answers, as for the local one. */
   #revive: (() => Promise<unknown>) | null;
   #reviving: Promise<unknown> | null = null;
+  /** Why the server could not be started again, until a start works. */
+  #reviveFailure: string | null = null;
+  /** Streams to tell when the server cannot be started again. */
+  #onReviveFailure = new Set<(error: string) => void>();
 
   constructor(
     target: ServerTarget,
@@ -150,10 +154,26 @@ export class SocketConnection implements HostConnection {
     if (!this.#revive || this.#reviving || failures < 2) return;
     if (code !== "ECONNREFUSED" && code !== "ENOENT") return;
     this.#reviving = this.#revive()
-      .catch(() => {})
+      .then(
+        () => {
+          this.#reviveFailure = null;
+        },
+        (failure: unknown) => {
+          const reason = `could not start the server again: ${failure instanceof Error ? failure.message : String(failure)}`;
+          this.#reviveFailure = reason;
+          for (const tell of this.#onReviveFailure) tell(reason);
+        },
+      )
       .finally(() => {
         this.#reviving = null;
       });
+  }
+
+  /** A request's failure, with why the server could not be started again, if it could not. */
+  #failure(error: unknown): unknown {
+    if (this.#reviveFailure === null || !unreachable(error)) return error;
+    const message = error instanceof Error ? error.message : String(error);
+    return new Error(`${message}; ${this.#reviveFailure}`, { cause: error });
   }
 
   async call<M extends Method>(method: M, params: Params<M>): Promise<Result<M>> {
@@ -170,7 +190,7 @@ export class SocketConnection implements HostConnection {
           agent: this.#agent,
         });
       } catch (error) {
-        if (this.#closed || attempt >= ATTEMPTS || !unreachable(error)) throw error;
+        if (this.#closed || attempt >= ATTEMPTS || !unreachable(error)) throw this.#failure(error);
         this.#gone(error, attempt);
         await new Promise((resolve) => setTimeout(resolve, backoff(attempt)));
         continue;
@@ -242,9 +262,15 @@ export class SocketConnection implements HostConnection {
       });
       outgoing.end();
     };
+    // Still reconnecting, it says why the server is not coming back, as it may never.
+    const unrevived = (error: string) => {
+      if (!stopped && failures > 0) listener({ type: "connection", state: "reconnecting", error });
+    };
+    this.#onReviveFailure.add(unrevived);
     connect();
     return () => {
       stopped = true;
+      this.#onReviveFailure.delete(unrevived);
       if (timer) clearTimeout(timer);
       current?.destroy();
     };

@@ -447,6 +447,33 @@ describe("ThreadManager", () => {
     }
   });
 
+  it("says when an idle session will not close, and goes on with it and tries again later", async () => {
+    const warnings: string[] = [];
+    const idle = new ThreadManager({
+      version: "test",
+      extensions,
+      tools,
+      idleCloseMs: 10,
+      onWarning: (text) => warnings.push(text),
+    });
+    try {
+      const thread = await idle.create({ harness: "fake", settings: settings() });
+      const session = sessionOf(thread);
+      const close = session.close.bind(session);
+      session.close = () => Promise.reject(new Error("the process is stuck"));
+      await until(() => warnings.length > 0);
+      assert.match(warnings[0]!, /Could not close the idle .* session of .*: the process is stuck/);
+      assert.equal(thread.status, "idle");
+      thread.thread.send({ text: "still here" });
+      await idle.wait(thread.id, 1000);
+      assert.deepEqual(session.prompts, ["still here"]);
+      session.close = close;
+      await until(() => thread.status === "parked");
+    } finally {
+      await idle.closeAll();
+    }
+  });
+
   it("wakes into a new thread with a handoff when the harness cannot resume its own", async () => {
     const thread = await manager.create({ harness: "fake-forgetful", settings: settings() });
     thread.thread.send({ text: "remember the parser" });

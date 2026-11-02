@@ -231,6 +231,54 @@ describe("Thread", () => {
     await thread.close();
   });
 
+  it("reports an input handler that fails, sending or steering, and drops the message", async () => {
+    const { session, thread } = await setup();
+    const errors: string[] = [];
+    thread.subscribe((event) => {
+      if (event.type === "error") errors.push(event.message);
+    });
+    thread.send({ text: "work" });
+    thread.addInputHandler((input) => {
+      if (input.text.startsWith("bad")) throw new Error("handler broke");
+      return input.text === "drop" ? null : undefined;
+    });
+    // Steering resolves rather than rejecting, as `send` never throws for a handler.
+    const steered = await thread.steer({ text: "bad steer" });
+    assert.equal(steered.input.text, "bad steer");
+    await thread.steer({ text: "drop" });
+    thread.send({ text: "bad send" });
+    await settle();
+    assert.deepEqual(errors, [
+      "An input handler failed: handler broke",
+      "An input handler failed: handler broke",
+    ]);
+    assert.deepEqual(session.steered, []);
+    assert.deepEqual(session.turns, ["work"]);
+    assert.equal(thread.queue.length, 0);
+    await thread.close();
+  });
+
+  it("reports an automatic answer that does not reach the harness", async () => {
+    const { session, thread } = await setup();
+    const errors: string[] = [];
+    thread.subscribe((event) => {
+      if (event.type === "error") errors.push(event.message);
+    });
+    session.events.push(approval("a", "npm test"));
+    await settle();
+    await thread.respond("a", { kind: "approval", optionId: "always" });
+    session.respond = () => Promise.reject(new Error("the harness went away"));
+    session.events.push(approval("b", "npm test"));
+    await settle();
+    assert.match(errors[0] ?? "", /always allow \(the harness went away\)/);
+    thread.addRequestHandler(() => ({ kind: "cancel" }));
+    session.events.push(approval("c", "rm -rf build"));
+    await settle();
+    await settle();
+    assert.match(errors[1] ?? "", /request handler's answer \(the harness went away\)/);
+    await thread.close();
+  });
+
   it("gives the harness each message's ID, and keeps who sent it", async () => {
     const { session, thread } = await setup();
     thread.addInputHandler((input) => ({ text: input.text.toUpperCase() }));

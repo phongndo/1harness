@@ -282,7 +282,16 @@ export class Thread {
     if (!force && !this.idle) throw new Error("The thread is working");
     // Messages sent while it closes wait for the session that wakes it.
     this.#parking = force ? "stop" : "idle";
-    await session.close();
+    try {
+      await session.close();
+    } catch (error) {
+      // The session goes on, so the thread does too, and runs what waited for it to park.
+      if (this.#session === session) {
+        this.#parking = null;
+        if (!this.#busy) this.#drain();
+      }
+      throw error;
+    }
     await this.#pumping;
   }
 
@@ -530,14 +539,7 @@ export class Thread {
     // Listeners learn the thread has work before the handlers finish.
     this.#emitQueue();
     this.#inputChain = this.#inputChain.then(async () => {
-      let filtered: UserInput | null;
-      try {
-        filtered = await this.#filterInput(input);
-      } catch (error) {
-        this.#pending.delete(message);
-        this.#emit({ type: "error", message: `An input handler failed: ${errorMessage(error)}` });
-        return;
-      }
+      const filtered = await this.#filterInput(input);
       const kept = this.#pending.delete(message);
       if (filtered && kept) this.#enqueue(prepare(message, filtered));
       // A dropped message may leave the thread with nothing to do.
@@ -650,12 +652,18 @@ export class Thread {
     this.#closed = true;
   }
 
+  /** The input after every handler, or null when one dropped it or failed, which drops it too. */
   async #filterInput(input: UserInput): Promise<UserInput | null> {
     let current = input;
-    for (const handler of this.#inputHandlers) {
-      const result = await handler(current);
-      if (result === null) return null;
-      if (result) current = result;
+    try {
+      for (const handler of this.#inputHandlers) {
+        const result = await handler(current);
+        if (result === null) return null;
+        if (result) current = result;
+      }
+    } catch (error) {
+      this.#emit({ type: "error", message: `An input handler failed: ${errorMessage(error)}` });
+      return null;
     }
     return current;
   }
@@ -678,14 +686,15 @@ export class Thread {
    */
   #enqueue(entry: Prepared): void {
     if (this.#held && entry.message.origin.type === "user") this.#held = false;
+    const session = this.#session;
     const ready =
       !this.#busy &&
       this.#incoming === null &&
-      this.#session !== null &&
+      session !== null &&
       this.#parking === null &&
       !this.#held;
     if (ready && this.#queue.length === 0) {
-      this.#dispatch(entry, true);
+      this.#dispatch(session, entry, true);
       return;
     }
     // Recorded once it is in the queue, so nobody sees the thread with nothing to do.
@@ -711,6 +720,23 @@ export class Thread {
     return option ? { kind: "approval", optionId: option.id } : undefined;
   }
 
+  /**
+   * Answers a request no client saw. An answer that does not land is reported,
+   * since the turn would otherwise wait on a request nobody can see.
+   */
+  async #answer(request: HarnessRequest, response: RequestResponse, what: string): Promise<void> {
+    const session = this.#session;
+    if (!session) return;
+    try {
+      await session.respond(request.id, response);
+    } catch (error) {
+      this.#emit({
+        type: "error",
+        message: `Could not send ${what} (${errorMessage(error)}); the turn may be waiting on it. Stop it to go on.`,
+      });
+    }
+  }
+
   /** Offers a request to the handlers; one nobody answers goes to clients. */
   async #intercept(request: HarnessRequest): Promise<void> {
     for (const handler of this.#requestHandlers) {
@@ -721,7 +747,7 @@ export class Thread {
         this.#emit({ type: "error", message: `A request handler failed: ${errorMessage(error)}` });
       }
       if (response) {
-        await this.#session?.respond(request.id, response).catch(() => {});
+        await this.#answer(request, response, "a request handler's answer");
         return;
       }
     }
@@ -730,16 +756,11 @@ export class Thread {
     this.#emit({ type: "request.opened", request });
   }
 
-  /** Sends a message to the harness; `record` admits it first, for one that never queued. */
-  #dispatch(entry: Prepared, record = false): void {
-    const session = this.#session;
-    if (!session) {
-      this.#queue.unshift(entry);
-      if (record)
-        this.#emit({ type: "message.recorded", message: entry.message, input: entry.input });
-      this.#emitQueue();
-      return;
-    }
+  /**
+   * Sends a message to the running session, which callers checked is there;
+   * `record` admits it first, for one that never queued.
+   */
+  #dispatch(session: HarnessSession, entry: Prepared, record: boolean): void {
     // Busy is set before the harness confirms so a second send queues instead of racing.
     this.#busy = true;
     if (record)
@@ -760,11 +781,12 @@ export class Thread {
   }
 
   #drain(): void {
-    if (!this.#session || this.#held || this.#parking) return;
+    const session = this.#session;
+    if (!session || this.#held || this.#parking) return;
     const next = this.#queue.shift();
     if (!next) return;
     this.#emitQueue();
-    this.#dispatch(next);
+    this.#dispatch(session, next, false);
   }
 
   async #pump(session: HarnessSession): Promise<void> {
@@ -849,7 +871,7 @@ export class Thread {
       case "request.opened": {
         const allowed = this.#allowed(event.request);
         if (allowed) {
-          void this.#session?.respond(event.request.id, allowed).catch(() => {});
+          void this.#answer(event.request, allowed, "an approval you chose to always allow");
           return;
         }
         if (this.#requestHandlers.length > 0) {
@@ -864,9 +886,6 @@ export class Thread {
         break;
       case "usage.updated":
         this.#usage = event.usage;
-        break;
-      case "session.closed":
-        // `#detach` already let the session go.
         break;
       case "session.updated":
         this.#info = { ...event.info };

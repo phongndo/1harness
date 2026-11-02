@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { configDir, socketFile } from "../core/paths.ts";
+import { errorMessage } from "../core/thread.ts";
 import type { ServerTarget } from "./socket.ts";
 
 /** Servers known by a short name, such as `z`, kept in `hosts.json` in the config folder. */
@@ -10,12 +11,23 @@ function file(env: NodeJS.ProcessEnv): string {
   return join(configDir(env), "hosts.json");
 }
 
+/** The known hosts; none when the file is missing. One that cannot be read throws, so it is not overwritten. */
 export function loadHosts(env: NodeJS.ProcessEnv = process.env): Hosts {
+  const path = file(env);
+  let text: string;
   try {
-    const parsed = JSON.parse(readFileSync(file(env), "utf8")) as { hosts?: Hosts };
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw new Error(`Could not read ${path}: ${errorMessage(error)}`, { cause: error });
+  }
+  try {
+    const parsed = JSON.parse(text) as { hosts?: Hosts };
     return parsed.hosts ?? {};
-  } catch {
-    return {};
+  } catch (error) {
+    throw new Error(`${path} is not valid JSON (${errorMessage(error)}); fix or delete it`, {
+      cause: error,
+    });
   }
 }
 

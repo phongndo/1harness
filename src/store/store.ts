@@ -40,7 +40,7 @@ export interface ThreadRow {
   pinned: boolean;
   archived: boolean;
   /** Its title was given, by the user or the agent that started it, so no harness's replaces it. */
-  named?: boolean;
+  named: boolean;
   /** How many runs a client has shown. */
   seenRuns: number;
   /** What the harness last said of its context and cost. */
@@ -366,14 +366,8 @@ export class Store {
       parentId: row["parent_id"] === null ? null : String(row["parent_id"]),
       parentCallId: row["parent_call_id"] === null ? null : String(row["parent_call_id"]),
       origin: row["origin"] === "delegated" ? "delegated" : "user",
-      forkedFrom:
-        row["forked_from"] === null || row["forked_from"] === undefined
-          ? null
-          : String(row["forked_from"]),
-      forkContext:
-        row["fork_context"] === null || row["fork_context"] === undefined
-          ? null
-          : String(row["fork_context"]),
+      forkedFrom: row["forked_from"] === null ? null : String(row["forked_from"]),
+      forkContext: row["fork_context"] === null ? null : String(row["fork_context"]),
       state: String(row["state"]) as ThreadRow["state"],
       info: json(row["info"]),
       capabilities: json(row["capabilities"]),
@@ -385,7 +379,7 @@ export class Store {
       error: row["error"] === null ? null : String(row["error"]),
       pinned: Number(row["pinned"]) === 1,
       archived: Number(row["archived"]) === 1,
-      named: Number(row["named"] ?? 0) === 1,
+      named: Number(row["named"]) === 1,
       seenRuns: Number(row["seen_runs"]),
       usage: typeof row["usage"] === "string" ? json(row["usage"]) : null,
       createdAt: Number(row["created_at"]),
@@ -554,7 +548,7 @@ export class Store {
    * Records a message the thread took, with the input its harness gets, before
    * it is sent; it stays queued until dispatched or dropped.
    */
-  recordMessage(threadId: string, message: Message, sent: UserInput, state: MessageState): void {
+  recordMessage(threadId: string, message: Message, sent: UserInput): void {
     const position = Number(
       this.#get("SELECT COUNT(*) AS count FROM messages WHERE thread_id = ?", threadId)?.[
         "count"
@@ -562,7 +556,7 @@ export class Store {
     );
     this.#run(
       `INSERT INTO messages (id, thread_id, position, origin, input, sent, command, state, request_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET state = excluded.state`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?) ON CONFLICT (id) DO UPDATE SET state = 'queued'`,
       message.id,
       threadId,
       position,
@@ -570,7 +564,6 @@ export class Store {
       JSON.stringify(message.input),
       JSON.stringify(sent),
       message.command ? 1 : 0,
-      state,
       message.requestId ?? null,
       Date.now(),
     );

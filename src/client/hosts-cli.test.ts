@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -153,6 +153,14 @@ describe("hostsCommand", () => {
     out = "";
     assert.equal(await hosts(["check"]), 1);
     assert.equal(await hosts(["check", "box"]), 0);
+  });
+
+  it("refuses to add to a hosts.json it cannot read, rather than overwrite it", async () => {
+    const folder = join(process.env["XDG_CONFIG_HOME"]!, "1harness");
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(join(folder, "hosts.json"), '{"hosts": {"box": ');
+    await assert.rejects(hosts(["add", "attic", socket]), /hosts\.json is not valid JSON/);
+    assert.equal(readFileSync(join(folder, "hosts.json"), "utf8"), '{"hosts": {"box": ');
   });
 
   it("prints its help for help, and fails for a command it does not know", async () => {

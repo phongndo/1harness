@@ -136,7 +136,7 @@ export interface ManagerOptions {
 export interface RestoredThread {
   id: string;
   title: string;
-  named?: boolean;
+  named: boolean;
   harness: HarnessId;
   parentId: string | null;
   parentCallId: string | null;
@@ -296,27 +296,29 @@ export class ThreadManager {
     const parent = options.parentId ? this.#extensions.get(options.parentId) : undefined;
     const extensions =
       parent ?? (await this.#extensionsFor(options.settings.cwd, options.openedBy ?? null));
-    const mcp = await this.#sessionServers(extensions);
+    const id = newThreadId();
+    const servers = await this.#connectServers(id, extensions);
     let created: Thread | null = null;
     const toolPolicy = extensions.toolPolicy(() => created);
-    const settings = {
-      ...options.settings,
-      ...(Object.keys(mcp.servers).length > 0 ? { mcpServers: mcp.servers } : {}),
-      ...(toolPolicy ? { toolPolicy } : {}),
-    };
     let thread: Thread;
     try {
       thread = new Thread(
-        createSession(options.harness, settings, { version: this.#options.version }),
+        createSession(
+          options.harness,
+          { ...options.settings, ...sessionExtras(servers, toolPolicy) },
+          this.#env(),
+        ),
       );
     } catch (error) {
-      mcp.grant?.revoke();
+      this.#grants.get(id)?.revoke();
+      this.#grants.delete(id);
+      this.#servers.delete(id);
       throw error;
     }
     created = thread;
-    mcp.grant?.bind(thread);
+    this.#grants.get(id)?.bind(thread);
     const managed: ManagedThread = {
-      id: newThreadId(),
+      id,
       title: options.title ?? "",
       named: options.named ?? Boolean(options.title),
       harness: options.harness,
@@ -332,8 +334,6 @@ export class ThreadManager {
       runs: [],
       error: null,
     };
-    this.#servers.set(managed.id, mcp.servers);
-    if (mcp.grant) this.#grants.set(managed.id, mcp.grant);
     // Its harness's own thread has seen none of the turns the fork's handoff carries.
     if (options.fork?.handoff) {
       thread.setHandoff(options.fork.handoff);
@@ -364,15 +364,24 @@ export class ThreadManager {
     return this.#extensions.get(id);
   }
 
-  /** The MCP servers a new session gets, reporting problems with the shared config once. */
-  async #sessionServers(extensions: ExtensionHost) {
+  /**
+   * Connects a thread's MCP servers, which its sessions get, the tool server's
+   * grant among them; the caller binds the grant to the thread. Problems with
+   * the shared config are reported once.
+   */
+  async #connectServers(
+    id: string,
+    extensions: ExtensionHost,
+  ): Promise<Record<string, McpServerConfig>> {
     const mcp = await extensions.sessionServers(this.#options.tools);
     for (const warning of mcp.warnings) {
       if (this.#warned.has(warning)) continue;
       this.#warned.add(warning);
       this.#options.onWarning?.(`MCP config: ${warning}`);
     }
-    return mcp;
+    this.#servers.set(id, mcp.servers);
+    if (mcp.grant) this.#grants.set(id, mcp.grant);
+    return mcp.servers;
   }
 
   /** Connects a thread to the manager and the extensions, and lists it. */
@@ -419,7 +428,7 @@ export class ThreadManager {
       const managed: ManagedThread = {
         id: entry.id,
         title: entry.title,
-        named: entry.named ?? false,
+        named: entry.named,
         harness: entry.harness,
         parentId: entry.parentId,
         parentCallId: entry.parentCallId,
@@ -486,7 +495,7 @@ export class ThreadManager {
   async switchHarness(
     id: string,
     harness: HarnessId,
-    options: { model?: string | null; effort?: string | null; fresh?: boolean } = {},
+    options: { fresh?: boolean } = {},
   ): Promise<SwitchResult> {
     const managed = this.#threads.get(id);
     if (!managed || this.closing(id)) throw new Error(`No open thread ${id}`);
@@ -500,7 +509,7 @@ export class ThreadManager {
           .join(", ")}`,
       );
     const earlier = harness === from ? undefined : this.#visits.get(id)?.get(harness);
-    return this.#move(managed, harness, earlier && !fresh ? earlier : undefined, options);
+    return this.#move(managed, harness, earlier && !fresh ? earlier : undefined);
   }
 
   /**
@@ -524,7 +533,7 @@ export class ThreadManager {
       contextTokens: null,
       leftAt: Date.now(),
     };
-    return this.#move(managed, managed.harness, own.native ? own : undefined, {}, true);
+    return this.#move(managed, managed.harness, own.native ? own : undefined, true);
   }
 
   /**
@@ -587,7 +596,6 @@ export class ThreadManager {
     managed: ManagedThread,
     harness: HarnessId,
     earlier: Visit | undefined,
-    options: { model?: string | null; effort?: string | null },
     waking = false,
   ): Promise<SwitchResult> {
     const id = managed.id;
@@ -618,15 +626,14 @@ export class ThreadManager {
     // As narrow as the thread runs now, which may be narrower than it was asked to.
     const settings: SessionOptions = {
       cwd: info.cwd,
-      model: options.model ?? (same ? info.model : (earlier?.model ?? null)),
-      effort: options.effort ?? (same ? info.effort : (earlier?.effort ?? null)),
+      model: same ? info.model : (earlier?.model ?? null),
+      effort: same ? info.effort : (earlier?.effort ?? null),
       runtimeMode: info.runtimeMode,
       interactionMode: info.interactionMode,
       resume: null,
     };
     const extensions = this.#extensions.get(id)!;
     const toolPolicy = extensions.toolPolicy(() => thread);
-    let extras: Partial<SessionOptions> = {};
     const plans = [
       ...(earlier?.native ? [{ resume: earlier.native, seen: earlier.runs }] : []),
       { resume: null, seen: 0 },
@@ -652,18 +659,10 @@ export class ThreadManager {
       // A thread brought back after a restart connects its servers on first use.
       let servers = this.#servers.get(id);
       if (!servers) {
-        const mcp = await this.#sessionServers(extensions);
-        servers = mcp.servers;
-        this.#servers.set(id, servers);
-        if (mcp.grant) {
-          mcp.grant.bind(thread);
-          this.#grants.set(id, mcp.grant);
-        }
+        servers = await this.#connectServers(id, extensions);
+        this.#grants.get(id)?.bind(thread);
       }
-      extras = {
-        ...(Object.keys(servers).length > 0 ? { mcpServers: servers } : {}),
-        ...(toolPolicy ? { toolPolicy } : {}),
-      };
+      const extras = sessionExtras(servers, toolPolicy);
       // One switch tries every plan, so nothing sent meanwhile reaches the old harness.
       const { attempt, failures } = await thread.replaceSession(
         plans.map((plan) => ({
@@ -797,20 +796,7 @@ export class ThreadManager {
     const run = managed.runs.at(-1);
     switch (event.type) {
       case "turn.started":
-        managed.runs.push({
-          index: managed.runs.length + 1,
-          turnId: event.turnId,
-          harness: managed.harness,
-          status: "running",
-          input: "",
-          origin: null,
-          result: null,
-          files: [],
-          commands: [],
-          error: null,
-          startedAt: Date.now(),
-          endedAt: null,
-        });
+        managed.runs.push(newRun(managed, { turnId: event.turnId }));
         break;
       case "turn.ended":
         if (run && run.status === "running") {
@@ -856,23 +842,15 @@ export class ThreadManager {
       case "error":
         // A message that could not start its turn is a run that failed at once.
         if (event.unsent) {
-          const now = Date.now();
-          const input = messageText(event.unsent);
-          managed.runs.push({
-            index: managed.runs.length + 1,
-            turnId: "",
-            harness: managed.harness,
+          const failed = newRun(managed, {
             status: "failed",
-            input,
+            input: messageText(event.unsent),
             origin: event.unsent.origin,
-            result: null,
-            files: [],
-            commands: [],
             error: event.message,
-            startedAt: now,
-            endedAt: now,
           });
-          if (!managed.title) managed.title = titleFrom(input);
+          failed.endedAt = failed.startedAt;
+          managed.runs.push(failed);
+          if (!managed.title) managed.title = titleFrom(failed.input);
         }
         break;
       case "session.closed":
@@ -930,13 +908,17 @@ export class ThreadManager {
     if (timer) return;
     const next = setTimeout(() => {
       this.#idleTimers.delete(managed.id);
-      void this.park(managed.id).then(
-        (parked) => {
-          // Background work keeps it open; it is tried again later.
+      void this.park(managed.id)
+        .catch((error: unknown) => {
+          this.#options.onWarning?.(
+            `Could not close the idle ${label(managed.harness)} session of ${managed.id}: ${errorMessage(error)}`,
+          );
+          return false;
+        })
+        .then((parked) => {
+          // Background work, or a session that would not close, keeps it open; it is tried again later.
           if (!parked && managed.status === "idle") this.#idle(managed);
-        },
-        () => {},
-      );
+        });
     }, ms);
     next.unref();
     this.#idleTimers.set(managed.id, next);
@@ -945,6 +927,36 @@ export class ThreadManager {
   #emit(event: ManagerEvent): void {
     for (const listener of this.#listeners) listener(event);
   }
+}
+
+/** A thread's next run, started now, with nothing in it yet but what `fields` says. */
+function newRun(managed: ManagedThread, fields: Partial<RunRecord>): RunRecord {
+  return {
+    index: managed.runs.length + 1,
+    turnId: "",
+    harness: managed.harness,
+    status: "running",
+    input: "",
+    origin: null,
+    result: null,
+    files: [],
+    commands: [],
+    error: null,
+    startedAt: Date.now(),
+    endedAt: null,
+    ...fields,
+  };
+}
+
+/** What every session of a thread is started with besides its own settings. */
+function sessionExtras(
+  servers: Record<string, McpServerConfig>,
+  toolPolicy: SessionOptions["toolPolicy"] | null | undefined,
+): Partial<SessionOptions> {
+  return {
+    ...(Object.keys(servers).length > 0 ? { mcpServers: servers } : {}),
+    ...(toolPolicy ? { toolPolicy } : {}),
+  };
 }
 
 /**
