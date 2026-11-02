@@ -92,6 +92,11 @@ function post(body: unknown, headers: Record<string, string>): Promise<unknown> 
   });
 }
 
+/** A request body opening a thread named `title`. */
+function open(title: string) {
+  return { method: "thread.open", params: { harness: "scripted", settings, title } };
+}
+
 /** The lines of an event stream, until it ends or `ms` pass. */
 function lines(path: string, ms: number): Promise<string[]> {
   return new Promise((resolve, reject) => {
@@ -174,6 +179,36 @@ describe("HostServer", () => {
       error: { code: string };
     };
     assert.equal(refused.error.code, "unknown_method");
+  });
+
+  it("answers a retried read afresh, keeping no copy of what it sent", async () => {
+    await start();
+    const client = await connect("a");
+    const body = { method: "threads.list", params: { scope: "recent" } };
+    const headers = { [CLIENT_HEADER]: "a", [REQUEST_HEADER]: "a:read" };
+    const listed = (await post(body, headers)) as { result: unknown[] };
+    assert.equal(listed.result.length, 0);
+    await client.call("thread.open", { harness: "scripted", settings });
+    const again = (await post(body, headers)) as { result: unknown[] };
+    assert.equal(again.result.length, 1);
+  });
+
+  it("keeps a bounded size of answers for retries, letting the oldest go", async () => {
+    await start();
+    await connect("a");
+    const big = "x".repeat(600 * 1024);
+    const first = (await post(open(big), { [CLIENT_HEADER]: "a", [REQUEST_HEADER]: "a:1" })) as {
+      result: { id: string };
+    };
+    const retried = (await post(open(big), { [CLIENT_HEADER]: "a", [REQUEST_HEADER]: "a:1" })) as {
+      result: { id: string };
+    };
+    assert.equal(retried.result.id, first.result.id);
+    await post(open(big), { [CLIENT_HEADER]: "a", [REQUEST_HEADER]: "a:2" });
+    const late = (await post(open(big), { [CLIENT_HEADER]: "a", [REQUEST_HEADER]: "a:1" })) as {
+      result: { id: string };
+    };
+    assert.notEqual(late.result.id, first.result.id);
   });
 
   it("tells a client too far behind to say hello again", async () => {

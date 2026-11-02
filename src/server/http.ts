@@ -23,6 +23,25 @@ const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 const LEAVE_GRACE_MS = 10_000;
 /** How many answers to remember per client, for requests retried after a dropped connection. */
 const REMEMBERED = 100;
+/** How much of those answers to keep per client; pictures and pages would hold megabytes each. */
+const REMEMBERED_BYTES = 1024 * 1024;
+/**
+ * Methods that change nothing, so a retry can run them again: their answers,
+ * often the largest, such as images and transcripts, are not remembered.
+ */
+const READS: ReadonlySet<string> = new Set<Method>([
+  "client.hello",
+  "threads.list",
+  "threads.search",
+  "thread.attach",
+  "harnesses.list",
+  "commands.list",
+  "commands.complete",
+  "files.search",
+  "files.image",
+  "media.html",
+  "page.frame",
+]);
 
 /** Who a listener says a caller is, or a reason to turn it away. */
 export type Authorizer = (
@@ -43,6 +62,13 @@ interface Answer {
   body: string;
 }
 
+/** A client's remembered answers by request ID, and how large they are together. */
+interface Remembered {
+  answers: Map<string, Promise<Answer>>;
+  sizes: Map<string, number>;
+  bytes: number;
+}
+
 /**
  * The host over HTTP/1.1, on whatever listeners it is given: `GET /v1/hello`,
  * `POST /v1/rpc`, and `GET /v1/events?after=<seq>`, a stream of the host's
@@ -60,7 +86,7 @@ export class HostServer {
   /** Clients counted as gone, which say hello again if they come back. */
   #departed = new Set<string>();
   /** Answers by client and request ID. */
-  #answers = new Map<string, Map<string, Promise<Answer>>>();
+  #answers = new Map<string, Remembered>();
   #startedAt = Date.now();
 
   constructor(host: Host, options: ServerOptions) {
@@ -178,19 +204,49 @@ export class HostServer {
       });
       return;
     }
-    const requestId = header(request, REQUEST_HEADER);
-    const remembered = this.#answers.get(client) ?? new Map<string, Promise<Answer>>();
-    this.#answers.set(client, remembered);
-    let answer = requestId ? remembered.get(requestId) : undefined;
+    const method = String(body.method);
+    const requestId = READS.has(method) ? null : header(request, REQUEST_HEADER);
+    const remembered = requestId ? this.#remembered(client) : null;
+    let answer = requestId ? remembered?.answers.get(requestId) : undefined;
     if (!answer) {
-      answer = this.#answer(client, String(body.method), body.params ?? {});
-      if (requestId) {
-        remembered.set(requestId, answer);
-        if (remembered.size > REMEMBERED) remembered.delete(remembered.keys().next().value!);
-      }
+      answer = this.#answer(client, method, body.params ?? {});
+      if (requestId && remembered) this.#remember(remembered, requestId, answer);
     }
     const { status, body: text } = await answer;
     response.writeHead(status, { "Content-Type": "application/json" }).end(text);
+  }
+
+  #remembered(client: string): Remembered {
+    let remembered = this.#answers.get(client);
+    if (!remembered) {
+      remembered = { answers: new Map(), sizes: new Map(), bytes: 0 };
+      this.#answers.set(client, remembered);
+    }
+    return remembered;
+  }
+
+  /** Keeps an answer for a retry, letting the oldest go past the count or the size. */
+  #remember(remembered: Remembered, requestId: string, answer: Promise<Answer>): void {
+    const { answers, sizes } = remembered;
+    answers.set(requestId, answer);
+    void answer.then(({ body }) => {
+      if (answers.get(requestId) !== answer) return;
+      sizes.set(requestId, body.length);
+      remembered.bytes += body.length;
+      evict();
+    });
+    const evict = () => {
+      while (
+        answers.size > REMEMBERED ||
+        (remembered.bytes > REMEMBERED_BYTES && answers.size > 1)
+      ) {
+        const oldest = answers.keys().next().value!;
+        answers.delete(oldest);
+        remembered.bytes -= sizes.get(oldest) ?? 0;
+        sizes.delete(oldest);
+      }
+    };
+    evict();
   }
 
   async #answer(client: string, method: string, params: unknown): Promise<Answer> {
