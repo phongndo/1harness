@@ -927,11 +927,6 @@ export class App {
     this.#screen.enter();
     await this.#detectTerminal();
 
-    this.#home.local({
-      kind: "banner",
-      title: "1harness",
-      subtitle: `v${this.#version} · Run /help for commands`,
-    });
     for (const warning of this.#warnings) this.#notice("warning", warning);
     for (const note of this.#notes) this.#notice("info", note);
     const initial = this.#editor.text;
@@ -961,25 +956,6 @@ export class App {
         `${held.join(", ")} ${held.length === 1 ? "has" : "have"} messages waiting from before 1harness stopped; /threads opens ${held.length === 1 ? "it" : "them"}.`,
       );
     const resume = this.#settings.resume;
-    // Threads left open from before go on working; say so, since a new one is on screen.
-    const open = hello.threads.filter(
-      (thread) =>
-        thread.status !== "closed" &&
-        thread.parentId === null &&
-        !thread.archived &&
-        thread.id !== resume &&
-        !held.includes(thread.id),
-    );
-    if (open.length > 0) {
-      const named = open
-        .slice(0, 3)
-        .map((thread) => `${thread.id} ${thread.title || "untitled"} (${agentStatus(thread)})`);
-      const more = open.length > 3 ? `, and ${open.length - 3} more` : "";
-      this.#notice(
-        "info",
-        `Still open: ${named.join(", ")}${more}. ctrl+t switches to ${open.length === 1 ? "it" : "them"}.`,
-      );
-    }
     if (resume) await this.#resume(resume, this.#harness);
     else await this.#open(this.#harness, this.#settings, false);
     if (initial.trim() !== "") this.#submit(initial);
@@ -3669,6 +3645,7 @@ export class App {
         `${model ?? "the harness's default"}${info.model === null && model ? " (default)" : ""}${info.effort ? ` · ${info.effort}` : ""}`,
       ],
       ["Mode", `${info.runtimeMode}${info.interactionMode === "plan" ? " · plan" : ""}`],
+      ["1harness", `v${this.#version}`],
     ];
     if (usage && usage.contextTokens !== null && usage.contextWindow) {
       const percent = Math.round((usage.contextTokens / usage.contextWindow) * 100);
@@ -3803,27 +3780,12 @@ export class App {
     const transcript = this.#selection
       ? paintSelection(view.rows, this.#selection, view.top, width)
       : view.rows;
-    // A new thread opens on a welcome, with the composer under it, centered.
-    // Only where it fits with everything else, so the composer stays on screen.
-    const welcome = this.#hero(width);
-    const hero =
-      view.rows.length + welcome.length + footer.rows.length + 2 <= height ? welcome : [];
-    const above =
-      hero.length > 0
-        ? [
-            ...transcript,
-            ...Array.from(
-              {
-                length: Math.max(
-                  1,
-                  Math.floor((height - view.rows.length - hero.length - footer.rows.length) / 2),
-                ),
-              },
-              () => "",
-            ),
-            ...hero,
-          ]
-        : transcript;
+    // The composer sits on the screen's last rows from the first frame to the
+    // last; the transcript reads down from the top, and the rows between stay blank.
+    const above = [
+      ...transcript,
+      ...Array.from({ length: Math.max(0, room - transcript.length) }, () => ""),
+    ];
     this.#listAt = footer.list
       ? { menu: footer.list.menu, row: above.length + footer.list.row }
       : null;
@@ -3834,37 +3796,6 @@ export class App {
     const rows = [...above, ...footer.rows].map((row) => (row === "" ? row : indent + row));
     this.#screen.render(rows, cursor, view.pictures);
     this.#animate();
-  }
-
-  /**
-   * The welcome a new thread opens on: what to work on, and where, and with
-   * what; nothing once the thread has a turn, or while something asks.
-   */
-  #hero(width: number): string[] {
-    const current = this.#current;
-    if (!current || current.runCount > 0 || current.busy || this.#prompt || this.#view.turn)
-      return [];
-    const info = current.info;
-    const folder = basename(info.cwd) || info.cwd;
-    const model = info.model ?? this.#defaultModel();
-    const center = (text: string) =>
-      " ".repeat(Math.max(0, Math.floor((width - visibleWidth(text)) / 2))) + text;
-    return [
-      center(
-        `${style.bold(style.strong("What should we work on in"))} ${style.bold(style.link(folder))}${style.bold(style.strong("?"))}`,
-      ),
-      center(
-        style.muted(
-          [this.#harnessLabel(current.harness), model, info.runtimeMode]
-            .filter(Boolean)
-            .join(" · "),
-        ),
-      ),
-      "",
-      center(
-        style.faint("@ files   / commands   shift+tab plan   ctrl+t threads   ctrl+x details"),
-      ),
-    ];
   }
 
   /** Runs the blink only while something on screen is in progress. */
@@ -3940,27 +3871,28 @@ export class App {
         0,
         Math.min(layout.cursor.row - limit + 1, layout.rows.length - limit),
       );
-      if (!this.#panel)
-        cursor = { row: rows.length + layout.cursor.row - start, column: layout.cursor.column };
-      rows.push(...layout.rows.slice(start, start + limit));
-      // Room for the list: the screen less the rows above it, the panel chrome, and a little transcript.
-      const listRows = Math.max(3, Math.min(14, height - rows.length - 8));
+      const composer = layout.rows.slice(start, start + limit);
+      // Room for a list: the screen less the rows above it, the composer and
+      // status line under it, the list's chrome, and a little transcript.
+      const listRows = Math.max(3, Math.min(14, height - rows.length - composer.length - 11));
       const listed =
         this.#panel?.kind === "menu"
           ? this.#panel.menu
           : this.#panel
             ? null
             : (this.#slash ?? this.#args?.menu ?? this.#mention?.menu ?? null);
+      // Lists and panels open above the composer, which keeps its place at the bottom.
+      const panel =
+        this.#panel?.kind === "info"
+          ? infoPanel(this.#panel.title, this.#panel.rows, width)
+          : listed
+            ? listed.render(width, listRows)
+            : [];
       if (listed) list = { menu: listed, row: rows.length };
-      if (this.#panel?.kind === "menu") rows.push(...this.#panel.menu.render(width, listRows));
-      else if (this.#panel?.kind === "info")
-        rows.push(...infoPanel(this.#panel.title, this.#panel.rows, width));
-      else if (this.#slash) rows.push(...this.#slash.render(width, listRows));
-      // fx keeps the status line under an argument list.
-      else if (this.#args)
-        rows.push(...this.#args.menu.render(width, listRows), this.#statusLine(width));
-      else if (this.#mention) rows.push(...this.#mention.menu.render(width, listRows));
-      else rows.push("", this.#statusLine(width));
+      if (panel.length > 0) rows.push(...panel, "");
+      if (!this.#panel)
+        cursor = { row: rows.length + layout.cursor.row - start, column: layout.cursor.column };
+      rows.push(...composer, "", this.#statusLine(width));
     }
     if (rows.length > height) {
       const cut = rows.length - height;
@@ -4037,6 +3969,13 @@ export class App {
         thread.id !== this.#currentId && thread.status !== "idle" && thread.status !== "parked",
     ).length;
     if (others > 0) parts.push(`${others} other ${others === 1 ? "thread" : "threads"} working`);
+    else {
+      // Threads of your own left open, not the agents they started, which ctrl+t lists under them.
+      const open = threads.filter(
+        (thread) => thread.id !== this.#currentId && thread.parentId === null && !thread.archived,
+      ).length;
+      if (open > 0) parts.push(`${open} other open · ctrl+t`);
+    }
     if (!this.#server.local) parts.push(`on ${this.#server.label}`);
     // Subscription limits appear once they need attention.
     for (const limit of this.#current?.usage?.limits ?? []) {

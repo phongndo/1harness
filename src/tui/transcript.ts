@@ -24,7 +24,6 @@ export type ToolItem = Extract<
 >;
 
 export type Block =
-  | { kind: "banner"; title: string; subtitle: string }
   /** A message for the agent; `label` says who sent it when the user did not, such as `Task from t1`. */
   | { kind: "user"; text: string; label?: string; images?: string[] }
   /** A task's result, as it reached the thread that delegated it. */
@@ -373,10 +372,6 @@ export function renderBlock(block: Block, context: RenderContext): string[] {
   // A finished turn's work shows as its summary; in detail, all of it.
   if ("folded" in block && block.folded && !context.details) return [];
   switch (block.kind) {
-    case "banner":
-      return [
-        truncate(`${style.bold(style.strong(block.title))} ${style.muted(block.subtitle)}`, width),
-      ];
     case "user":
       return userRows(block, context);
     case "result":

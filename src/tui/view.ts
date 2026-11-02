@@ -222,8 +222,7 @@ export class ThreadView {
    */
   local<T extends Block>(block: T): T {
     this.transcript.add(block);
-    // A banner heads the view, whatever comes before the entries it was shown with.
-    this.#locals.push({ at: block.kind === "banner" ? -1 : this.#applied, block });
+    this.#locals.push({ at: this.#applied, block });
     return block;
   }
 
@@ -235,7 +234,7 @@ export class ThreadView {
   /**
    * Shows `entries` from the start, as one log, with the terminal's own lines
    * of `from` back where they were among them; `shift` entries come before the
-   * ones `from` showed. `earlier` says, under any banner, that more is above.
+   * ones `from` showed. `earlier` says, at the top, that more is above.
    * For a view built again with earlier entries loaded.
    */
   rebuild(
@@ -245,10 +244,7 @@ export class ThreadView {
     context: ViewContext,
     earlier: string | null,
   ): void {
-    const locals = from.#locals.map((local) => ({
-      at: local.at === -1 ? -1 : local.at + shift,
-      block: local.block,
-    }));
+    const locals = from.#locals.map((local) => ({ at: local.at + shift, block: local.block }));
     let next = 0;
     const place = (upTo: number) => {
       for (let local = locals[next]; local && local.at <= upTo; local = locals[++next]) {
@@ -256,7 +252,6 @@ export class ThreadView {
         this.#locals.push(local);
       }
     };
-    place(-1);
     if (earlier) this.earlier(earlier);
     for (const [index, entry] of entries.entries()) {
       place(index);

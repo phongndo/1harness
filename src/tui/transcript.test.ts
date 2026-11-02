@@ -627,9 +627,8 @@ describe("cut-off calls", () => {
 describe("loading earlier turns", () => {
   const replay = { busy: false, agent: () => null };
 
-  it("keeps the terminal's own lines in place, and the banner on top", () => {
+  it("keeps the terminal's own lines in place", () => {
     const old = new ThreadView("t1");
-    old.local({ kind: "banner", title: "1harness", subtitle: "v0" });
     old.earlier("Earlier turns are above");
     const late: LogEntry = {
       type: "item",
@@ -646,8 +645,6 @@ describe("loading earlier turns", () => {
     const view = new ThreadView("t1");
     view.rebuild(old, [early, late], 1, replay, null);
     assert.deepEqual(plain(view.transcript.view(context, 20, 0).rows), [
-      "1harness v0",
-      "",
       "  early reply",
       "",
       "  late reply",
