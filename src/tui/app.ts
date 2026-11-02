@@ -1098,7 +1098,8 @@ export class App {
     if (this.#live) {
       // Queued rather than steered, so each is its own turn, as typed.
       for (const text of held) this.#send(text, false);
-    } else if (this.#editor.text.trim() === "") this.#editor.set(held.join("\n\n"));
+    } else
+      this.#editor.set([...held, this.#editor.text].filter((text) => text.trim()).join("\n\n"));
   }
 
   /**
@@ -3519,7 +3520,11 @@ export class App {
     const text = raw.trim();
     if (text === "") return;
     const message = !text.startsWith("/") || text.startsWith("//");
-    if (message && !this.#live && (this.#starting || this.#opening > 0)) {
+    // Behind ones already held too, which a thread shown while it starts must not overtake.
+    if (
+      message &&
+      (this.#held.length > 0 || (!this.#live && (this.#starting || this.#opening > 0)))
+    ) {
       this.#editor.take();
       if (this.#held.length === 0) this.#notice("info", "Sent once the thread opens.");
       this.#held.push(text.startsWith("//") ? text.slice(1) : text);

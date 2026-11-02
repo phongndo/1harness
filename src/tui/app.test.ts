@@ -215,15 +215,39 @@ describe("App", () => {
       const session = await start({ harness: "slow" });
       await session.sees("Ask anything");
       await session.type("early\r");
+      // Once the starting thread is shown, what is typed must still wait its turn.
+      while (session.client.threads.size === 0) await settle();
       await session.type("later\r");
       assert.doesNotMatch(session.terminal.text(), /No thread is open/);
       open();
-      const screen = await session.sees("Done with later");
+      const screen = await session.sees(/Done with early[\s\S]*Done with later/);
       assert.ok(screen.indexOf("Done with early") < screen.indexOf("┃ later"));
       // Neither message is left behind in the composer.
       assert.match(screen, /┃ Ask anything/);
     } finally {
       unregisterSlow();
+    }
+  });
+
+  it("hands what it held back to the composer, with the draft, when no thread opens", async () => {
+    let fail!: (error: Error) => void;
+    const failed = new Promise<void>((_, reject) => (fail = reject));
+    const unregisterBroken = registerDriver({
+      id: "broken",
+      label: "Broken",
+      unavailable: () => null,
+      create: (options) => Object.assign(new ScriptedSession(options), { start: () => failed }),
+    });
+    try {
+      const session = await start({ harness: "broken" });
+      await session.sees("Ask anything");
+      await session.type("held\r");
+      await session.type("draft");
+      fail(new Error("no harness"));
+      const screen = await session.sees("Could not start broken");
+      assert.match(screen, /┃ held\n┃?\s*\n?┃? ?draft/);
+    } finally {
+      unregisterBroken();
     }
   });
 
