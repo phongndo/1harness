@@ -163,6 +163,8 @@ export class CodexSession implements HarnessSession {
   #hooks: HookServer | null = null;
   #threadParams: Record<string, unknown> | null = null;
   #turnsStarted = false;
+  /** The swap to a thread that runs the tool hook, while Codex starts it. */
+  #swap: Promise<void> | null = null;
 
   constructor(config: CodexSessionConfig) {
     this.#config = config;
@@ -310,6 +312,7 @@ export class CodexSession implements HarnessSession {
   /** Starts a turn; Codex echoes `clientId` on the user message, so the thread can match it. */
   async #startTurn(input: unknown[], clientId: string | null): Promise<void> {
     this.#turnsStarted = true;
+    await this.#swap;
     const policy = codexRuntimePolicy(this.info.runtimeMode, this.#sandbox);
     this.#interruptRequested = false;
     const response = await this.#request<{ turn: CodexTurn }>("turn/start", {
@@ -643,15 +646,25 @@ export class CodexSession implements HarnessSession {
       this.#notice("info", "1harness checks tool calls from the next thread (/new)");
       return;
     }
-    const response = await this.#request<ThreadResponse>(
-      "thread/start",
-      this.#threadParams,
-      THREAD_TIMEOUT_MS,
-    );
-    this.#translator.threadId = response.thread.id;
-    this.info.threadId = response.thread.id;
-    this.#emitInfo();
-    this.#notice("info", "1harness now checks tool calls");
+    // A message sent meanwhile waits for the new thread, or it would go to the old one.
+    const params = this.#threadParams;
+    const swap = (async () => {
+      const response = await this.#request<ThreadResponse>(
+        "thread/start",
+        params,
+        THREAD_TIMEOUT_MS,
+      );
+      this.#translator.threadId = response.thread.id;
+      this.info.threadId = response.thread.id;
+      this.#emitInfo();
+      this.#notice("info", "1harness now checks tool calls");
+    })();
+    this.#swap = swap.catch(() => {});
+    try {
+      await swap;
+    } finally {
+      this.#swap = null;
+    }
   }
 
   /** Resumes with only the latest turns, unarchiving the thread if Codex archived it. */
@@ -673,6 +686,7 @@ export class CodexSession implements HarnessSession {
 
   async #review(instructions: string): Promise<void> {
     this.#turnsStarted = true;
+    await this.#swap;
     this.#interruptRequested = false;
     const response = await this.#request<{ turn: CodexTurn }>("review/start", {
       threadId: this.#threadId(),

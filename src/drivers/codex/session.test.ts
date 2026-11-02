@@ -92,6 +92,14 @@ function collect(session: CodexSession): { events: HarnessEvent[]; ended: Promis
   return { events, ended };
 }
 
+async function until(check: () => boolean, what: string, ms = 3_000): Promise<void> {
+  for (const start = Date.now(); Date.now() - start < ms;) {
+    if (check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for ${what}`);
+}
+
 function within<T>(promise: Promise<T>, ms: number): Promise<T | "timed out"> {
   return Promise.race([
     promise,
@@ -123,5 +131,29 @@ describe("CodexSession", () => {
       "failed",
     );
     assert.ok(events.findIndex((event) => event === settled) < events.length - 1);
+  });
+
+  it("sends a message that comes during the swap to the hook's thread", async () => {
+    const session = new CodexSession(config({ toolPolicy: async () => undefined }));
+    const { events } = collect(session);
+    try {
+      await session.start();
+      await until(
+        () => events.some((event) => event.type === "request.opened"),
+        "the hook trust request",
+      );
+      const request = events.find((event) => event.type === "request.opened");
+      assert.ok(request?.type === "request.opened");
+      await session.respond(request.request.id, { kind: "approval", optionId: "trust" });
+      // The swap's thread/start is out; Codex answers it late.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await session.startTurn({ text: "hello" });
+      await until(() => events.some((event) => event.type === "turn.ended"), "the turn to end");
+      assert.equal(session.info.threadId, "thread-2");
+      const started = events.find((event) => event.type === "turn.started");
+      assert.equal(started?.type === "turn.started" && started.turnId, "turn-1-on-thread-2");
+    } finally {
+      await session.close();
+    }
   });
 });
