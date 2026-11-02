@@ -246,6 +246,15 @@ export class AcpSession implements HarnessSession {
 
   async startTurn(input: UserInput): Promise<void> {
     const sessionId = this.#sessionId();
+    // Read first: an image that cannot be read fails the send, not a turn already begun.
+    const prompt: unknown[] = [{ type: "text", text: input.text }];
+    for (const path of input.images ?? []) {
+      prompt.push({
+        type: "image",
+        mimeType: IMAGE_TYPES[extname(path).toLowerCase()] ?? "image/png",
+        data: readFileSync(path).toString("base64"),
+      });
+    }
     const turnId = randomUUID();
     this.#turnId = turnId;
     this.#emit({ type: "turn.started", turnId });
@@ -258,14 +267,6 @@ export class AcpSession implements HarnessSession {
         ...(input.id ? { inputId: input.id } : {}),
       },
     });
-    const prompt: unknown[] = [{ type: "text", text: input.text }];
-    for (const path of input.images ?? []) {
-      prompt.push({
-        type: "image",
-        mimeType: IMAGE_TYPES[extname(path).toLowerCase()] ?? "image/png",
-        data: readFileSync(path).toString("base64"),
-      });
-    }
     // The request answers only when the turn is over.
     void this.#request<{
       stopReason: string;

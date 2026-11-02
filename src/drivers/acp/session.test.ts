@@ -91,4 +91,28 @@ describe("AcpSession", () => {
     const reply = [...completed.values()].find((item) => item.kind === "assistant_message");
     assert.equal(reply?.kind === "assistant_message" && reply.text, "Looking");
   });
+
+  it("ends no turn it never started when an attached image is missing", async () => {
+    const session = new AcpSession(spec, { ...options, cwd: root }, "test");
+    const { events } = collect(session);
+    try {
+      await session.start();
+      await assert.rejects(
+        session.startTurn({ text: "look", images: [join(root, "missing.png")] }),
+        /ENOENT/,
+      );
+      const started = events.filter((event) => event.type === "turn.started").length;
+      const ended = events.filter((event) => event.type === "turn.ended").length;
+      assert.equal(started, ended);
+      // The session takes the next message.
+      await session.startTurn({ text: "again" });
+      for (let tries = 0; tries < 100 && !events.some((e) => e.type === "turn.ended"); tries++)
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.ok(
+        events.some((event) => event.type === "turn.ended" && event.status === "completed"),
+      );
+    } finally {
+      await session.close();
+    }
+  });
 });
