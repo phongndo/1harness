@@ -3,7 +3,7 @@ import { delimiter, join } from "node:path";
 import type { HarnessId, HarnessSession, SessionOptions } from "../core/events.ts";
 import { errorMessage } from "../core/thread.ts";
 import { AcpSession, type AcpAgentSpec } from "./acp/session.ts";
-import { ClaudeSession } from "./claude/session.ts";
+import { ClaudeSession, claudeSessionTitle } from "./claude/session.ts";
 import { CodexSession } from "./codex/session.ts";
 import { OpenCodeSession } from "./opencode/session.ts";
 
@@ -39,6 +39,11 @@ export interface DriverDefinition {
    * hooks, and project instructions.
    */
   create(options: SessionOptions, environment: DriverEnvironment): HarnessSession;
+  /**
+   * The name the harness gave one of its sessions for what it is doing, read
+   * without starting it; null when it has given none.
+   */
+  sessionTitle?(cwd: string, native: string): Promise<string | null>;
 }
 
 const registry = new Map<HarnessId, DriverDefinition>();
@@ -140,6 +145,7 @@ registerDriver({
   label: "Claude Code",
   // Without an installed `claude`, the SDK runs the copy it bundles.
   unavailable: () => null,
+  sessionTitle: claudeSessionTitle,
   create: (options, environment) => {
     const env = environment.env ?? process.env;
     return new ClaudeSession({

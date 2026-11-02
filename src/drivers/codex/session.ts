@@ -50,7 +50,7 @@ import {
 } from "./translate.ts";
 
 interface ThreadResponse {
-  thread: { id: string; turns: CodexTurn[] };
+  thread: { id: string; turns: CodexTurn[]; name?: string | null };
   model: string;
   reasoningEffort: string | null;
   sandbox: CodexSandboxPolicy;
@@ -263,6 +263,8 @@ export class CodexSession implements HarnessSession {
       this.info.runtimeMode = granted;
     }
     this.info.threadId = response.thread.id;
+    // A thread Codex named before keeps its name.
+    if (response.thread.name?.trim()) this.info.title = response.thread.name.trim();
     this.info.model = response.model;
     this.info.effort = this.info.effort ?? response.reasoningEffort;
     const turns = response.initialTurnsPage
@@ -724,6 +726,15 @@ export class CodexSession implements HarnessSession {
 
   #notification(method: string, raw: unknown): void {
     const params = (raw ?? {}) as Record<string, unknown>;
+    // Codex names a thread for what it is doing; the name goes out with the session's info.
+    if (method === "thread/name/updated") {
+      const name = params["threadName"];
+      if (params["threadId"] === this.info.threadId && typeof name === "string" && name.trim()) {
+        this.info.title = name.trim();
+        this.#emitInfo();
+      }
+      return;
+    }
     if (method === "item/started" || method === "item/completed") this.#track(method, params);
     for (let event of this.#translator.translate(method, params)) {
       if (event.type === "turn.started") {

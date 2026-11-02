@@ -52,6 +52,11 @@ export interface RunRecord {
 export interface ManagedThread {
   readonly id: string;
   title: string;
+  /**
+   * Its title was given, by the user or the agent that started it; until
+   * then the harness's name for the session, or its first message, is used.
+   */
+  named: boolean;
   /** The harness it runs on now; `switchHarness` moves it. */
   harness: HarnessId;
   /** The thread that started this one, for delegated work. */
@@ -95,6 +100,8 @@ export interface CreateThreadOptions {
   harness: HarnessId;
   settings: SessionOptions;
   title?: string;
+  /** Whether `title` was given as its name, which no harness's replaces; it is unless said. */
+  named?: boolean;
   parentId?: string | null;
   parentCallId?: string | null;
   origin?: "user" | "delegated";
@@ -130,6 +137,7 @@ export interface ManagerOptions {
 export interface RestoredThread {
   id: string;
   title: string;
+  named?: boolean;
   harness: HarnessId;
   parentId: string | null;
   parentCallId: string | null;
@@ -312,6 +320,7 @@ export class ThreadManager {
     const managed: ManagedThread = {
       id: this.#options.nextId?.() ?? `t${++this.#counter}`,
       title: options.title ?? "",
+      named: options.named ?? Boolean(options.title),
       harness: options.harness,
       parentId: options.parentId ?? null,
       parentCallId: options.parentCallId ?? null,
@@ -412,6 +421,7 @@ export class ThreadManager {
       const managed: ManagedThread = {
         id: entry.id,
         title: entry.title,
+        named: entry.named ?? false,
         harness: entry.harness,
         parentId: entry.parentId,
         parentCallId: entry.parentCallId,
@@ -535,11 +545,20 @@ export class ThreadManager {
     return true;
   }
 
+  /** Names a thread for what it is doing, as its harness named it, unless it was given a name. */
+  retitle(id: string, title: string): void {
+    const managed = this.#threads.get(id);
+    if (!managed || managed.named || managed.title === title) return;
+    managed.title = title;
+    this.#refresh(managed);
+  }
+
   /** Renames a thread. */
   rename(id: string, title: string): void {
     const managed = this.#threads.get(id);
     if (!managed) throw new Error(`No thread ${id}`);
     managed.title = title;
+    managed.named = true;
     this.#refresh(managed);
   }
 
@@ -824,6 +843,11 @@ export class ThreadManager {
         }
         break;
       }
+      case "session.updated":
+        // The harness's name for what the thread is doing, unless one was given.
+        if (!managed.named && event.info.title && event.info.title !== managed.title)
+          managed.title = event.info.title;
+        break;
       case "session.replaced":
         // The session that took over may come from code other than switchHarness.
         managed.harness = this.#switching.get(managed.id) ?? managed.thread.info.harness;
@@ -885,6 +909,7 @@ export class ThreadManager {
     const key = [
       managed.status,
       managed.title,
+      managed.named,
       managed.runs.length,
       run?.status,
       run?.result,

@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { extname, join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import {
+  getSessionInfo,
   getSessionMessages,
   listSessions,
   query,
@@ -58,6 +59,21 @@ import {
   toMcpServer,
   toolItem,
 } from "./translate.ts";
+
+/** The name Claude gave a session for what it is doing; null until it has named it. */
+export async function claudeSessionTitle(cwd: string, sessionId: string): Promise<string | null> {
+  try {
+    const found = await getSessionInfo(sessionId, { dir: cwd });
+    // The name given with /rename, else the one Claude generated; its summary
+    // falls back to a prompt, which is no name.
+    return found?.customTitle?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** How long after a turn to look again for the name Claude gives a session. */
+const TITLE_RETRY_MS = 8000;
 
 const CAPABILITIES: Capabilities = {
   steer: true,
@@ -471,6 +487,7 @@ export class ClaudeSession implements HarnessSession {
     });
     this.#turn = null;
     this.#interruptRequested = false;
+    void this.#readTitle(true);
   }
 
   /**
@@ -553,6 +570,22 @@ export class ClaudeSession implements HarnessSession {
 
   #emit(event: HarnessEvent): void {
     this.#events.push(event);
+  }
+
+  /**
+   * Claude names a session for what it is doing, a little after its first
+   * turns; the name goes out with the session's info. Read after each turn,
+   * and once more shortly after, should Claude not have named it yet.
+   */
+  async #readTitle(again: boolean): Promise<void> {
+    const id = this.info.threadId;
+    if (!id || this.#closed) return;
+    const title = await claudeSessionTitle(this.info.cwd, id);
+    if (title && title !== this.info.title && !this.#closed) {
+      this.info.title = title;
+      this.#emitInfo();
+    } else if (!title && again)
+      setTimeout(() => void this.#readTitle(false), TITLE_RETRY_MS).unref();
   }
 
   #emitInfo(): void {

@@ -16,7 +16,7 @@ import { join as joinPath, resolve as resolvePath } from "node:path";
 import { configDir, stateDir } from "../core/paths.ts";
 import { errorMessage, type Thread, type ThreadEvent } from "../core/thread.ts";
 import { formatTokens } from "../core/wording.ts";
-import { drivers, harnessName as label } from "../drivers/index.ts";
+import { drivers, findDriver, harnessName as label } from "../drivers/index.ts";
 import type { ToolDefinition } from "../extensions/api.ts";
 import { ExtensionHost } from "../extensions/host.ts";
 import { ToolServer } from "../extensions/tool-server.ts";
@@ -462,6 +462,7 @@ export class Host {
     return {
       id: row.id,
       title: row.title,
+      named: row.named ?? false,
       harness: row.harness,
       parentId: row.parentId,
       parentCallId: row.parentCallId,
@@ -695,6 +696,7 @@ export class Host {
     return {
       id: managed.id,
       title: managed.title,
+      named: managed.named,
       cwd: thread.info.cwd,
       harness: managed.harness,
       parentId: managed.parentId,
@@ -1293,6 +1295,8 @@ export class Host {
       id: managed.id,
       title: managed.title,
       harness: managed.harness,
+      model: managed.thread.info.model,
+      effort: managed.thread.info.effort,
       cwd: managed.thread.info.cwd,
       status: managed.status,
       parentId: managed.parentId,
@@ -1306,6 +1310,36 @@ export class Host {
     };
   }
 
+  /**
+   * Names threads still named by their first message as their harness has
+   * since named them, such as earlier Claude sessions; each is asked once.
+   */
+  async #harnessTitles(rows: ThreadSummaryRow[]): Promise<void> {
+    const store = this.#store;
+    if (!store) return;
+    await Promise.all(
+      rows.map(async (row) => {
+        const native = row.info.threadId;
+        const driver = findDriver(row.harness);
+        if (row.named || !native || !driver?.sessionTitle || this.#titled.has(row.id)) return;
+        this.#titled.add(row.id);
+        const title = await driver.sessionTitle(row.cwd, native).catch(() => null);
+        if (!title || title === row.title) return;
+        row.title = title;
+        const live = this.manager.get(row.id);
+        if (live) this.manager.retitle(row.id, title);
+        // A closed thread is no longer saved as it changes, so its name is saved here.
+        if (!live || live.status === "closed") {
+          const saved = store.thread(row.id);
+          if (saved && !saved.named) store.saveThread({ ...saved, title });
+        }
+      }),
+    );
+  }
+
+  /** Threads whose harness was asked for their name, so it is asked once. */
+  #titled = new Set<string>();
+
   /** A stored thread for a listing; one in memory is listed as it is now. */
   #rowListing(row: ThreadSummaryRow): ThreadListing {
     const live = this.manager.get(row.id);
@@ -1314,6 +1348,8 @@ export class Host {
       id: row.id,
       title: row.title,
       harness: row.harness,
+      model: row.info.model,
+      effort: row.info.effort,
       cwd: row.cwd,
       status: row.state === "closed" ? "closed" : "parked",
       parentId: row.parentId,
@@ -1440,9 +1476,13 @@ export class Host {
       "threads.list": async (_client, { scope, query, limit }) => {
         if (this.#store) {
           this.#flush();
-          return this.#store
-            .listThreads({ scope, ...(query ? { query } : {}), limit: limit ?? 200 })
-            .map((row) => this.#rowListing(row));
+          const rows = this.#store.listThreads({
+            scope,
+            ...(query ? { query } : {}),
+            limit: limit ?? 200,
+          });
+          await this.#harnessTitles(rows);
+          return rows.map((row) => this.#rowListing(row));
         }
         const all = this.manager.list().filter((managed) => {
           if (scope === "archived") return false;
@@ -1614,7 +1654,7 @@ export class Host {
         else {
           const row = this.#store?.thread(threadId);
           if (!row) throw new RpcError("thread_not_found", `No thread ${threadId}`);
-          this.#store!.saveThread({ ...row, title: name });
+          this.#store!.saveThread({ ...row, title: name, named: true });
         }
         return null;
       },
@@ -1690,7 +1730,9 @@ export class Host {
             interactionMode: info.interactionMode,
             resume: null,
           },
+          // A name to go by until its harness names it.
           title: `${source.title || source.id} (fork)`,
+          named: false,
           origin: "user",
           openedBy: client.id,
           fork: { from: source.id, handoff },

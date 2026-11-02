@@ -179,6 +179,9 @@ export interface ThreadListing {
   id: string;
   title: string;
   harness: HarnessId;
+  /** The model and reasoning effort it last ran with; null for the harness's default. */
+  model: string | null;
+  effort: string | null;
   cwd: string;
   status: ThreadStatus;
   parentId: string | null;

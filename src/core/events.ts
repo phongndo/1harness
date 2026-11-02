@@ -186,6 +186,8 @@ export interface SessionInfo {
   runtimeMode: RuntimeMode;
   interactionMode: InteractionMode;
   version: string | null;
+  /** The name the harness gave the session for what it is doing, once it has given one. */
+  title?: string | null;
 }
 
 /** One subscription usage window, such as a five-hour or weekly limit. */
