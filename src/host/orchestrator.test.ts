@@ -235,6 +235,15 @@ async function call(
 
 const settle = (ms = 20) => new Promise((done) => setTimeout(done, ms));
 
+/** Waits for a condition that timers bring about, without betting on how slow the machine is. */
+async function until(condition: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error("timed out waiting for a condition");
+    await settle(2);
+  }
+}
+
 before(async () => {
   root = mkdtempSync(join(tmpdir(), "1harness-host-"));
   unregister = [
@@ -403,14 +412,16 @@ describe("ThreadManager", () => {
       await thread.thread.respond(request.id, { kind: "approval", optionId: "yes" });
       await idle.wait(thread.id, 1000);
       // Working, or waiting on the user, is not idle: the timer starts once the turn ends.
-      await settle(40);
-      assert.equal(thread.status, "parked");
+      await until(() => thread.status === "parked");
       // Busy with nothing, a session is cheap to keep but a process to hold.
       first.background = [];
       thread.thread.send({ text: "next" });
       thread.thread.send({ text: "and then" });
-      await idle.wait(thread.id, 1000);
-      await settle(5);
+      // A parked thread counts as settled until it wakes, so wait on the turns themselves.
+      await until(() => {
+        const session = thread.thread.session as unknown as FakeSession | null;
+        return session !== null && session !== first && session.prompts.length === 2;
+      });
       assert.notEqual(sessionOf(thread), first);
       assert.equal(sessionOf(thread).options.resume, first.info.threadId);
       // Messages sent while it woke went in order, to the session that took over.
