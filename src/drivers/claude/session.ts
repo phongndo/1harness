@@ -106,6 +106,8 @@ const STDERR_TAIL_BYTES = 16_384;
 export interface ClaudeSessionConfig extends SessionOptions {
   /** A `claude` executable to run instead of the SDK's bundled one. */
   executable: string | null;
+  /** Starts the SDK query; tests give a fake. */
+  query?: typeof query;
 }
 
 interface Turn {
@@ -192,18 +194,21 @@ export class ClaudeSession implements HarnessSession {
 
   async startTurn(input: UserInput): Promise<void> {
     if (!this.#query) throw new Error("The session is not running");
+    // Read first: an image that cannot be read fails the send, not a turn already begun.
+    const content = userContent(input);
     const uuid = randomUUID();
     this.#interruptRequested = false;
     this.#turn = { id: uuid, outstanding: new Set([uuid]), synthetic: false };
     this.#emit({ type: "turn.started", turnId: uuid });
-    this.#sendPrompt(uuid, input);
+    this.#sendPrompt(uuid, input, content);
   }
 
   async steer(input: UserInput): Promise<void> {
     if (!this.#turn) throw new Error("No turn is running");
+    const content = userContent(input);
     const uuid = randomUUID();
     this.#turn.outstanding.add(uuid);
-    this.#sendPrompt(uuid, input);
+    this.#sendPrompt(uuid, input, content);
   }
 
   async interrupt(): Promise<void> {
@@ -367,7 +372,7 @@ export class ClaudeSession implements HarnessSession {
       // Hooks run before the permission check, so the policy sees calls even in full access.
       ...(this.#config.toolPolicy ? { hooks: { PreToolUse: [{ hooks: [this.#checkTool] }] } } : {}),
     };
-    const session = query({ prompt: this.#input, options });
+    const session = (this.#config.query ?? query)({ prompt: this.#input, options });
     this.#query = session;
     void this.#pump(session, generation);
   }
@@ -491,7 +496,7 @@ export class ClaudeSession implements HarnessSession {
    * Sends a prompt under `uuid`, which is new for each send: Claude skips a
    * prompt whose ID its transcript already has.
    */
-  #sendPrompt(uuid: string, input: UserInput): void {
+  #sendPrompt(uuid: string, input: UserInput, content: SDKUserMessage["message"]["content"]): void {
     this.#emit({
       type: "item.completed",
       item: {
@@ -503,7 +508,7 @@ export class ClaudeSession implements HarnessSession {
     });
     this.#input.push({
       type: "user",
-      message: { role: "user", content: userContent(input) },
+      message: { role: "user", content },
       parent_tool_use_id: null,
       uuid: uuid as SDKUserMessage["uuid"] & string,
       // Claude counts a prompt as the human's only when it is marked so.

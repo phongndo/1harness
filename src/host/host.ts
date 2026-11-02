@@ -28,6 +28,7 @@ import {
   type CommandInfo,
   type HarnessInfo,
   type HostEvent,
+  type LoggedEntry,
   type Method,
   type Params,
   type Result,
@@ -52,6 +53,8 @@ import { Orchestrator } from "./orchestrator.ts";
 
 /** How long streamed text waits to be written, so a long reply is not rewritten on every chunk. */
 const STREAM_FLUSH_MS = 250;
+/** How long after a failed write the store is tried again, in case the disk has recovered. */
+const STORE_RETRY_MS = 5_000;
 /** How many recent events the host keeps for clients catching up after a gap. */
 const RECENT_EVENTS = 20_000;
 /** How much of them, as sent: one event can carry a whole item or page. */
@@ -94,6 +97,8 @@ interface Client {
   sent: Map<string, string>;
   /** Extension modules it named, which load for the threads it opens. */
   extensions: string[];
+  /** It calls from another machine, so the modules it names are not loaded here. */
+  remote: boolean;
 }
 
 /** One folder's extensions, with a set of named modules, and the commands they register. */
@@ -304,7 +309,7 @@ export class Host {
   /** Each task as last written. */
   #savedTasks = new Map<string, string>();
   #stopped = false;
-  /** Writing the store failed, which is reported once. */
+  /** Writing the store is failing, which is reported once until a write succeeds. */
   #storeFailed = false;
   #handlers: { [M in Method]: (client: Client, params: Params<M>) => Promise<Result<M>> };
 
@@ -614,6 +619,11 @@ export class Host {
     return this.#recent.filter((event) => event.seq > after);
   }
 
+  /** Marks a client as one on a remote listener, from its first request on. */
+  markRemote(clientId: string): void {
+    this.#client(clientId).remote = true;
+  }
+
   /** Runs one client request. */
   async call<M extends Method>(clientId: string, method: M, params: Params<M>): Promise<Result<M>> {
     const handler = this.#handlers[method] as
@@ -738,16 +748,30 @@ export class Host {
     try {
       this.#write(store);
     } catch (error) {
-      // The threads go on; what they did since may not survive a restart.
+      // The threads go on, and what they did stays pending for the next write.
       if (!this.#storeFailed)
         this.#broadcast("error", `Could not save threads: ${errorMessage(error)}`);
       this.#storeFailed = true;
+      if (!this.#stopped) {
+        this.#streamTimer = setTimeout(() => {
+          this.#streamTimer = null;
+          this.#flush();
+        }, STORE_RETRY_MS);
+        // Retrying is no reason to stay up.
+        this.#streamTimer.unref();
+      }
+      return;
     }
+    this.#storeFailed = false;
   }
 
+  /** Writes in one transaction, and marks things written only once it commits. */
   #write(store: Store): void {
+    const dirty = [...this.#dirty];
+    const logs: [ThreadLog, LoggedEntry[]][] = [];
+    const tasks: [string, string][] = [];
     store.transaction(() => {
-      for (const id of this.#dirty) {
+      for (const id of dirty) {
         const managed = this.manager.get(id);
         if (!managed) continue;
         store.saveThread(this.#row(managed));
@@ -756,21 +780,24 @@ export class Host {
         for (const [harness, visit] of this.manager.visits(id)) store.saveVisit(id, harness, visit);
         store.saveAllowances(id, managed.thread.allowances);
       }
-      this.#dirty.clear();
       for (const [id, log] of this.#logs) {
-        const changed = log.flush();
-        if (changed.length > 0 && (this.manager.get(id) || store.thread(id)))
-          store.writeLog(id, changed);
+        const changed = log.unwritten();
+        if (changed.length === 0) continue;
+        if (this.manager.get(id) || store.thread(id)) store.writeLog(id, changed);
+        logs.push([log, changed]);
       }
       // Tasks change seldom; they are written when they do.
       for (const task of this.orchestrator.taskRows()) {
         const key = JSON.stringify(task);
         if (this.#savedTasks.get(task.id) === key) continue;
         store.saveTask(task);
-        this.#savedTasks.set(task.id, key);
+        tasks.push([task.id, key]);
       }
       store.saveSeq(this.#seq);
     });
+    for (const id of dirty) this.#dirty.delete(id);
+    for (const [log, changed] of logs) log.written(changed);
+    for (const [id, key] of tasks) this.#savedTasks.set(id, key);
   }
 
   #row(managed: ManagedThread): ThreadRow {
@@ -808,11 +835,12 @@ export class Host {
   /** Admission is written at once, before the harness is sent anything. */
   #admit(managed: ManagedThread, change: ManagerEvent & { type: "thread.event" }): void {
     const store = this.#store;
-    if (!store || this.#storeFailed) return;
+    if (!store) return;
     try {
       this.#record(store, managed, change.event);
     } catch (error) {
-      this.#broadcast("error", `Could not save threads: ${errorMessage(error)}`);
+      if (!this.#storeFailed)
+        this.#broadcast("error", `Could not save threads: ${errorMessage(error)}`);
       this.#storeFailed = true;
     }
   }
@@ -1162,6 +1190,7 @@ export class Host {
         lookups: new Map(),
         sent: new Map(),
         extensions: [...(this.#options.extensions ?? [])],
+        remote: false,
       };
       this.#clients.set(id, client);
     }
@@ -1562,9 +1591,13 @@ export class Host {
     return {
       "client.hello": async (client, params) => {
         client.cwd = expandHome(params.cwd);
-        client.extensions = params.extensions.map((path) => resolvePath(client.cwd, path));
+        // Loading a module runs it here, which no one on another machine may make this host do.
+        const named = client.remote ? [] : params.extensions;
+        client.extensions = named.map((path) => resolvePath(client.cwd, path));
         client.connected = true;
         const warnings = [...(this.#options.warnings ?? [])];
+        if (named.length < params.extensions.length)
+          warnings.push("Extensions load only for clients on this machine; yours were left out.");
         const set = this.#set(client.cwd, client.extensions);
         await set.ready;
         const waiting = set.host.untrusted.length;

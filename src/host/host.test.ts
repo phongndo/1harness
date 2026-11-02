@@ -517,6 +517,48 @@ describe("Host with a store", () => {
     assert.deepEqual(session.prompts, ["queued one", "queued two", "now"]);
   });
 
+  it("writes again what a failed save left out, and goes on recording messages", async () => {
+    const store = fresh();
+    const first = newHost([], store);
+    const client = await connect("tui");
+    const thread = await client.call("thread.open", { harness: "scripted", settings });
+    await settle();
+    // The disk fails for a while, partway through each write.
+    let failing = true;
+    const disk = <A extends unknown[]>(write: (...args: A) => void) => {
+      const real = write.bind(store);
+      return (...args: A) => {
+        if (failing) throw new Error("disk I/O error");
+        real(...args);
+      };
+    };
+    store.saveSeq = disk(store.saveSeq);
+    store.recordMessage = disk(store.recordMessage);
+    await client.call("thread.send", { threadId: thread.id, text: "go ASK" });
+    await settle();
+    failing = false;
+    await client.call("thread.send", { threadId: thread.id, text: "queued one" });
+    await settle();
+    crash(store);
+    await first.manager.closeAll();
+
+    newHost([], Store.open(file));
+    const again = await connect("tui");
+    assert.deepEqual(
+      again.threads.get(thread.id)?.queue.map((message) => message.input.text),
+      ["queued one"],
+    );
+    const { entries } = await again.call("thread.attach", { threadId: thread.id });
+    assert.ok(
+      entries.some(
+        ({ entry }) =>
+          entry.type === "item" &&
+          entry.item.kind === "user_message" &&
+          entry.item.text === "go ASK",
+      ),
+    );
+  });
+
   it("answers a retried message from before a restart without sending it", async () => {
     const store = fresh();
     newHost([], store);

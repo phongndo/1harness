@@ -22,6 +22,7 @@ import {
 import { errorMessage } from "../../core/thread.ts";
 import { ANSWER, ASK, askFor, askForChanges, fileName } from "../../core/wording.ts";
 import { JsonRpcProcess, RpcError } from "../jsonrpc.ts";
+import { OpenItems } from "../open-items.ts";
 import {
   AcpTranslator,
   approvalAction,
@@ -65,6 +66,8 @@ interface Pending {
 
 const PROTOCOL_VERSION = 1;
 const START_TIMEOUT_MS = 30_000;
+// Loading a session replays it and starts its MCP servers, so it gets longer than a reply.
+const CONTROL_TIMEOUT_MS = 120_000;
 // Agents name their modes freely; these are the names that mean 1harness's modes.
 const MODE_NAMES: Record<RuntimeMode, string[]> = {
   supervised: ["ask", "default", "read-only", "readonly", "manual", "supervised"],
@@ -124,6 +127,7 @@ export class AcpSession implements HarnessSession {
   #version: string;
   #rpc: JsonRpcProcess | null = null;
   #events = new AsyncQueue<HarnessEvent>();
+  #open = new OpenItems();
   #translator = new AcpTranslator();
   #pending = new Map<string, Pending>();
   #modes: AcpMode[] = [];
@@ -162,6 +166,12 @@ export class AcpSession implements HarnessSession {
     this.#rpc = rpc;
     rpc.onNotification((method, params) => this.#notification(method, params));
     rpc.onRequest((method, params) => this.#serverRequest(method, params));
+    rpc.onError((error) =>
+      this.#notice(
+        "error",
+        `1harness could not read a message from ${this.#spec.label}: ${errorMessage(error)}`,
+      ),
+    );
     void rpc.exited.then((reason) => this.#closed(reason));
 
     const init = await rpc.request<{
@@ -195,17 +205,21 @@ export class AcpSession implements HarnessSession {
     let session: SessionResponse;
     if (resume && capabilities.loadSession) {
       // The agent replays the conversation as updates before it answers.
-      session = await rpc.request("session/load", {
-        sessionId: resume,
-        cwd: this.info.cwd,
-        mcpServers,
-      });
+      session = await rpc.request(
+        "session/load",
+        { sessionId: resume, cwd: this.info.cwd, mcpServers },
+        CONTROL_TIMEOUT_MS,
+      );
       session.sessionId ??= resume;
       this.#emitAll(this.#translator.flush());
     } else {
       if (resume)
         this.#notice("warning", `${this.#spec.label} cannot resume sessions; starting a new one`);
-      session = await rpc.request("session/new", { cwd: this.info.cwd, mcpServers });
+      session = await rpc.request(
+        "session/new",
+        { cwd: this.info.cwd, mcpServers },
+        CONTROL_TIMEOUT_MS,
+      );
     }
     this.info.threadId = session.sessionId ?? null;
     this.#applyModes(session.modes ?? null);
@@ -232,6 +246,15 @@ export class AcpSession implements HarnessSession {
 
   async startTurn(input: UserInput): Promise<void> {
     const sessionId = this.#sessionId();
+    // Read first: an image that cannot be read fails the send, not a turn already begun.
+    const prompt: unknown[] = [{ type: "text", text: input.text }];
+    for (const path of input.images ?? []) {
+      prompt.push({
+        type: "image",
+        mimeType: IMAGE_TYPES[extname(path).toLowerCase()] ?? "image/png",
+        data: readFileSync(path).toString("base64"),
+      });
+    }
     const turnId = randomUUID();
     this.#turnId = turnId;
     this.#emit({ type: "turn.started", turnId });
@@ -244,19 +267,11 @@ export class AcpSession implements HarnessSession {
         ...(input.id ? { inputId: input.id } : {}),
       },
     });
-    const prompt: unknown[] = [{ type: "text", text: input.text }];
-    for (const path of input.images ?? []) {
-      prompt.push({
-        type: "image",
-        mimeType: IMAGE_TYPES[extname(path).toLowerCase()] ?? "image/png",
-        data: readFileSync(path).toString("base64"),
-      });
-    }
     // The request answers only when the turn is over.
     void this.#request<{
       stopReason: string;
       usage?: { inputTokens?: number; outputTokens?: number };
-    }>("session/prompt", { sessionId, prompt }).then(
+    }>("session/prompt", { sessionId, prompt }, null).then(
       (result) => this.#endTurn(turnId, result.stopReason, null),
       (error: unknown) => this.#endTurn(turnId, "error", errorMessage(error)),
     );
@@ -502,6 +517,8 @@ export class AcpSession implements HarnessSession {
   }
 
   #closed(reason: string): void {
+    this.#emitAll(this.#translator.flush());
+    this.#emitAll(this.#open.settle());
     if (this.#turnId !== null) {
       this.#emit({
         type: "turn.ended",
@@ -520,9 +537,14 @@ export class AcpSession implements HarnessSession {
     return this.info.threadId;
   }
 
-  #request<T>(method: string, params: unknown): Promise<T> {
+  /** A request the agent answers right away; a prompt, answered when its turn ends, passes null. */
+  #request<T>(
+    method: string,
+    params: unknown,
+    timeoutMs: number | null = CONTROL_TIMEOUT_MS,
+  ): Promise<T> {
     if (!this.#rpc) return Promise.reject(new Error("The session has not started"));
-    return this.#rpc.request<T>(method, params);
+    return this.#rpc.request<T>(method, params, timeoutMs ?? undefined);
   }
 
   #notice(level: "info" | "warning" | "error", text: string): void {
@@ -533,6 +555,7 @@ export class AcpSession implements HarnessSession {
   }
 
   #emit(event: HarnessEvent): void {
+    this.#open.track(event);
     this.#events.push(event);
   }
 

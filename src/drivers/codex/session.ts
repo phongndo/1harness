@@ -33,6 +33,7 @@ import { ANSWER, ASK, PLAN_TITLE, askForChanges, planOptions } from "../../core/
 import { HookServer } from "./hook-server.ts";
 import { INIT_PROMPT } from "./prompts.ts";
 import { JsonRpcProcess, RpcError, type RequestId } from "../jsonrpc.ts";
+import { OpenItems } from "../open-items.ts";
 import {
   CodexTranslator,
   codexRequestId,
@@ -71,6 +72,7 @@ const HISTORY_TURNS = 10;
 const START_TIMEOUT_MS = 30_000;
 // Starting a thread waits for MCP servers, which may install packages first.
 const THREAD_TIMEOUT_MS = 120_000;
+const INTERRUPT_TIMEOUT_MS = 30_000;
 // The prompt Codex's own UI sends when the user accepts a proposed plan.
 const IMPLEMENT_PLAN = "Implement the plan.";
 // Settings Codex's own UI turns on: plan updates feed the task list, and MCP
@@ -142,6 +144,7 @@ export class CodexSession implements HarnessSession {
   #config: CodexSessionConfig;
   #rpc: JsonRpcProcess | null = null;
   #events = new AsyncQueue<HarnessEvent>();
+  #open = new OpenItems();
   #translator = new CodexTranslator();
   #pending = new Map<string, PendingRequest>();
   #fileChanges = new Map<string, FileChange[]>();
@@ -153,12 +156,15 @@ export class CodexSession implements HarnessSession {
   #endedTurns = new Set<string>();
   #interruptRequested = false;
   #closing = false;
+  #ended = false;
   /** Skill paths by name, from the last listing. */
   #skills = new Map<string, string>();
   /** Answers Codex's tool-call hook, when an extension checks tool calls. */
   #hooks: HookServer | null = null;
   #threadParams: Record<string, unknown> | null = null;
   #turnsStarted = false;
+  /** The swap to a thread that runs the tool hook, while Codex starts it. */
+  #swap: Promise<void> | null = null;
 
   constructor(config: CodexSessionConfig) {
     this.#config = config;
@@ -194,6 +200,9 @@ export class CodexSession implements HarnessSession {
     this.#rpc = rpc;
     rpc.onNotification((method, params) => this.#notification(method, params));
     rpc.onRequest((method, params, id) => this.#serverRequest(method, params, id));
+    rpc.onError((error) =>
+      this.#notice("error", `1harness could not read a message from Codex: ${errorMessage(error)}`),
+    );
     void rpc.exited.then((reason) => this.#closed(reason));
 
     const initialized = await rpc.request<{ userAgent: string }>(
@@ -303,6 +312,7 @@ export class CodexSession implements HarnessSession {
   /** Starts a turn; Codex echoes `clientId` on the user message, so the thread can match it. */
   async #startTurn(input: unknown[], clientId: string | null): Promise<void> {
     this.#turnsStarted = true;
+    await this.#swap;
     const policy = codexRuntimePolicy(this.info.runtimeMode, this.#sandbox);
     this.#interruptRequested = false;
     const response = await this.#request<{ turn: CodexTurn }>("turn/start", {
@@ -550,6 +560,8 @@ export class CodexSession implements HarnessSession {
     }
     await this.#rpc?.close();
     await this.#hooks?.close();
+    // A session whose start failed before Codex ran has no process to report the end.
+    this.#closed("closed");
   }
 
   /** Codex's PreToolUse hook input, checked against the session's tool policy. */
@@ -634,15 +646,25 @@ export class CodexSession implements HarnessSession {
       this.#notice("info", "1harness checks tool calls from the next thread (/new)");
       return;
     }
-    const response = await this.#request<ThreadResponse>(
-      "thread/start",
-      this.#threadParams,
-      THREAD_TIMEOUT_MS,
-    );
-    this.#translator.threadId = response.thread.id;
-    this.info.threadId = response.thread.id;
-    this.#emitInfo();
-    this.#notice("info", "1harness now checks tool calls");
+    // A message sent meanwhile waits for the new thread, or it would go to the old one.
+    const params = this.#threadParams;
+    const swap = (async () => {
+      const response = await this.#request<ThreadResponse>(
+        "thread/start",
+        params,
+        THREAD_TIMEOUT_MS,
+      );
+      this.#translator.threadId = response.thread.id;
+      this.info.threadId = response.thread.id;
+      this.#emitInfo();
+      this.#notice("info", "1harness now checks tool calls");
+    })();
+    this.#swap = swap.catch(() => {});
+    try {
+      await swap;
+    } finally {
+      this.#swap = null;
+    }
   }
 
   /** Resumes with only the latest turns, unarchiving the thread if Codex archived it. */
@@ -664,6 +686,7 @@ export class CodexSession implements HarnessSession {
 
   async #review(instructions: string): Promise<void> {
     this.#turnsStarted = true;
+    await this.#swap;
     this.#interruptRequested = false;
     const response = await this.#request<{ turn: CodexTurn }>("review/start", {
       threadId: this.#threadId(),
@@ -683,6 +706,7 @@ export class CodexSession implements HarnessSession {
   }
 
   #emit(event: HarnessEvent): void {
+    this.#open.track(event);
     this.#events.push(event);
   }
 
@@ -711,7 +735,11 @@ export class CodexSession implements HarnessSession {
 
   async #sendInterrupt(turnId: string): Promise<void> {
     try {
-      await this.#request("turn/interrupt", { threadId: this.#threadId(), turnId });
+      await this.#request(
+        "turn/interrupt",
+        { threadId: this.#threadId(), turnId },
+        INTERRUPT_TIMEOUT_MS,
+      );
     } catch (error) {
       this.#emit(this.#translator.notice("warning", `Interrupt failed: ${errorMessage(error)}`));
     }
@@ -820,6 +848,9 @@ export class CodexSession implements HarnessSession {
 
   /** Leaves plan mode in the chosen runtime mode and starts the implementation turn. */
   async #implementPlan(mode: RuntimeMode): Promise<void> {
+    // This turn starts outside the thread's queue, so it must not race one the queue started.
+    if (this.#turnId !== null)
+      throw new Error(`A turn is running; send "${IMPLEMENT_PLAN}" once it ends`);
     if (mode !== this.info.runtimeMode) await this.setRuntimeMode(mode);
     this.info.interactionMode = "default";
     this.#emitInfo();
@@ -942,10 +973,13 @@ export class CodexSession implements HarnessSession {
   }
 
   #closed(reason: string): void {
+    if (this.#ended) return;
+    this.#ended = true;
     for (const [id, pending] of this.#pending) {
       pending.resolve(codexResponse(pending, { kind: "cancel" }));
       this.#pending.delete(id);
     }
+    for (const event of this.#open.settle()) this.#emit(event);
     if (this.#turnId !== null) {
       const error = this.#closing ? null : reason;
       this.#emit({

@@ -564,4 +564,46 @@ describe("Thread", () => {
     await thread.close();
     assert.deepEqual(dropped, [queued.id]);
   });
+
+  it("keeps its session when a listener throws", async (t) => {
+    const report = t.mock.method(console, "error", () => {});
+    const { session, thread, seen } = await setup();
+    let closed = false;
+    session.close = async () => {
+      closed = true;
+      session.events.end();
+    };
+    thread.subscribe((event) => {
+      if (event.type === "turn.started") throw new Error("a listener broke");
+    });
+    thread.send({ text: "work" });
+    session.events.push({ type: "turn.started", turnId: "1" });
+    session.events.push({ type: "turn.ended", turnId: "1", status: "completed", error: null });
+    await settle();
+    assert.ok(seen.includes("turn.ended"));
+    assert.equal(thread.busy, false);
+    assert.equal(closed, false);
+    assert.equal(report.mock.callCount(), 1);
+    thread.send({ text: "more" });
+    assert.deepEqual(session.turns, ["work", "more"]);
+  });
+
+  it("closes a session whose events fail, so its process does not linger", async () => {
+    const session = new FakeSession();
+    let closed = false;
+    session.close = async () => {
+      closed = true;
+    };
+    Object.defineProperty(session, "events", {
+      value: (async function* () {
+        yield* [];
+        throw new Error("the stream broke");
+      })(),
+    });
+    const thread = new Thread(session as unknown as HarnessSession);
+    await thread.start();
+    await settle();
+    await settle();
+    assert.equal(closed, true);
+  });
 });

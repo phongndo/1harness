@@ -14,6 +14,7 @@ export class RpcError extends Error {
 
 type NotificationHandler = (method: string, params: unknown) => void;
 type RequestHandler = (method: string, params: unknown, id: RequestId) => Promise<unknown>;
+type ErrorHandler = (error: unknown) => void;
 
 interface Pending {
   resolve: (value: unknown) => void;
@@ -42,8 +43,11 @@ export class JsonRpcProcess {
   #pending = new Map<RequestId, Pending>();
   #onNotification: NotificationHandler = () => {};
   #onRequest: RequestHandler = () => Promise.reject(new RpcError(-32601, "Method not found"));
+  #onError: ErrorHandler = () => {};
   #stderr = "";
   #exited: Promise<string>;
+  /** Why the process exited, once it has; a request sent after that fails at once. */
+  #exitError: Error | null = null;
   #name: string;
   #jsonrpc: boolean;
 
@@ -61,6 +65,7 @@ export class JsonRpcProcess {
     this.#exited = new Promise((resolve) => {
       const finish = (reason: string) => {
         const error = new Error(this.#describeExit(reason));
+        this.#exitError ??= error;
         for (const pending of this.#pending.values()) pending.reject(error);
         this.#pending.clear();
         resolve(error.message);
@@ -85,8 +90,14 @@ export class JsonRpcProcess {
     this.#onRequest = handler;
   }
 
+  /** Hears what a handler threw, which would otherwise crash the whole process. */
+  onError(handler: ErrorHandler): void {
+    this.#onError = handler;
+  }
+
   /** Sends a request; with `timeoutMs`, rejects if no reply arrives in time. */
   request<T>(method: string, params: unknown, timeoutMs?: number): Promise<T> {
+    if (this.#exitError) return Promise.reject(this.#exitError);
     const id = this.#nextId++;
     return new Promise<T>((resolve, reject) => {
       const timer =
@@ -147,15 +158,26 @@ export class JsonRpcProcess {
     }
     if (message.method !== undefined && message.id !== undefined) {
       const id = message.id;
-      this.#onRequest(message.method, message.params, id).then(
+      let answer: Promise<unknown>;
+      try {
+        answer = this.#onRequest(message.method, message.params, id);
+      } catch (error) {
+        answer = Promise.reject(error);
+      }
+      answer.then(
         (result) => this.#send({ id, result }),
         (error: unknown) => {
+          if (!(error instanceof RpcError)) this.#onError(error);
           const rpc = error instanceof RpcError ? error : new RpcError(-32603, String(error));
           this.#send({ id, error: { code: rpc.code, message: rpc.message } });
         },
       );
     } else if (message.method !== undefined) {
-      this.#onNotification(message.method, message.params);
+      try {
+        this.#onNotification(message.method, message.params);
+      } catch (error) {
+        this.#onError(error);
+      }
     } else if (message.id !== undefined) {
       const pending = this.#pending.get(message.id);
       if (!pending) return;

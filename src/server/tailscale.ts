@@ -79,7 +79,11 @@ export class Whois {
           tagged: (found.Node?.Tags?.length ?? 0) > 0,
         };
       },
-      () => null,
+      () => {
+        // A failed lookup, as while tailscaled restarts, would turn the owner away for a minute.
+        if (this.#cache.get(address)?.identity === identity) this.#cache.delete(address);
+        return null;
+      },
     );
     this.#cache.set(address, { at: Date.now(), identity });
     return identity;

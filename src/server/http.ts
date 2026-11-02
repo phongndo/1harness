@@ -53,6 +53,9 @@ export type Authorizer = (
   request: IncomingMessage,
 ) => Promise<{ identity: string | null } | { refused: string }>;
 
+/** The local socket, which only this user can open. */
+const LOCAL: Authorizer = async () => ({ identity: null });
+
 export interface ServerOptions {
   version: string;
   autostarted: boolean;
@@ -112,7 +115,7 @@ export class HostServer {
    */
   async listen(
     target: { path: string } | { fd: number } | { port: number; host: string },
-    authorize: Authorizer = async () => ({ identity: null }),
+    authorize: Authorizer = LOCAL,
   ): Promise<AddressInfo | string | null> {
     const server = createServer((request, response) => {
       void this.#handle(request, response, authorize).catch((error: unknown) => {
@@ -159,6 +162,14 @@ export class HostServer {
     authorize: Authorizer,
   ): Promise<void> {
     this.#options.onActivity?.();
+    // Only browsers send Origin, and no web page may drive the host: one the owner
+    // opens would otherwise act as them on any listener their browser can reach.
+    if (request.headers.origin !== undefined) {
+      send(response, 403, {
+        error: { code: "forbidden", message: "1harness does not answer web pages" },
+      });
+      return;
+    }
     const decision = await authorize(request);
     if ("refused" in decision) {
       send(response, 403, { error: { code: "forbidden", message: decision.refused } });
@@ -188,6 +199,7 @@ export class HostServer {
       });
       return;
     }
+    if (authorize !== LOCAL) this.#host.markRemote(client);
     if (request.method === "POST" && url.pathname === "/v1/rpc") {
       await this.#rpc(client, request, response);
       return;

@@ -81,6 +81,18 @@ describe("Editor", () => {
     assert.equal(editor.down(), true);
     assert.equal(editor.down(), false);
   });
+
+  it("takes a paste too large to spread into a call", () => {
+    const editor = new Editor();
+    editor.insert("ab");
+    editor.left();
+    const blob = "x".repeat(1_000_000);
+    editor.insert(blob);
+    assert.equal(editor.text, `a${blob}b`);
+    editor.set("see @src");
+    editor.replaceToken(4, blob);
+    assert.equal(editor.text, `see ${blob}`);
+  });
 });
 
 describe("Editor history after clearing", () => {

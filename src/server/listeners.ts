@@ -1,5 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
+import { isIP } from "node:net";
 import { dirname } from "node:path";
 import type { Authorizer, HostServer } from "./http.ts";
 import { Whois, runTailscale, tailnetSelf, type TailscaleRunner } from "./tailscale.ts";
@@ -41,6 +42,24 @@ function remote(request: IncomingMessage): string {
   return (request.socket.remoteAddress ?? "").replace(/^::ffff:/, "");
 }
 
+/**
+ * Whether the request names this listener: by address, as localhost, or by one
+ * of `names`. A web page that rebinds its own domain to this machine reaches it
+ * under that domain, which this turns away.
+ */
+function namesListener(request: IncomingMessage, names: readonly string[]): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(`http://${request.headers.host ?? ""}`).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (isIP(hostname.replace(/^\[|\]$/g, "")) !== 0) return true;
+  return hostname === "localhost" || names.includes(hostname);
+}
+
+const WRONG_HOST = { refused: "this 1harness answers only to its own addresses and name" };
+
 /** Splits `scheme://host:port` or `scheme://:port`. */
 function hostPort(rest: string, scheme: string): { host: string; port: number } {
   const match = /^(\[[^\]]+\]|[^:]*):(\d+)$/.exec(rest);
@@ -81,7 +100,11 @@ async function open(
       const addresses = host ? [host] : self.addresses;
       if (addresses.length === 0) throw new Error("this node has no tailnet address");
       const whois = new Whois(tailscale);
+      // MagicDNS answers to the node's full name and, through the search domain, its first label.
+      const name = self.name.toLowerCase();
+      const names = name ? [name, name.split(".")[0] ?? name] : [];
       const authorize: Authorizer = async (request) => {
+        if (!namesListener(request, names)) return WRONG_HOST;
         const caller = await whois.lookup(remote(request));
         return admit(caller?.login ?? null, self.owner, options);
       };
@@ -112,7 +135,11 @@ async function open(
           `${address} would let in anyone who can reach it; pass --allow-anonymous if that is what you want`,
         );
       const { host, port } = hostPort(rest, scheme);
-      took(await server.listen({ port, host: host || "127.0.0.1" }));
+      took(
+        await server.listen({ port, host: host || "127.0.0.1" }, async (request) =>
+          namesListener(request, []) ? { identity: null } : WRONG_HOST,
+        ),
+      );
       return `Listening on ${host || "127.0.0.1"}:${port} for anyone who can reach it`;
     }
     default:
