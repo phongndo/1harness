@@ -56,6 +56,10 @@ const STREAM_FLUSH_MS = 250;
 const RECENT_EVENTS = 20_000;
 /** How much of them, as sent: one event can carry a whole item or page. */
 const RECENT_BYTES = 32 * 1024 * 1024;
+/** How many folders' extensions stay loaded with nothing using them. */
+const EXTENSION_SETS = 16;
+/** How many folders `files.search` keeps an index of, each with its watchers. */
+const FILE_INDEXES = 8;
 /** The most log entries one `thread.attach` returns. */
 const ATTACH_LIMIT = 500;
 /** How much of a run's message and reply a thread's state carries; tools read the rest. */
@@ -334,16 +338,13 @@ export class Host {
    * by its real path, and set of modules.
    */
   #set(cwd: string, modules: readonly string[]): ExtensionSet {
-    let folder = resolvePath(cwd);
-    try {
-      folder = realpathSync(folder);
-    } catch {
-      // A folder that is gone still names its set.
-    }
-    const flags = modules.map((path) => resolvePath(cwd, path)).toSorted();
-    const key = [folder, ...flags].join("\0");
+    const { key, folder, flags } = this.#setKey(cwd, modules);
     let set = this.#sets.get(key);
-    if (!set) {
+    if (set) {
+      // Most recently used last, so the least used go first.
+      this.#sets.delete(key);
+      this.#sets.set(key, set);
+    } else {
       const commands = new CommandRegistry();
       const host = new ExtensionHost({
         cwd: folder,
@@ -354,8 +355,45 @@ export class Host {
       });
       set = { key, host, commands, ready: host.loadAll(flags) };
       this.#sets.set(key, set);
+      this.#trimSets(set);
     }
     return set;
+  }
+
+  #setKey(
+    cwd: string,
+    modules: readonly string[],
+  ): { key: string; folder: string; flags: string[] } {
+    let folder = resolvePath(cwd);
+    try {
+      folder = realpathSync(folder);
+    } catch {
+      // A folder that is gone still names its set.
+    }
+    const flags = modules.map((path) => resolvePath(cwd, path)).toSorted();
+    return { key: [folder, ...flags].join("\0"), folder, flags };
+  }
+
+  /**
+   * Closes the least recently used sets past `EXTENSION_SETS` that no thread
+   * and no connected client uses, as a client that wanders through folders
+   * would otherwise keep every folder's extensions loaded.
+   */
+  #trimSets(newest: ExtensionSet): void {
+    if (this.#sets.size <= EXTENSION_SETS) return;
+    const used = new Set<ExtensionHost | string>();
+    for (const managed of this.manager.list()) {
+      const extensions = this.manager.extensionsOf(managed.id);
+      if (extensions) used.add(extensions);
+    }
+    for (const client of this.#clients.values())
+      if (client.connected) used.add(this.#setKey(client.cwd, client.extensions).key);
+    for (const [key, set] of this.#sets) {
+      if (this.#sets.size <= EXTENSION_SETS) break;
+      if (set === newest || used.has(key) || used.has(set.host)) continue;
+      this.#sets.delete(key);
+      void set.ready.then(() => set.host.close()).catch(() => {});
+    }
   }
 
   /** The modules a client named with `-x`, which load only for the threads it opens. */
@@ -1906,9 +1944,19 @@ export class Host {
           throw new RpcError("render_failed", errorMessage(error));
         }
       },
-      "files.search": async (_client, { cwd, query, limit }) => {
+      "files.search": async (_client, { cwd: asked, query, limit }) => {
+        const cwd = resolvePath(expandHome(asked));
         let files = this.#files.get(cwd);
-        if (!files) {
+        if (files) {
+          // Most recently used last, so the least used close first.
+          this.#files.delete(cwd);
+          this.#files.set(cwd, files);
+        } else {
+          for (const [folder, { index }] of this.#files) {
+            if (this.#files.size < FILE_INDEXES) break;
+            index.close();
+            this.#files.delete(folder);
+          }
           const entry = { index: new FileIndex(cwd), ready: false };
           files = entry;
           this.#files.set(cwd, entry);
