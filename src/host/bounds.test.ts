@@ -150,4 +150,91 @@ describe("A long-lived host", () => {
       ExtensionHost.prototype.close = close;
     }
   });
+
+  it("lets go of a closed thread once it is stored, reading and reopening it from the store", async () => {
+    newHost(Store.memory());
+    const client = await connect("tui");
+    const removed: string[] = [];
+    client.on((event) => {
+      if (event.type === "removed") removed.push(event.threadId);
+    });
+    const thread = await client.call("thread.open", { harness: "scripted", settings });
+    await client.call("thread.send", { threadId: thread.id, text: "remember this" });
+    await idle(client, thread.id);
+    const transcript = await client.call("thread.attach", { threadId: thread.id });
+    await client.call("thread.close", { threadId: thread.id });
+    await settle();
+    assert.equal(host.manager.get(thread.id), undefined);
+    // Clients showing it keep it: it went from memory, not from the store.
+    assert.deepEqual(removed, []);
+    const hello = await host.call("other", "client.hello", {
+      clientId: "other",
+      cwd: root,
+      version: "test",
+      extensions: [],
+    });
+    assert.equal(
+      hello.threads.some((state) => state.id === thread.id),
+      false,
+    );
+    const stored = await client.call("thread.attach", { threadId: thread.id });
+    assert.equal(stored.thread.status, "closed");
+    assert.deepEqual(stored.entries.slice(0, transcript.entries.length), transcript.entries);
+    const listed = await client.call("threads.list", { scope: "recent" });
+    assert.equal(listed.find((entry) => entry.id === thread.id)?.status, "closed");
+    const back = await client.call("thread.resume", {
+      id: thread.id,
+      harness: "scripted",
+      settings,
+    });
+    assert.equal(back.status, "parked");
+  });
+
+  it("lets go of agents and their tasks with the thread that started them, not before", async () => {
+    newHost(Store.memory());
+    const client = await connect("tui");
+    const parent = await client.call("thread.open", { harness: "scripted", settings });
+    const tool = (name: string) => host.orchestrator.tools.find((found) => found.name === name)!;
+    const caller = { thread: host.manager.get(parent.id)!.thread };
+    const task = async () =>
+      JSON.parse(
+        String(await tool("delegate_task").execute({ task: "help", wait: true }, caller)),
+      ) as {
+        taskId: string;
+      };
+    const cancelled = await task();
+    const finished = await task();
+    await tool("task_cancel").execute({ taskId: cancelled.taskId }, caller);
+    await settle();
+    // Its parent may still ask how it went.
+    assert.equal(host.manager.get(cancelled.taskId)?.status, "closed");
+    const status = JSON.parse(
+      String(await tool("task_status").execute({ taskId: cancelled.taskId }, caller)),
+    ) as { status: string };
+    assert.equal(status.status, "completed");
+    assert.equal(host.orchestrator.taskRows().length, 2);
+
+    await client.call("thread.close", { threadId: parent.id });
+    await settle();
+    for (const id of [parent.id, cancelled.taskId, finished.taskId])
+      assert.equal(host.manager.get(id), undefined);
+    assert.deepEqual(host.orchestrator.taskRows(), []);
+    const page = await client.call("thread.attach", { threadId: parent.id });
+    assert.deepEqual(
+      page.children.map((child) => child.id).toSorted(),
+      [cancelled.taskId, finished.taskId].toSorted(),
+    );
+  });
 });
+
+const settle = (ms = 20) => new Promise((done) => setTimeout(done, ms));
+
+/** Waits until a thread has nothing to do, as its state says. */
+async function idle(client: HostClient, id: string): Promise<void> {
+  for (let tries = 0; tries < 200; tries++) {
+    const state = client.threads.get(id);
+    if (state && state.status === "idle" && state.queue.length === 0 && state.runCount > 0) return;
+    await settle(5);
+  }
+  throw new Error(`${id} did not settle`);
+}

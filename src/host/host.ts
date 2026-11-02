@@ -293,8 +293,14 @@ export class Host {
   #discarding = new Set<string>();
   /** Each thread's open requests already answered, so a second answer is not recorded. */
   #answered = new Map<string, Set<string>>();
-  /** Closed threads being taken out of memory only to come back parked. */
+  /**
+   * Closed threads being taken out of memory but not out of the store: to
+   * come back parked, or to be read and reopened from there.
+   */
   #reopening = new Set<string>();
+  /** Closed threads to take out of memory once they are stored. */
+  #closedThreads = new Set<string>();
+  #releaseTimer: NodeJS.Immediate | null = null;
   /** Each task as last written. */
   #savedTasks = new Map<string, string>();
   #stopped = false;
@@ -494,7 +500,8 @@ export class Host {
         );
       this.#dirty.add(managed.id);
     }
-    this.orchestrator.restoreTasks(store.tasks());
+    // Tasks of threads still closed stay in the store, where nothing asks for them.
+    this.orchestrator.restoreTasks(store.tasks().filter((task) => this.manager.get(task.parentId)));
     this.#scheduleFlush();
   }
 
@@ -686,6 +693,7 @@ export class Host {
     if (this.#store) await this.manager.parkAll();
     else await this.manager.closeAll();
     this.#stopped = true;
+    if (this.#releaseTimer) clearImmediate(this.#releaseTimer);
     this.live.stop();
     for (const { index } of this.#files.values()) index.close();
     this.#files.clear();
@@ -877,6 +885,13 @@ export class Host {
             }
         this.#dirty.add(event.thread.id);
         this.#scheduleFlush();
+        if (event.thread.status === "closed" && this.#store) {
+          this.#closedThreads.add(event.thread.id);
+          this.#releaseTimer ??= setImmediate(() => {
+            this.#releaseTimer = null;
+            this.#releaseClosed();
+          });
+        }
         return;
       case "thread.event": {
         const managed = this.manager.get(event.threadId);
@@ -920,11 +935,44 @@ export class Host {
         this.#commandsVersion.delete(event.threadId);
         this.#dirty.delete(event.threadId);
         if (this.#discarding.delete(event.threadId)) this.#store?.deleteThread(event.threadId);
-        // One being reopened comes straight back; telling clients it went could
-        // make one that already shows it, from the reply, drop it.
+        // One being reopened comes straight back, and one stored can be read and
+        // reopened; telling clients it went could make one that shows it drop it.
         if (!this.#reopening.has(event.threadId))
           this.#emit({ type: "removed", threadId: event.threadId });
         return;
+    }
+  }
+
+  /**
+   * Takes closed threads out of memory once the store has them, as a restart
+   * would; clients read and reopen them from there. An agent stays while the
+   * thread that started it is open, which may still ask how its task went,
+   * and goes with that thread.
+   */
+  #releaseClosed(): void {
+    if (!this.#store || this.#stopped) return;
+    this.#flush();
+    // What the store may not have stays in memory.
+    if (this.#storeFailed) return;
+    for (const id of this.#closedThreads) {
+      this.#closedThreads.delete(id);
+      const managed = this.manager.get(id);
+      if (managed?.status !== "closed") continue;
+      const parent = managed.parentId;
+      if (parent && this.manager.get(parent) && !this.manager.closing(parent)) continue;
+      const ids = [...this.manager.descendants(id).map((child) => child.id), id].toReversed();
+      this.orchestrator.forgetTasks(ids);
+      for (const gone of ids) {
+        this.#savedTasks.delete(gone);
+        this.#flags.delete(gone);
+        this.#seenRuns.delete(gone);
+        this.#reopening.add(gone);
+        try {
+          this.manager.forget(gone);
+        } finally {
+          this.#reopening.delete(gone);
+        }
+      }
     }
   }
 
