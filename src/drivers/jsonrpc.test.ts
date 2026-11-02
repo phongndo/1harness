@@ -62,4 +62,19 @@ for await (const line of createInterface({ input: process.stdin })) {
       await rpc.close();
     }
   });
+
+  it("refuses a request once the process has exited", async () => {
+    const rpc = peer("quitter", "process.exit(3);\n");
+    await rpc.exited;
+    const late = rpc.request("ping", {});
+    const timeout = new Promise((resolve) => setTimeout(resolve, 1_000, "still waiting"));
+    const outcome = await Promise.race([
+      late.then(
+        () => "answered",
+        (error: unknown) => String(error),
+      ),
+      timeout,
+    ]);
+    assert.match(String(outcome), /quitter exited \(code 3\)/);
+  });
 });

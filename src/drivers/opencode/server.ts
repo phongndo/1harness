@@ -4,6 +4,8 @@ import { createInterface } from "node:readline";
 import type { OcEvent } from "./translate.ts";
 
 const START_TIMEOUT_MS = 30_000;
+// Every call queues work or reads state; none waits for a turn, so a slow one has hung.
+const REQUEST_TIMEOUT_MS = 120_000;
 const STDERR_TAIL_BYTES = 4_096;
 // The server sends a heartbeat every ten seconds or so, so a minute of silence means it is gone.
 const SILENCE_MS = 60_000;
@@ -79,6 +81,7 @@ export class OpenCodeServer {
         ...(body === undefined ? {} : { "content-type": "application/json" }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     const text = await response.text();
     if (!response.ok) {

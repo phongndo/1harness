@@ -65,6 +65,8 @@ interface Pending {
 
 const PROTOCOL_VERSION = 1;
 const START_TIMEOUT_MS = 30_000;
+// Loading a session replays it and starts its MCP servers, so it gets longer than a reply.
+const CONTROL_TIMEOUT_MS = 120_000;
 // Agents name their modes freely; these are the names that mean 1harness's modes.
 const MODE_NAMES: Record<RuntimeMode, string[]> = {
   supervised: ["ask", "default", "read-only", "readonly", "manual", "supervised"],
@@ -201,17 +203,21 @@ export class AcpSession implements HarnessSession {
     let session: SessionResponse;
     if (resume && capabilities.loadSession) {
       // The agent replays the conversation as updates before it answers.
-      session = await rpc.request("session/load", {
-        sessionId: resume,
-        cwd: this.info.cwd,
-        mcpServers,
-      });
+      session = await rpc.request(
+        "session/load",
+        { sessionId: resume, cwd: this.info.cwd, mcpServers },
+        CONTROL_TIMEOUT_MS,
+      );
       session.sessionId ??= resume;
       this.#emitAll(this.#translator.flush());
     } else {
       if (resume)
         this.#notice("warning", `${this.#spec.label} cannot resume sessions; starting a new one`);
-      session = await rpc.request("session/new", { cwd: this.info.cwd, mcpServers });
+      session = await rpc.request(
+        "session/new",
+        { cwd: this.info.cwd, mcpServers },
+        CONTROL_TIMEOUT_MS,
+      );
     }
     this.info.threadId = session.sessionId ?? null;
     this.#applyModes(session.modes ?? null);
@@ -262,7 +268,7 @@ export class AcpSession implements HarnessSession {
     void this.#request<{
       stopReason: string;
       usage?: { inputTokens?: number; outputTokens?: number };
-    }>("session/prompt", { sessionId, prompt }).then(
+    }>("session/prompt", { sessionId, prompt }, null).then(
       (result) => this.#endTurn(turnId, result.stopReason, null),
       (error: unknown) => this.#endTurn(turnId, "error", errorMessage(error)),
     );
@@ -526,9 +532,14 @@ export class AcpSession implements HarnessSession {
     return this.info.threadId;
   }
 
-  #request<T>(method: string, params: unknown): Promise<T> {
+  /** A request the agent answers right away; a prompt, answered when its turn ends, passes null. */
+  #request<T>(
+    method: string,
+    params: unknown,
+    timeoutMs: number | null = CONTROL_TIMEOUT_MS,
+  ): Promise<T> {
     if (!this.#rpc) return Promise.reject(new Error("The session has not started"));
-    return this.#rpc.request<T>(method, params);
+    return this.#rpc.request<T>(method, params, timeoutMs ?? undefined);
   }
 
   #notice(level: "info" | "warning" | "error", text: string): void {

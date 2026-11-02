@@ -46,6 +46,8 @@ export class JsonRpcProcess {
   #onError: ErrorHandler = () => {};
   #stderr = "";
   #exited: Promise<string>;
+  /** Why the process exited, once it has; a request sent after that fails at once. */
+  #exitError: Error | null = null;
   #name: string;
   #jsonrpc: boolean;
 
@@ -63,6 +65,7 @@ export class JsonRpcProcess {
     this.#exited = new Promise((resolve) => {
       const finish = (reason: string) => {
         const error = new Error(this.#describeExit(reason));
+        this.#exitError ??= error;
         for (const pending of this.#pending.values()) pending.reject(error);
         this.#pending.clear();
         resolve(error.message);
@@ -94,6 +97,7 @@ export class JsonRpcProcess {
 
   /** Sends a request; with `timeoutMs`, rejects if no reply arrives in time. */
   request<T>(method: string, params: unknown, timeoutMs?: number): Promise<T> {
+    if (this.#exitError) return Promise.reject(this.#exitError);
     const id = this.#nextId++;
     return new Promise<T>((resolve, reject) => {
       const timer =

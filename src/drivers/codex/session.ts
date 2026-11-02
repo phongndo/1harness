@@ -71,6 +71,7 @@ const HISTORY_TURNS = 10;
 const START_TIMEOUT_MS = 30_000;
 // Starting a thread waits for MCP servers, which may install packages first.
 const THREAD_TIMEOUT_MS = 120_000;
+const INTERRUPT_TIMEOUT_MS = 30_000;
 // The prompt Codex's own UI sends when the user accepts a proposed plan.
 const IMPLEMENT_PLAN = "Implement the plan.";
 // Settings Codex's own UI turns on: plan updates feed the task list, and MCP
@@ -714,7 +715,11 @@ export class CodexSession implements HarnessSession {
 
   async #sendInterrupt(turnId: string): Promise<void> {
     try {
-      await this.#request("turn/interrupt", { threadId: this.#threadId(), turnId });
+      await this.#request(
+        "turn/interrupt",
+        { threadId: this.#threadId(), turnId },
+        INTERRUPT_TIMEOUT_MS,
+      );
     } catch (error) {
       this.#emit(this.#translator.notice("warning", `Interrupt failed: ${errorMessage(error)}`));
     }
