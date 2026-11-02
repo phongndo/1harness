@@ -97,8 +97,10 @@ function punctuation(char: string | undefined): boolean {
  * beside space or punctuation, and `_` never opens or closes inside a word.
  */
 function emphasis(text: string, marker: string, paint: (body: string) => string): string {
+  // Most text has none of a marker; reading it a character at a time would find none.
+  if (!text.includes(marker)) return text;
   const size = marker.length;
-  const at = (index: number) => text.slice(index, index + size) === marker;
+  const at = (index: number) => text.startsWith(marker, index);
   // A marker that is part of a longer run of its character is not this marker.
   const lone = (index: number) =>
     at(index) && text[index - 1] !== marker[0] && text[index + size] !== marker[0];
