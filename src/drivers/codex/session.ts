@@ -848,6 +848,9 @@ export class CodexSession implements HarnessSession {
 
   /** Leaves plan mode in the chosen runtime mode and starts the implementation turn. */
   async #implementPlan(mode: RuntimeMode): Promise<void> {
+    // This turn starts outside the thread's queue, so it must not race one the queue started.
+    if (this.#turnId !== null)
+      throw new Error(`A turn is running; send "${IMPLEMENT_PLAN}" once it ends`);
     if (mode !== this.info.runtimeMode) await this.setRuntimeMode(mode);
     this.info.interactionMode = "default";
     this.#emitInfo();

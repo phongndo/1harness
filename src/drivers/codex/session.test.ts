@@ -156,4 +156,40 @@ describe("CodexSession", () => {
       await session.close();
     }
   });
+
+  it("does not start the plan's implementation while another turn runs", async () => {
+    const session = new CodexSession(config({ model: "gpt", interactionMode: "plan" }));
+    const { events } = collect(session);
+    try {
+      await session.start();
+      await session.startTurn({ text: "plan" });
+      await until(
+        () =>
+          events.some((event) => event.type === "request.opened") &&
+          events.some((event) => event.type === "turn.ended"),
+        "the offer to implement the plan",
+      );
+      const offer = events.find((event) => event.type === "request.opened");
+      assert.ok(offer?.type === "request.opened");
+      // The thread sent the next message once the plan's turn ended.
+      await session.startTurn({ text: "hold" });
+      await until(
+        () => events.filter((event) => event.type === "turn.started").length === 2,
+        "the second turn",
+      );
+      await session.respond(offer.request.id, { kind: "approval", optionId: "supervised" });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(events.filter((event) => event.type === "turn.started").length, 2);
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === "item.completed" &&
+            event.item.kind === "notice" &&
+            /turn is running/.test(event.item.text),
+        ),
+      );
+    } finally {
+      await session.close();
+    }
+  });
 });
