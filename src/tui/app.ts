@@ -3861,11 +3861,10 @@ export class App {
     }
     const usage = this.#usageSummary();
     if (usage) parts.push(usage);
-    // With more than one thread, which one this is and what the others are doing.
+    // With more than one thread, what the others are doing.
     const threads = [...this.#client.threads.values()].filter(
       (thread) => thread.status !== "closed",
     );
-    if (threads.length > 1 && this.#currentId) parts.push(this.#currentId);
     const others = threads.filter(
       (thread) =>
         thread.id !== this.#currentId && thread.status !== "idle" && thread.status !== "parked",
