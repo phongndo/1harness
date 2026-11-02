@@ -54,6 +54,8 @@ import { Orchestrator } from "./orchestrator.ts";
 const STREAM_FLUSH_MS = 250;
 /** How many recent events the host keeps for clients catching up after a gap. */
 const RECENT_EVENTS = 20_000;
+/** How much of them, as sent: one event can carry a whole item or page. */
+const RECENT_BYTES = 32 * 1024 * 1024;
 /** The most log entries one `thread.attach` returns. */
 const ATTACH_LIMIT = 500;
 /** How much of a run's message and reply a thread's state carries; tools read the rest. */
@@ -262,6 +264,9 @@ export class Host {
   readonly pageTools: ToolDefinition[];
   #listeners = new Set<(event: HostEvent) => void>();
   #recent: HostEvent[] = [];
+  /** The size of each recent event, as sent, and of all of them. */
+  #recentSizes: number[] = [];
+  #recentBytes = 0;
   #seq = 0;
   #logs = new Map<string, ThreadLog>();
   /** The state each thread was last announced with. */
@@ -772,9 +777,20 @@ export class Host {
 
   #emit(event: Unnumbered<HostEvent>): void {
     const numbered = { ...event, seq: ++this.#seq } as HostEvent;
+    const size = JSON.stringify(numbered).length;
     this.#recent.push(numbered);
-    if (this.#recent.length > RECENT_EVENTS)
-      this.#recent.splice(0, this.#recent.length - RECENT_EVENTS);
+    this.#recentSizes.push(size);
+    this.#recentBytes += size;
+    let drop = 0;
+    while (
+      this.#recent.length - drop > RECENT_EVENTS ||
+      (this.#recentBytes > RECENT_BYTES && this.#recent.length - drop > 1)
+    )
+      this.#recentBytes -= this.#recentSizes[drop++]!;
+    if (drop > 0) {
+      this.#recent.splice(0, drop);
+      this.#recentSizes.splice(0, drop);
+    }
     for (const listener of this.#listeners) listener(numbered);
   }
 
