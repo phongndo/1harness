@@ -592,6 +592,27 @@ describe("Host with a store", () => {
     );
   });
 
+  it("does not write back a thread forgotten while its messages waited to be saved", async () => {
+    const store = fresh();
+    newHost([], store);
+    const client = await connect("tui");
+    const thread = await client.call("thread.open", { harness: "scripted", settings });
+    await settle();
+    let failing = true;
+    const real = store.recordMessage.bind(store);
+    store.recordMessage = (...args) => {
+      if (failing) throw new Error("disk I/O error");
+      real(...args);
+    };
+    await client.call("thread.send", { threadId: thread.id, text: "hello" });
+    await settle();
+    await client.call("thread.forget", { threadId: thread.id });
+    failing = false;
+    await client.call("thread.open", { harness: "scripted", settings });
+    await settle();
+    assert.equal(store.thread(thread.id), null);
+  });
+
   it("answers a retried message from before a restart without sending it", async () => {
     const store = fresh();
     newHost([], store);

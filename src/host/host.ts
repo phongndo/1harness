@@ -851,7 +851,8 @@ export class Host {
    */
   #admit(managed: ManagedThread, change: ManagerEvent & { type: "thread.event" }): void {
     const store = this.#store;
-    if (!store) return;
+    // Only messages are written at once; the rest waits for the next flush.
+    if (!store || !change.event.type.startsWith("message.")) return;
     if (this.#unadmitted.length === 0)
       try {
         this.#record(store, managed, change.event);
@@ -863,6 +864,12 @@ export class Host {
       }
     this.#unadmitted.push([managed, change.event]);
     this.#scheduleFlush();
+  }
+
+  /** Deletes a thread from the store, with what waits to be saved for it, which would bring it back. */
+  #deleteStored(id: string): void {
+    this.#unadmitted = this.#unadmitted.filter(([managed]) => managed.id !== id);
+    this.#store?.deleteThread(id);
   }
 
   #record(store: Store, managed: ManagedThread, event: ThreadEvent): void {
@@ -982,7 +989,7 @@ export class Host {
         this.#announced.delete(event.threadId);
         this.#commandsVersion.delete(event.threadId);
         this.#dirty.delete(event.threadId);
-        if (this.#discarding.delete(event.threadId)) this.#store?.deleteThread(event.threadId);
+        if (this.#discarding.delete(event.threadId)) this.#deleteStored(event.threadId);
         // One being reopened comes straight back, and one stored can be read and
         // reopened; telling clients it went could make one that shows it drop it.
         if (!this.#reopening.has(event.threadId))
@@ -1953,7 +1960,7 @@ export class Host {
           if (this.manager.get(id)) {
             this.#discarding.add(id);
             this.manager.forget(id);
-          } else this.#store?.deleteThread(id);
+          } else this.#deleteStored(id);
           this.#flags.delete(id);
           this.#seenRuns.delete(id);
         }
