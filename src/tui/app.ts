@@ -158,32 +158,28 @@ export interface ServerInfo {
   pid: number | null;
 }
 
-/** The order the command menu and /help list 1harness's commands in; others follow. */
+/**
+ * The order the command menu and /help list 1harness's commands in, a group
+ * at a time: Threads, Model, Permissions, Tools, General; others follow.
+ */
 const COMMAND_ORDER = [
-  "help",
   "new",
-  "threads",
   "resume",
-  "harness",
-  "model",
-  "effort",
-  "mode",
-  "plan",
-  "compact",
-  "status",
   "rename",
   "fork",
-  "pin",
-  "archive",
-  "unarchive",
-  "stop",
-  "close",
-  "forget",
+  "compact",
   "unqueue",
-  "image",
-  "copy",
+  "close",
+  "model",
+  "effort",
+  "harness",
+  "mode",
+  "plan",
   "mcp",
   "extensions",
+  "help",
+  "status",
+  "copy",
   "connect",
 ];
 /** Listed last, after commands the harness and extensions add. */
