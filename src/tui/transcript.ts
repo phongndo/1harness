@@ -1,7 +1,8 @@
-import { basename, isAbsolute, relative, resolve } from "node:path";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ReportSpan } from "../commands/registry.ts";
 import type { CommandAction, FileChange, Item, TodoStep } from "../core/events.ts";
+import { fileName } from "../core/wording.ts";
 import {
   isLive,
   paintStatus,
@@ -12,10 +13,21 @@ import {
 } from "./agents.ts";
 import { FIGURE_NAMES, type Figure } from "./figures.ts";
 import { htmlText } from "./html.ts";
-import { fit, placeholderRow, type MediaContext, type Picture, type Shown } from "./images.ts";
+import { fit, pictureRows, type MediaContext, type Picture, type Shown } from "./images.ts";
 import { renderMarkdown, type MarkdownOptions } from "./markdown.ts";
 import { diffLine, style } from "./theme.ts";
-import { diffBody, plainText, spread, truncate, visibleWidth, wrap } from "./text.ts";
+import {
+  diffBody,
+  firstLine,
+  oneLineText,
+  outputText,
+  plainText,
+  shownPath,
+  spread,
+  truncate,
+  visibleWidth,
+  wrap,
+} from "./text.ts";
 
 export type ToolItem = Extract<
   Item,
@@ -58,8 +70,10 @@ export type Block =
   | { kind: "agents"; rows: AgentRow[] }
   /** The muted line that closes a turn: duration and token estimate. */
   | { kind: "summary"; text: string }
-  /** A picture, shown where the terminal can, with a caption under it. */
-  /** An image; with its file's `path`, drawn again from the file for other cells. */
+  /**
+   * An image, with a caption under it; with its file's `path`, drawn again
+   * from the file for other cells.
+   */
   | { kind: "image"; picture: Picture; title: string; path?: string }
   /** A page the agent showed, drawn as a picture where the terminal shows them. */
   | { kind: "html"; title: string; html: string }
@@ -189,12 +203,6 @@ export function isToolItem(item: Item): item is ToolItem {
   );
 }
 
-export function displayPath(path: string, cwd: string): string {
-  if (!isAbsolute(path)) return path;
-  const inside = relative(cwd, path);
-  return inside !== "" && !inside.startsWith("..") && !isAbsolute(inside) ? inside : path;
-}
-
 export { formatTokens } from "../core/wording.ts";
 
 /**
@@ -272,10 +280,6 @@ export class Transcript {
     return this.#entries.slice(count).map((entry) => entry.block);
   }
 
-  /**
-   * Rows for a viewport of `height` rows that ends `scroll` rows above the
-   * bottom. `total` counts every row, for clamping the scroll position.
-   */
   /**
    * The rows in view, `height` of them ending `scroll` rows above the last,
    * with the pictures they show and what each does when clicked; `top` is
@@ -496,7 +500,7 @@ const PAGE_TEXT_LINES = 12;
  */
 function htmlRows(block: Extract<Block, { kind: "html" }>, context: RenderContext): string[] {
   const { width } = context;
-  const title = plainText(block.title, true);
+  const title = oneLineText(block.title);
   const drawn = context.html?.(block.html, width - IMAGE_INDENT * 2);
   const indent = " ".repeat(IMAGE_INDENT);
   if (drawn) {
@@ -523,7 +527,7 @@ function htmlRows(block: Extract<Block, { kind: "html" }>, context: RenderContex
     truncate(`${style.strong("▣")} ${style.text(title)} ${style.muted("· page")}`, width),
   ];
   for (const line of shown)
-    rows.push(...wrap(indent + style.soft(plainText(line, true)), width, indent));
+    rows.push(...wrap(indent + style.soft(oneLineText(line)), width, indent));
   if (lines.length > shown.length)
     rows.push(
       truncate(
@@ -552,7 +556,7 @@ function workedRows(block: Extract<Block, { kind: "worked" }>, context: RenderCo
       .join(" ");
     rows.push(
       truncate(
-        `${style.muted(last ? "└ " : "├ ")}${style.text(displayPath(plainText(file.path, true), context.cwd))} ${counts}`,
+        `${style.muted(last ? "└ " : "├ ")}${style.text(shownPath(file.path, context.cwd))} ${counts}`,
         context.width,
       ),
     );
@@ -646,10 +650,8 @@ function markdownOptions(context: RenderContext, offset: number): MarkdownOption
       const shown = { picture: image, ...size };
       context.collect?.(shown);
       images.set(src, { shown, path });
-      const rows = Array.from({ length: size.rows }, (_, row) =>
-        placeholderRow(image, row, size.columns),
-      );
-      if (alt.trim()) rows.push(style.muted(truncate(plainText(alt, true), columns)));
+      const rows = pictureRows(image, size);
+      if (alt.trim()) rows.push(style.muted(truncate(oneLineText(alt), columns)));
       return rows;
     },
     region: (region) => {
@@ -679,7 +681,7 @@ function markdownOptions(context: RenderContext, offset: number): MarkdownOption
             {
               kind: "picture",
               picture: image.shown.picture,
-              title: region.alt.trim() || basename(image.path),
+              title: region.alt.trim() || fileName(image.path),
               path: image.path,
             },
             start,
@@ -699,7 +701,7 @@ function imageRows(block: Extract<Block, { kind: "image" }>, context: RenderCont
   // The file drawn for these cells once it comes; the picture it was first shown with until then.
   const fresh = block.path && context.media?.graphics ? context.image?.(block.path) : undefined;
   const image = fresh ?? block.picture;
-  const title = plainText(block.title, true);
+  const title = oneLineText(block.title);
   const size = `${image.pixelWidth}×${image.pixelHeight}`;
   const media = context.media;
   if (!media?.graphics)
@@ -709,24 +711,16 @@ function imageRows(block: Extract<Block, { kind: "image" }>, context: RenderCont
         context.width,
       ),
     ];
-  const { columns, rows } = fit(image, context.width - IMAGE_INDENT * 2, media);
-  context.collect?.({ picture: image, columns, rows });
+  const fitted = fit(image, context.width - IMAGE_INDENT * 2, media);
+  context.collect?.({ picture: image, ...fitted });
   context.mark?.(
     { kind: "picture", picture: image, title, ...(block.path ? { path: block.path } : {}) },
     0,
-    rows + 1,
+    fitted.rows + 1,
   );
-  // Placeholder characters, which the terminal draws the picture in, row by row.
   const indent = " ".repeat(IMAGE_INDENT);
-  const picture = Array.from(
-    { length: rows },
-    (_, row) => indent + placeholderRow(image, row, columns),
-  );
-  const caption = truncate(
-    `${" ".repeat(IMAGE_INDENT)}${style.muted(`${title} · ${size}`)}`,
-    context.width,
-  );
-  return [...picture, caption];
+  const caption = truncate(`${indent}${style.muted(`${title} · ${size}`)}`, context.width);
+  return [...pictureRows(image, fitted, indent), caption];
 }
 
 /** What the user chose: a mark for how it went, what was asked, and the answer. */
@@ -742,8 +736,8 @@ function decisionRows(block: Extract<Block, { kind: "decision" }>, width: number
   const answer =
     block.outcome === "dismissed"
       ? style.muted("dismissed")
-      : style.text(plainText(block.answer, true));
-  const title = plainText(block.title, true);
+      : style.text(oneLineText(block.answer));
+  const title = oneLineText(block.title);
   return wrap(`${mark} ${style.soft(title)} ${style.muted("→")} ${answer}`, width, "  ");
 }
 
@@ -758,7 +752,7 @@ function userRows(block: Extract<Block, { kind: "user" }>, context: RenderContex
     rows.push(truncate(marker + style.muted(`… ${lines.length - shown.length} more lines`), width));
   // Images sent with the message, small, under it; their names where they cannot show.
   for (const path of block.images ?? []) {
-    const name = path.split("/").at(-1) ?? path;
+    const name = fileName(path);
     const shownImage = context.media?.graphics ? context.image?.(path) : undefined;
     if (shownImage && context.media) {
       const media = { ...context.media, maxRows: Math.min(context.media.maxRows, THUMBNAIL_ROWS) };
@@ -769,10 +763,9 @@ function userRows(block: Extract<Block, { kind: "user" }>, context: RenderContex
         rows.length,
         rows.length + size.rows,
       );
-      for (let row = 0; row < size.rows; row++)
-        rows.push(marker + placeholderRow(shownImage, row, size.columns));
+      rows.push(...pictureRows(shownImage, size, marker));
     }
-    rows.push(truncate(`${marker}${style.muted(`▣ ${plainText(name, true)}`)}`, width));
+    rows.push(truncate(`${marker}${style.muted(`▣ ${oneLineText(name)}`)}`, width));
   }
   return rows;
 }
@@ -784,7 +777,7 @@ const THUMBNAIL_ROWS = 12;
 function resultRows(block: Extract<Block, { kind: "result" }>, context: RenderContext): string[] {
   const { width } = context;
   // The agent by what it was doing, where the client knows its title.
-  const from = plainText(context.threadTitle?.(block.from) || block.from, true);
+  const from = oneLineText(context.threadTitle?.(block.from) || block.from);
   const head = `${statusDot(block.status)} ${style.text(`Result from ${from}`)}`;
   const rows = [truncate(`${head} ${style.muted("·")} ${paintStatus(block.status)}`, width)];
   const line = plainLine(block.text);
@@ -817,9 +810,7 @@ const TONES: Record<ReportSpan["tone"], (text: string) => string> = {
 
 /** A long last span, such as a list of tools, wraps under where it starts. */
 function reportRows(block: Extract<Block, { kind: "report" }>, width: number): string[] {
-  const rows = [
-    truncate(`${style.strong("●")} ${style.text(plainText(block.title, true))}`, width),
-  ];
+  const rows = [truncate(`${style.strong("●")} ${style.text(oneLineText(block.title))}`, width)];
   for (const spans of block.lines) {
     if (spans.length === 0) {
       rows.push("");
@@ -850,7 +841,7 @@ function todoRows(steps: readonly TodoStep[], width: number): string[] {
   ];
   steps.forEach((step, index) => {
     const branch = style.muted(index === steps.length - 1 ? "└ " : "├ ");
-    const label = plainText(step.text, true);
+    const label = oneLineText(step.text);
     const text =
       step.status === "completed"
         ? style.muted(`✓ ${label}`)
@@ -981,7 +972,7 @@ function detailedItem(
   const { width } = context;
   const body: string[] = [];
   const tail = (text: string, limit: number, paint: (line: string) => string) => {
-    const lines = plainText(text, false, true).replace(/\s+$/, "").split("\n");
+    const lines = outputText(text).replace(/\s+$/, "").split("\n");
     if (lines.length === 1 && lines[0] === "") return;
     if (lines.length > limit) body.push(style.muted(`… ${lines.length - limit} earlier lines`));
     for (const kept of lines.slice(-limit)) body.push(paint(kept));
@@ -996,8 +987,7 @@ function detailedItem(
     }
     case "file_change":
       for (const change of item.changes) {
-        if (item.changes.length > 1)
-          body.push(style.text(displayPath(plainText(change.path, true), context.cwd)));
+        if (item.changes.length > 1) body.push(style.text(shownPath(change.path, context.cwd)));
         const lines = diffBody(plainText(change.diff).split("\n"));
         for (const text of lines.slice(0, DETAIL_DIFF_LINES))
           body.push(diffLine(text, style.muted));
@@ -1020,7 +1010,7 @@ function detailedItem(
 }
 
 /** Colors a shell command the way fx does: programs and operators brighter, flags softer. */
-export function highlightCommand(command: string): string {
+function highlightCommand(command: string): string {
   const [head = "", ...rest] = plainText(command).trim().split("\n");
   const more = rest.length > 0 ? style.muted(" …") : "";
   let expectProgram = true;
@@ -1069,15 +1059,6 @@ function diffCounts(changes: readonly FileChange[]): string {
   return ` +${added} / -${removed}`;
 }
 
-function firstLine(text: string): string {
-  return (
-    text
-      .split("\n")
-      .find((line) => line.trim() !== "")
-      ?.trim() ?? ""
-  );
-}
-
 /** 1harness's own tools, in words: what each did, is doing, and the action itself. */
 const OWN_TOOLS: Record<string, [string, string, string]> = {
   orchestrator_capabilities: [
@@ -1103,7 +1084,7 @@ function ownTarget(summary: string): string {
   try {
     const input = JSON.parse(summary) as Record<string, unknown>;
     const target = input["threadId"] ?? input["taskId"];
-    return typeof target === "string" ? ` ${plainText(target, true)}` : "";
+    return typeof target === "string" ? ` ${oneLineText(target)}` : "";
   } catch {
     return "";
   }
@@ -1111,9 +1092,8 @@ function ownTarget(summary: string): string {
 
 /** A tool call's name, with its server's but for 1harness's own, which adds nothing. */
 function toolName(item: Extract<ToolItem, { kind: "tool_call" }>): string {
-  return plainText(
+  return oneLineText(
     item.server && item.server !== "1harness" ? `${item.server}/${item.tool}` : item.tool,
-    true,
   );
 }
 
@@ -1130,25 +1110,25 @@ function asking(item: ToolItem, cwd: string): string {
       const [change] = item.changes;
       const target =
         item.changes.length === 1 && change
-          ? displayPath(plainText(change.path, true), cwd)
+          ? shownPath(change.path, cwd)
           : `${item.changes.length} files`;
       const verb = change?.kind === "add" ? "write" : change?.kind === "delete" ? "delete" : "edit";
       return asks(style.muted(`${verb} ${target}${diffCounts(item.changes)}`));
     }
     case "tool_call": {
       const name = toolName(item);
-      const target = item.summary ? ` ${displayPath(plainText(item.summary, true), cwd)}` : "";
+      const target = item.summary ? ` ${shownPath(item.summary, cwd)}` : "";
       return asks(style.muted(`use ${name}${target}`));
     }
     case "web_search":
-      return asks(style.muted(`search the web for ${plainText(item.query, true)}`));
+      return asks(style.muted(`search the web for ${oneLineText(item.query)}`));
     case "agent":
-      return asks(style.muted(`start an agent: ${plainText(item.description, true)}`));
+      return asks(style.muted(`start an agent: ${oneLineText(item.description)}`));
   }
 }
 
 /** One row of a tool group: a verb in fx's tense, then the target. */
-export function toolLine(item: ToolItem, settled: boolean, cwd: string, waiting = false): string {
+function toolLine(item: ToolItem, settled: boolean, cwd: string, waiting = false): string {
   const running = item.status === "running";
   if (waiting && running && !settled) return asking(item, cwd);
   /** Picks the verb for the item's state; `noun` names the action when it did not happen. */
@@ -1177,10 +1157,10 @@ export function toolLine(item: ToolItem, settled: boolean, cwd: string, waiting 
       const kind = kinds.size === 1 ? change?.kind : "update";
       const target =
         item.changes.length === 1 && change
-          ? displayPath(plainText(change.path, true), cwd)
+          ? shownPath(change.path, cwd)
           : `${item.changes.length} files`;
       if (item.changes.length === 1 && change?.movePath) {
-        const moved = `${target} → ${displayPath(plainText(change.movePath, true), cwd)}`;
+        const moved = `${target} → ${shownPath(change.movePath, cwd)}`;
         return style.muted(
           `${verb("Moved", "Moving", "move")} ${moved}${diffCounts(item.changes)}`,
         );
@@ -1195,20 +1175,20 @@ export function toolLine(item: ToolItem, settled: boolean, cwd: string, waiting 
     }
     case "web_search":
       return style.muted(
-        `${verb("Searched web", "Searching web", "web search")} ${plainText(item.query, true)}`,
+        `${verb("Searched web", "Searching web", "web search")} ${oneLineText(item.query)}`,
       );
     case "agent": {
       // The harness's own agents: what they are doing while running, then what they found.
-      const summary = item.summary ? ` · ${plainText(firstLine(item.summary), true)}` : "";
+      const summary = item.summary ? ` · ${oneLineText(firstLine(item.summary))}` : "";
       return style.muted(
-        `${verb("Agent finished", "Agent working on", "agent")} ${plainText(item.description, true)}${summary}`,
+        `${verb("Agent finished", "Agent working on", "agent")} ${oneLineText(item.description)}${summary}`,
       );
     }
     case "tool_call": {
-      const target = item.summary ? ` ${displayPath(plainText(item.summary, true), cwd)}` : "";
+      const target = item.summary ? ` ${shownPath(item.summary, cwd)}` : "";
       const failure =
         item.status === "failed" && item.output.trim() !== ""
-          ? `: ${plainText(firstLine(item.output), true)}`
+          ? `: ${oneLineText(firstLine(item.output))}`
           : "";
       // 1harness's own tools say what they did; its server's name adds nothing.
       const own = item.server === "1harness" ? OWN_TOOLS[item.tool] : undefined;
@@ -1236,12 +1216,12 @@ export function toolLine(item: ToolItem, settled: boolean, cwd: string, waiting 
 function describeAction(action: CommandAction, done: boolean, cwd: string): string {
   switch (action.type) {
     case "read":
-      return `${done ? "Read" : "Reading"} ${displayPath(plainText(action.path, true), cwd)}`;
+      return `${done ? "Read" : "Reading"} ${shownPath(action.path, cwd)}`;
     case "list":
-      return `${done ? "Listed" : "Listing"} ${action.path ? displayPath(plainText(action.path, true), cwd) : "files"}`;
+      return `${done ? "Listed" : "Listing"} ${action.path ? shownPath(action.path, cwd) : "files"}`;
     case "search": {
-      const where = action.path ? ` in ${displayPath(plainText(action.path, true), cwd)}` : "";
-      return `${done ? "Searched" : "Searching"} ${action.query ? plainText(action.query, true) : "files"}${where}`;
+      const where = action.path ? ` in ${shownPath(action.path, cwd)}` : "";
+      return `${done ? "Searched" : "Searching"} ${action.query ? oneLineText(action.query) : "files"}${where}`;
     }
     case "other":
       return "";
@@ -1265,13 +1245,13 @@ const STATUS_ORDER: readonly AgentStatus[] = [
  * on at the right, then, where it asks for something, what.
  */
 function agentRow(row: AgentRow, lead: string, hang: string, context: RenderContext): string[] {
-  const title = `${lead}${style.strong(plainText(row.title, true))}`;
+  const title = `${lead}${style.strong(oneLineText(row.title))}`;
   // Too narrow for both, what it is doing stays and what it runs on goes.
   const fits = visibleWidth(title) + 2 + visibleWidth(row.label) <= context.width;
   const rows = [
     fits ? spread(title, style.muted(row.label), context.width) : truncate(title, context.width),
   ];
-  const shown = plainText(row.detail, true);
+  const shown = oneLineText(row.detail);
   if (shown)
     rows.push(
       truncate(

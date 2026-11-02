@@ -1,6 +1,7 @@
 import type { HarnessRequest } from "../core/events.ts";
 import type { ThreadState } from "../protocol.ts";
 import { shortThreadId } from "../core/thread-id.ts";
+import { firstLine } from "./text.ts";
 
 // The Program Status Protocol (OSC 7501), which lets a program tell its
 // terminal what it is doing: idle, working, blocked on the user, done, or
@@ -120,7 +121,7 @@ export function encodeStatus(record: StatusRecord | { id: string | null; state: 
 }
 
 /** What an approval asks to do, in one line, such as `Run: pnpm test`. */
-export function approvalLine(request: Extract<HarnessRequest, { kind: "approval" }>): string {
+function approvalLine(request: Extract<HarnessRequest, { kind: "approval" }>): string {
   const action = request.action;
   switch (action.type) {
     case "command":
@@ -159,11 +160,6 @@ export function threadStatusInput(thread: ThreadState, activity: string | null):
     activity,
     notify: thread.origin === "user",
   };
-}
-
-/** The first line of text, for a message about it. */
-function firstLine(text: string): string {
-  return text.trim().split("\n")[0] ?? "";
 }
 
 /**

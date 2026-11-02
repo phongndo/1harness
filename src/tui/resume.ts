@@ -2,9 +2,9 @@ import { ago } from "../core/wording.ts";
 import type { ThreadListing } from "../protocol.ts";
 import { runsOn } from "./agents.ts";
 import type { Key } from "./input.ts";
-import { hints, lineStep } from "./menu.ts";
+import { hints, lineStep, rule } from "./menu.ts";
 import { style } from "./theme.ts";
-import { pad, plainText, spread, truncate, visibleWidth } from "./text.ts";
+import { oneLineText, pad, spread, truncate, visibleWidth } from "./text.ts";
 
 // The thread list /resume and ctrl+t open, laid out as Codex's and pi's
 // pickers are: a search line, then a thread a row, when it last moved at the
@@ -65,8 +65,11 @@ const SCOPES: { scope: Scope; label: string }[] = [
   { scope: "archived", label: "Archived" },
 ];
 
-/** The columns the age takes at the left: `yesterday`, the longest, and a gap. */
-const AGE_WIDTH = 11;
+/**
+ * The columns the age takes at the left, at the least: `29d ago` and a gap.
+ * A date, past a month, can take more, and the column widens for it.
+ */
+const AGE_WIDTH = 10;
 
 /** The longest a folder shows in a row; a longer one keeps its last part. */
 const FOLDER_WIDTH = 24;
@@ -84,8 +87,8 @@ function shortPath(path: string, home: string): string {
   return `…/${last.length > FOLDER_WIDTH - 2 ? `${last.slice(0, FOLDER_WIDTH - 3)}…` : last}`;
 }
 
-/** `5m`, `3h`, `2d`: an age short enough for its column. */
-function age(time: number, now: number): string {
+/** `now`, `5m ago`, `3h ago`, `2d ago`; past a month, the date `ago` gives. */
+function shortAge(time: number, now: number): string {
   const minutes = Math.floor((now - time) / 60_000);
   if (minutes < 1) return "now";
   if (minutes < 60) return `${minutes}m ago`;
@@ -93,6 +96,10 @@ function age(time: number, now: number): string {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return days < 30 ? `${days}d ago` : ago(time, now);
+}
+
+function entryAge(entry: ResumeEntry, now: number): string {
+  return entry.updatedAt ? shortAge(entry.updatedAt, now) : "";
 }
 
 export class ResumeView {
@@ -357,7 +364,7 @@ export class ResumeView {
       if (this.#index >= this.#top + room) this.#top = this.#index - room + 1;
       this.#top = Math.max(0, Math.min(this.#top, visible.length - room));
       const shown = visible.slice(this.#top, this.#top + room);
-      const columns = this.#columns(shown, width);
+      const columns = this.#columns(shown, width, now);
       shown.forEach((entry, offset) =>
         rows.push(this.#row(entry, this.#top + offset === this.#index, width, columns, now)),
       );
@@ -384,16 +391,21 @@ export class ResumeView {
    * then, with every folder's threads, its folder; the folder gives way
    * first, then what it runs on, where the titles would have too little room.
    */
-  #columns(shown: readonly ResumeEntry[], width: number): { on: number; folder: number } {
+  #columns(
+    shown: readonly ResumeEntry[],
+    width: number,
+    now: number,
+  ): { age: number; on: number; folder: number } {
     const widest = (pick: (entry: ResumeEntry) => string) =>
       Math.max(0, ...shown.map((entry) => visibleWidth(pick(entry))));
+    const age = Math.max(AGE_WIDTH, widest((entry) => entryAge(entry, now)) + 2);
     const on = widest((entry) => entry.on);
     const folder =
       this.#scope === "folder" ? 0 : widest((entry) => shortPath(entry.cwd, this.#home));
     // The marker, the age, and room for a title of a few words.
-    const fits = (right: number) => 4 + AGE_WIDTH + 24 + right <= width;
-    if (fits(on + (folder ? folder + 2 : 0))) return { on, folder };
-    return fits(on) ? { on, folder: 0 } : { on: 0, folder: 0 };
+    const fits = (right: number) => 4 + age + 25 + right <= width;
+    if (fits(on + (folder ? folder + 2 : 0))) return { age, on, folder };
+    return fits(on) ? { age, on, folder: 0 } : { age, on: 0, folder: 0 };
   }
 
   /**
@@ -404,28 +416,20 @@ export class ResumeView {
     entry: ResumeEntry,
     selected: boolean,
     width: number,
-    columns: { on: number; folder: number },
+    columns: { age: number; on: number; folder: number },
     now: number,
   ): string {
     const marker = selected ? style.strong("›") : " ";
-    const when = entry.updatedAt ? age(entry.updatedAt, now) : "";
-    const lead = `  ${marker} ${style.muted(when.padEnd(AGE_WIDTH - 1))}${"  ".repeat(entry.depth)}${entry.dot}`;
+    const lead = `  ${marker} ${style.muted(entryAge(entry, now).padEnd(columns.age))}${"  ".repeat(entry.depth)}${entry.dot}`;
     const parts: string[] = [];
     if (columns.on) parts.push(pad(entry.on, columns.on));
     if (columns.folder) parts.push(pad(shortPath(entry.cwd, this.#home), columns.folder));
     const right = style.muted(parts.join("  ").trimEnd());
     const used = parts.length > 0 ? columns.on + (columns.folder ? columns.folder + 2 : 0) : 0;
     const room = Math.max(4, width - visibleWidth(lead) - used - 2);
-    const title = truncate(plainText(entry.title, true) || "New thread", room);
+    const title = truncate(oneLineText(entry.title) || "New thread", room);
     const painted = selected ? style.bold(style.strong(title)) : style.text(title);
     // The columns start at one place on every row, so they line up.
     return `${lead}${pad(painted, room + 2)}${right}`.trimEnd();
   }
-}
-
-/** A rule across `width`, with `label` near its right end, as Codex counts its list. */
-function rule(width: number, label = ""): string {
-  if (!label) return style.rule("─".repeat(Math.max(0, width)));
-  const tail = ` ${label} ─`;
-  return style.rule(`${"─".repeat(Math.max(0, width - visibleWidth(tail)))}${tail}`);
 }

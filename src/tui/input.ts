@@ -39,6 +39,11 @@ export type InputEvent =
   /** The size of a character cell in pixels, which images are sized by. */
   | { type: "cellSize"; width: number; height: number };
 
+/** The most time between clicks that make a double or triple one. */
+export const CLICK_MS = 400;
+/** Rows a notch of the wheel scrolls. */
+export const WHEEL_ROWS = 3;
+
 const PASTE_END = "\x1b[201~";
 
 const CSI_KEYS: Record<string, string> = {

@@ -1,10 +1,9 @@
-import { stripVTControlCharacters } from "node:util";
 import type { MessageOrigin } from "../core/thread.ts";
 import { shortThreadId } from "../core/thread-id.ts";
 import type { ThreadState } from "../protocol.ts";
 import { inline } from "./markdown.ts";
 import { style } from "./theme.ts";
-import { plainText } from "./text.ts";
+import { firstLine, oneLineText } from "./text.ts";
 
 // How the terminal names and colors what threads are doing, so agent rows and
 // the thread picker use one word per state.
@@ -72,25 +71,6 @@ export function statusDot(status: AgentStatus): string {
   return paintStatus(status, status === "needs you" ? "◆" : "●");
 }
 
-/** `12s`, `1m 05s`, `1h 02m`. */
-export function formatElapsed(ms: number): string {
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
-  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
-}
-
-/** When the thread's latest work started and ended; the end is null while it is live. */
-export function agentSpan(thread: ThreadState): { startedAt: number; endedAt: number | null } {
-  const run = thread.lastRun;
-  const live = isLive(agentStatus(thread));
-  return {
-    startedAt: run?.startedAt ?? thread.createdAt,
-    endedAt: live ? null : (run?.endedAt ?? run?.startedAt ?? thread.createdAt),
-  };
-}
-
 /** An agent as a parent's transcript shows it, kept current as the agent works. */
 export interface AgentRow {
   threadId: string;
@@ -100,8 +80,6 @@ export interface AgentRow {
   label: string;
   title: string;
   status: AgentStatus;
-  startedAt: number;
-  endedAt: number | null;
   /** What it found or why it failed, or what it asks of the user. */
   detail: string;
 }
@@ -123,7 +101,6 @@ export function agentRowOf(thread: ThreadState): AgentRow {
     label: harnessLabel(thread),
     title: thread.title || shortThreadId(thread.id),
     status,
-    ...agentSpan(thread),
     detail,
   };
 }
@@ -140,7 +117,6 @@ export function harnessLabel(thread: ThreadState): string {
 
 /** The first line of text with Markdown markers dropped, for one-line previews. */
 export function plainLine(text: string): string {
-  const line = text.split("\n").find((candidate) => candidate.trim() !== "") ?? "";
-  const body = line.replace(/^\s*(?:#+\s+|[-*+]\s+|>\s*|\d+\.\s+)/, "");
-  return plainText(stripVTControlCharacters(inline(body)), true);
+  const body = firstLine(text).replace(/^\s*(?:#+\s+|[-*+]\s+|>\s*|\d+\.\s+)/, "");
+  return oneLineText(inline(body));
 }

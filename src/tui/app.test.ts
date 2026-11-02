@@ -327,6 +327,19 @@ describe("App threads and keys", () => {
     assert.doesNotMatch(session.terminal.text(), /Done with beta/);
   });
 
+  it("says why the thread list could not load, rather than that there are no threads", async () => {
+    const session = await start({ prompt: "alpha" });
+    await session.sees("Done with alpha");
+    const call = session.client.call.bind(session.client);
+    session.client.call = ((method: string, params: unknown) =>
+      method === "threads.list"
+        ? Promise.reject(new Error("the store is locked"))
+        : call(method as never, params as never)) as typeof session.client.call;
+    await session.type("\x14");
+    const screen = await session.sees("the store is locked");
+    assert.doesNotMatch(screen, /No threads yet/);
+  });
+
   it("renames the thread with /rename", async () => {
     const session = await start({ prompt: "alpha" });
     await session.sees("Done with alpha");

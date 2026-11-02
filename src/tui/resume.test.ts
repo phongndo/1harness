@@ -55,6 +55,17 @@ describe("ResumeView", () => {
     assert.match(rows.at(-1) ?? "", /tab scope/);
   });
 
+  it("widens the age column for a date from another year, keeping the titles apart", () => {
+    const old = thread("t0", "Old work", 24 * 400);
+    const rows = plain(
+      new ResumeView("Resume", [ENTRIES[0]!, old], { cwd: HERE }).render(72, 20, NOW),
+    );
+    const [recent, dated] = rows.filter((row) => /work|redirect/.test(row));
+    assert.match(dated ?? "", /^ {4}\S.*\d{4} {2,}Old work/);
+    // Every title starts in one column.
+    assert.equal(recent?.indexOf("Fix"), dated?.indexOf("Old"));
+  });
+
   it("shows every folder's threads on tab, with their folders", () => {
     const shown = view();
     shown.key(key("tab"));

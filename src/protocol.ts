@@ -170,9 +170,7 @@ export type HostEvent =
   | { seq: number; type: "notice"; level: "info" | "warning" | "error"; text: string }
   | { seq: number; type: "ui"; clientId: string; request: UiRequest }
   /** A pending pick was answered or dropped; the client closes it. */
-  | { seq: number; type: "ui.done"; clientId: string; id: string }
-  | { seq: number; type: "commands" }
-  | { seq: number; type: "harnesses"; harnesses: HarnessInfo[] };
+  | { seq: number; type: "ui.done"; clientId: string; id: string };
 
 /** A thread a client can open again, from the host's records. */
 export interface ThreadListing {

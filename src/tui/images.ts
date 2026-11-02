@@ -85,6 +85,14 @@ export function pictureLater(width: number, height: number, draw: () => Uint8Arr
   };
 }
 
+/**
+ * Device pixels per CSS pixel for a screen with cells of `cell` pixels, as
+ * text is drawn: 16px-tall cells are 1×, smaller ones a denser screen.
+ */
+export function screenDensity(cell: CellSize): number {
+  return Math.min(3, Math.max(1, Math.round((cell.height / 16) * 4) / 4));
+}
+
 /** The most rows an image takes on a screen of `height` rows. */
 export function maxImageRows(height: number): number {
   return Math.max(4, Math.floor(height * SCREEN_SHARE));
@@ -183,12 +191,24 @@ export function placeholderRow(image: Picture, row: number, columns: number): st
   return `${color}${cells}\x1b[39m`;
 }
 
-/** Drops every picture the terminal keeps, with what shows them. */
+/** A picture's rows at the size `fit` gave it, each after `indent`. */
+export function pictureRows(
+  image: Picture,
+  size: { columns: number; rows: number },
+  indent = "",
+): string[] {
+  return Array.from(
+    { length: size.rows },
+    (_, row) => indent + placeholderRow(image, row, size.columns),
+  );
+}
+
 /** Deletes one picture from the terminal, its data with it. */
 export function deleteImage(id: number): string {
   return `\x1b_Ga=d,d=I,i=${id},q=2\x1b\\`;
 }
 
+/** Drops every picture the terminal keeps, with what shows them. */
 export function clearImages(): string {
   return `\x1b_Ga=d,d=A,q=2\x1b\\`;
 }

@@ -2,13 +2,7 @@
 // selected by dragging, shown in reverse video and copied as plain text, and
 // the whole-screen view a picture opens in when clicked.
 
-import {
-  PLACEHOLDER,
-  PLACEHOLDER_LIMIT,
-  fit,
-  placeholderRow,
-  type MediaContext,
-} from "./images.ts";
+import { PLACEHOLDER, PLACEHOLDER_LIMIT, fit, pictureRows, type MediaContext } from "./images.ts";
 import type { PageEvent } from "../protocol.ts";
 import type { Picture, Shown } from "./images.ts";
 import type { Key } from "./input.ts";
@@ -36,7 +30,7 @@ export function ordered(selection: Selection): [Point, Point] {
 }
 
 /** Whether a row shows a picture, whose cells are no text to select. */
-export function showsPicture(row: string): boolean {
+function showsPicture(row: string): boolean {
   return row.includes(PLACEHOLDER);
 }
 
@@ -156,8 +150,7 @@ export function viewerFrame(
     spread(truncate(name, screen.columns - 2), style.muted(`${hints}  `), screen.columns),
   ];
   for (let row = 0; row < above; row++) rows.push("");
-  for (let row = first; row < Math.min(size.rows, first + room.rows); row++)
-    rows.push(left + placeholderRow(picture, row, size.columns));
+  rows.push(...pictureRows(picture, size, left).slice(first, first + room.rows));
   while (rows.length < screen.rows - 1) rows.push("");
   const position = more > 0 ? `${Math.round((first / more) * 100)}% · ↑↓ scroll` : "";
   rows.push(position ? truncate(style.muted(`  ${position}`), screen.columns) : "");

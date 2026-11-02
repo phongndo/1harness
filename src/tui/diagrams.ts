@@ -1,7 +1,8 @@
 import { renderMermaidASCII } from "beautiful-mermaid";
 import { render as renderMermaid } from "pele";
 import type { FigureRenderer } from "./figures.ts";
-import { pictureLater, type CellSize, type Picture } from "./images.ts";
+import { BoundedMap } from "./cache.ts";
+import { pictureLater, screenDensity, type CellSize, type Picture } from "./images.ts";
 import { figureFont, loadResvg, onCells, rasterize, readable, svgSize } from "./svg.ts";
 
 // Mermaid diagrams as pictures: Pele lays a diagram out as SVG, resvg turns
@@ -98,13 +99,6 @@ export function fillVariables(svg: string, theme: Record<string, string>): strin
 /** Diagrams, and pictures of them, kept: a long reply's worth at a few sizes. */
 const KEPT = 64;
 
-/** Keeps at most `KEPT` entries, forgetting the oldest. */
-function remember<T>(map: Map<string, T>, key: string, value: T): void {
-  map.delete(key);
-  map.set(key, value);
-  if (map.size > KEPT) map.delete(map.keys().next().value!);
-}
-
 /**
  * Renders and keeps diagrams. Drawing needs resvg's WASM, which loads once and
  * in the background: until it has, `picture` says so, and `onReady` is called
@@ -115,10 +109,10 @@ export class Diagrams implements FigureRenderer {
   #loading = false;
   #loaded = false;
   #broken = false;
-  #pictures = new Map<string, Picture | null>();
+  #pictures = new BoundedMap<string, Picture | null>(KEPT);
   /** Each diagram's layout, by theme and source, which no size changes; null when it has none. */
-  #layouts = new Map<string, { svg: string; width: number; height: number } | null>();
-  #ascii = new Map<string, string[] | null>();
+  #layouts = new BoundedMap<string, { svg: string; width: number; height: number } | null>(KEPT);
+  #ascii = new BoundedMap<string, string[] | null>(KEPT);
 
   constructor(onReady: () => void) {
     this.#onReady = onReady;
@@ -151,8 +145,8 @@ export class Diagrams implements FigureRenderer {
     if (this.#broken) return null;
     const layout = this.#layout(source, light);
     if (!layout) return null;
-    // At the screen's density, as text is (16px cells being 1×), and never wider than the room for it.
-    const density = Math.min(3, Math.max(1, Math.round((cell.height / 16) * 4) / 4));
+    // At the screen's density, as text is, and never wider than the room for it.
+    const density = screenDensity(cell);
     // Filling `width` by `fill` pixels instead, as on the whole screen, it grows to them.
     const scale =
       fill === undefined
@@ -174,7 +168,7 @@ export class Diagrams implements FigureRenderer {
         return new Uint8Array();
       }
     });
-    remember(this.#pictures, key, drawn);
+    this.#pictures.set(key, drawn);
     return drawn;
   }
 
@@ -191,7 +185,7 @@ export class Diagrams implements FigureRenderer {
     } catch {
       // A diagram Pele cannot read.
     }
-    remember(this.#layouts, key, layout);
+    this.#layouts.set(key, layout);
     return layout;
   }
 

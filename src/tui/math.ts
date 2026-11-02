@@ -1,3 +1,4 @@
+import { BoundedMap } from "./cache.ts";
 import type { FigureRenderer } from "./figures.ts";
 import { picture, type CellSize, type Picture } from "./images.ts";
 import { visibleWidth } from "./text.ts";
@@ -891,13 +892,6 @@ function naturalSize(svg: string, em: number): { width: number; height: number }
   return { width: (Number(box[1]) / 1000) * em, height: (Number(box[2]) / 1000) * em };
 }
 
-/** Keeps at most `KEPT` entries, forgetting the oldest. */
-function remember<T>(map: Map<string, T>, key: string, value: T): void {
-  map.delete(key);
-  map.set(key, value);
-  if (map.size > KEPT) map.delete(map.keys().next().value!);
-}
-
 /**
  * Typesets and keeps equations. MathJax and resvg load in the background
  * when the first equation comes; each equation is typeset once, off the
@@ -909,8 +903,8 @@ export class Equations implements FigureRenderer {
   #engine: Promise<Typeset | null> | null = null;
   #broken = false;
   /** Each equation's SVG, by its TeX: null when it cannot be typeset, a promise while it is. */
-  #svgs = new Map<string, string | null | Promise<string | null>>();
-  #pictures = new Map<string, Picture | null>();
+  #svgs = new BoundedMap<string, string | null | Promise<string | null>>(KEPT);
+  #pictures = new BoundedMap<string, Picture | null>(KEPT);
 
   constructor(onReady: () => void) {
     this.#onReady = onReady;
@@ -950,7 +944,7 @@ export class Equations implements FigureRenderer {
     } catch {
       // Drawn as text instead.
     }
-    remember(this.#pictures, key, drawn);
+    this.#pictures.set(key, drawn);
     return drawn;
   }
 
@@ -971,7 +965,7 @@ export class Equations implements FigureRenderer {
     if (known) return undefined;
     const typesetting = this.#load().then(async (typeset) => {
       const svg = typeset ? await typeset(tex) : null;
-      remember(this.#svgs, tex, svg);
+      this.#svgs.set(tex, svg);
       this.#onReady();
       return svg;
     });

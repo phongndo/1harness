@@ -1,3 +1,4 @@
+import { isAbsolute, relative } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 
 const RESET = "\x1b[0m";
@@ -104,18 +105,35 @@ function isPlain(text: string): boolean {
 }
 
 /**
- * Text from outside, such as a command's output or a tool's input, as plain
- * printable text: escape sequences and control characters would move the
- * cursor, so they go, and tabs become spaces. `oneLine` joins the lines;
- * `overwrite` reads `\r` as a terminal does, keeping what a rewritten line
- * ends as, for a command's output.
+ * Text from outside, such as a reply or a tool's input, as plain printable
+ * text: escape sequences and control characters would move the cursor, so
+ * they go, and tabs become spaces.
  */
-export function plainText(text: string, oneLine = false, overwrite = false): string {
+export function plainText(text: string): string {
   // Most text is plain already, as a reply is; taking it apart to find so is slow.
-  if (!oneLine && isPlain(text)) return text;
+  return isPlain(text) ? text : printableLines(text, false).join("\n");
+}
+
+/** Outside text as `plainText` leaves it, in one line, as a row shows a title. */
+export function oneLineText(text: string): string {
+  return printableLines(text, false)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+/**
+ * A command's output as `plainText` leaves it, but with `\r` read as a
+ * terminal does, so a rewritten line shows what it ends as.
+ */
+export function outputText(text: string): string {
+  return printableLines(text, true).join("\n");
+}
+
+function printableLines(text: string, overwrite: boolean): string[] {
   const unified = stripVTControlCharacters(text).replace(/\r\n/g, "\n");
   // Outside a terminal's output, a lone \r is a line break, as old Mac text has it.
-  const lines = (overwrite ? unified : unified.replace(/\r/g, "\n")).split("\n").map((line) => {
+  return (overwrite ? unified : unified.replace(/\r/g, "\n")).split("\n").map((line) => {
     const shown = line.includes("\r")
       ? line.slice(line.lastIndexOf("\r", line.length - 2) + 1)
       : line;
@@ -126,12 +144,24 @@ export function plainText(text: string, oneLine = false, overwrite = false): str
       })
       .join("");
   });
-  return oneLine
-    ? lines
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .join(" ")
-    : lines.join("\n");
+}
+
+/** The first line of text with something on it, trimmed, for a one-line preview. */
+export function firstLine(text: string): string {
+  return (
+    text
+      .split("\n")
+      .find((line) => line.trim() !== "")
+      ?.trim() ?? ""
+  );
+}
+
+/** A path from outside, in one line, relative to `cwd` when inside it. */
+export function shownPath(path: string, cwd: string): string {
+  const line = oneLineText(path);
+  if (!isAbsolute(line)) return line;
+  const inside = relative(cwd, line);
+  return inside !== "" && !inside.startsWith("..") && !isAbsolute(inside) ? inside : line;
 }
 
 /** Terminal columns a string occupies, ignoring escape sequences. */

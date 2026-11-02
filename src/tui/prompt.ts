@@ -3,7 +3,7 @@ import type { Key } from "./input.ts";
 import { hints, lineStep, rule, tabRow } from "./menu.ts";
 import type { CursorPosition } from "./screen.ts";
 import { diffLine, style } from "./theme.ts";
-import { diffBody, plainText, spread, truncate, visibleWidth, wrap } from "./text.ts";
+import { diffBody, oneLineText, plainText, spread, truncate, visibleWidth, wrap } from "./text.ts";
 
 export interface ChoiceOption {
   label: string;
@@ -219,7 +219,7 @@ export class ChoicePrompt {
       ),
       "",
       // A harness's text can hold line breaks, which would throw the rows off.
-      ...wrap(`  ${style.bold(plainText(config.title, true))}`, width, "  "),
+      ...wrap(`  ${style.bold(oneLineText(config.title))}`, width, "  "),
     ];
     const detail = config.detail.flatMap((text) => {
       const lines = plainText(text).replace(/\s+$/, "").split("\n");
@@ -228,8 +228,8 @@ export class ChoicePrompt {
       return lines.flatMap((line, index) => detailRows(line, width, index >= head));
     });
     const entries: ChoiceOption[] = config.options.map((option) => ({
-      label: plainText(option.label, true),
-      description: plainText(option.description, true),
+      label: oneLineText(option.label),
+      description: oneLineText(option.description),
     }));
     if (config.allowOther) entries.push({ label: "Other…", description: "type your own answer" });
     const choices = this.#choiceRows(entries, width);
@@ -503,7 +503,7 @@ export class QuestionPrompt {
     // Each question by its short name, ticked once answered.
     const tabs = this.configs.map(
       (config, index) =>
-        `${this.#answers[index] ? "✓ " : ""}${plainText(config.tag, true) || `Q${index + 1}`}`,
+        `${this.#answers[index] ? "✓ " : ""}${oneLineText(config.tag) || `Q${index + 1}`}`,
     );
     return this.#current.render(width, height, {
       heading: title + tabRow(tabs, this.#page, width - visibleWidth(title) - 2),

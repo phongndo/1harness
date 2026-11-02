@@ -7,7 +7,6 @@ import {
   type CommandContext,
   type CommandDefinition,
   type CommandThread,
-  type Completion,
   type Completions,
   type PickEntry,
   type Report,
@@ -18,32 +17,35 @@ import type {
   HarnessRequest,
   ModelOption,
   NativeCommand,
-  RateLimit,
   RequestResponse,
   SessionInfo,
   SessionOptions,
 } from "../core/events.ts";
-import type { FileMatch } from "../core/files.ts";
 import { looksLikeThreadId, shortThreadId } from "../core/thread-id.ts";
-import { appendDelta, errorMessage } from "../core/thread.ts";
+import { errorMessage } from "../core/thread.ts";
+import { contextUsed, formatCost, limitDetail } from "../core/wording.ts";
 import type { ClientEvent, HostClient } from "../client/client.ts";
 import {
   RpcError,
   SESSION_CALLS,
   type CommandInfo,
   type HelloResult,
-  type LiveFrame,
-  type LogEntry,
-  type PageEvent,
   type ThreadListing,
   type ThreadState,
   type UiRequest,
 } from "../protocol.ts";
-import { agentRowOf, agentStatus, harnessLabel, isLive, statusDot } from "./agents.ts";
+import { agentRowOf } from "./agents.ts";
+import { BoundedMap } from "./cache.ts";
+import { Suggestions, inMenuOrder } from "./completion.ts";
 import { Editor, applyEditingKey } from "./editor.ts";
-import { InputDecoder, type InputEvent, type Key } from "./input.ts";
-import { Menu, entry, infoPanel, lineStep, type MenuEntry } from "./menu.ts";
+import { activityLine, attentionLine, queueRows, statusLine } from "./footer.ts";
+import { CLICK_MS, InputDecoder, WHEEL_ROWS, type InputEvent, type Key } from "./input.ts";
+import { LivePages } from "./live.ts";
+import { ThreadLogs } from "./logs.ts";
+import { Menu, entry, infoPanel, type MenuConfig, type MenuEntry } from "./menu.ts";
 import { listedEntry, ResumeView, type ResumeEntry } from "./resume.ts";
+import { family, lastActive, threadEntries } from "./threads.ts";
+import { PictureViewer } from "./viewer.ts";
 import {
   ChoicePrompt,
   QuestionPrompt,
@@ -60,14 +62,12 @@ import {
   type ThreadStatusInput,
 } from "./program-status.ts";
 import { isLightTheme, setLightTheme, style } from "./theme.ts";
-import { spread, truncate, visibleWidth, wrap } from "./text.ts";
-import { IMAGE_INDENT, formatTokens, type Hit, type Target } from "./transcript.ts";
+import { truncate, visibleWidth, wrap } from "./text.ts";
+import { IMAGE_INDENT, type Hit, type RenderContext, type Target } from "./transcript.ts";
 import {
   ordered,
-  pageKey,
   paintSelection,
   selectedText,
-  viewerFrame,
   wordAt,
   type Point,
   type Selection,
@@ -82,14 +82,14 @@ import {
   fit,
   maxImageRows,
   picture,
-  placeholderRow,
-  pngSize,
+  pictureRows,
+  screenDensity,
   type CellSize,
   type MediaContext,
   type Picture,
   type Shown,
 } from "./images.ts";
-import { ThreadView, queuedText, type ViewContext } from "./view.ts";
+import { ThreadView, type ViewContext } from "./view.ts";
 
 export interface AppOptions {
   /** The host the terminal works through, in this process or a server's. */
@@ -112,38 +112,6 @@ export interface AppOptions {
   connect?: { hosts: () => Record<string, string>; check: (spec: string) => Promise<void> };
 }
 
-/** A picture shown on the whole screen: what was clicked, and the picture drawn for the screen. */
-interface Viewer {
-  target: Extract<Target, { kind: "picture" }>;
-  picture: Picture;
-  /** A page running live, which takes the mouse and keys while open. */
-  live?: LivePage;
-  /** Where the picture was last drawn, to put the mouse on the page. */
-  layout?: { left: number; top: number; columns: number; rows: number; scroll: number };
-  /** The first of its rows on screen, for one taller than the screen. */
-  scroll: number;
-  /** When it opened, so the click that opened it does not close it. */
-  opened: number;
-}
-
-/** A page kept running on the host, as the transcript and the viewer show it. */
-interface LivePage {
-  html: string;
-  /** The host's ID for it, once it is open. */
-  id: string | null;
-  /** Its latest frame; new frames change this picture, so rows showing it stay. */
-  picture: Picture | null;
-  /** Its viewport in CSS pixels now, and as the transcript shows it, at its density there. */
-  css: { width: number; height: number };
-  inline: { width: number; height: number; scale: number };
-  /** A request is out for it. */
-  busy: boolean;
-  /** It could not run; it is drawn once instead, or as text. */
-  failed: boolean;
-  /** When a frame last showed it. */
-  seen: number;
-}
-
 /** Where the terminal's host runs. */
 export interface ServerInfo {
   /** `local`, or the server's name or address, as -S gave it. */
@@ -157,39 +125,6 @@ export interface ServerInfo {
   /** Its socket path or URL. */
   address: string;
   pid: number | null;
-}
-
-/**
- * The order the command menu and /help list 1harness's commands in, a group
- * at a time: Threads, Model, Permissions, Tools, General; others follow.
- */
-const COMMAND_ORDER = [
-  "new",
-  "resume",
-  "rename",
-  "fork",
-  "compact",
-  "unqueue",
-  "close",
-  "model",
-  "effort",
-  "harness",
-  "mode",
-  "plan",
-  "mcp",
-  "extensions",
-  "help",
-  "status",
-  "copy",
-  "connect",
-];
-/** Listed last, after commands the harness and extensions add. */
-const LAST_COMMANDS = ["quit"];
-/** Where a command goes in menus: by COMMAND_ORDER, then unlisted ones, then LAST_COMMANDS. */
-function commandRank(command: CommandDefinition): number {
-  const at = COMMAND_ORDER.indexOf(command.name);
-  if (at !== -1) return at;
-  return LAST_COMMANDS.includes(command.name) ? COMMAND_ORDER.length + 1 : COMMAND_ORDER.length;
 }
 
 /** An argument hint longer than this goes with the description rather than the name. */
@@ -227,24 +162,9 @@ const KEYS: [string, string][] = [
 const FRAME_MS = 16;
 /** How long a word in the status line, such as what was copied, stays. */
 const TOAST_MS = 2500;
-/** The most time between clicks that make a double or triple one. */
-const CLICK_MS = 400;
-/** How often a live page on screen is asked for a new frame. */
-const LIVE_MS = 150;
-/** A live page out of sight this long is closed, and opened afresh when seen again. */
-const LIVE_IDLE_MS = 120_000;
-/**
- * The most pixels a live page's frame may have, and the most bytes of frames
- * sent each second: the terminal decodes and keeps every frame, so a page
- * that runs away must not take the terminal with it.
- */
-const LIVE_MAX_PIXELS = 6_000_000;
-const LIVE_BYTES_PER_SECOND = 2_000_000;
 /** How long a new prompt ignores keys, which were likely typed for what it covered. */
 const PROMPT_GRACE_MS = 400;
-const MENTION_LIMIT = 50;
 const BLINK_MS = 500;
-const WHEEL_ROWS = 3;
 const THEME_TIMEOUT_MS = 150;
 // Program status reports go out at most this often, coalescing bursts of events.
 const STATUS_INTERVAL_MS = 250;
@@ -253,17 +173,12 @@ const SEQUENCE_TIMEOUT_MS = 40;
 // The SDK warns that full access skips canUseTool, which 1harness keeps for later mode changes.
 const IGNORED_STDERR = [/CLAUDE_SDK_CAN_USE_TOOL_SHADOWED/, /^\(Use `node --trace-warnings/];
 
-/** What a thread's view shows of a log too long to load at once. */
-interface Paged {
-  /** Entries without streamed chunks, which their items hold. */
-  entries: { seq: number; entry: LogEntry }[];
-  /** Where each item's latest entry is in `entries`, for chunks to go into. */
-  items: Map<string, number>;
-  /** The first entry loaded, which the page before ends at. */
-  oldest: number | null;
-  more: boolean;
-  children: Map<string, ThreadState>;
-}
+/**
+ * Pictures of image files and of pages kept: more than one transcript shows,
+ * since one forgotten while its transcript still shows it is fetched again,
+ * and the transcript drawn again when it comes.
+ */
+const PICTURES_KEPT = 256;
 
 interface OpenRequest {
   threadId: string;
@@ -274,10 +189,6 @@ function sameRequest(a: OpenRequest, threadId: string, requestId: string): boole
   return a.threadId === threadId && a.request.id === requestId;
 }
 
-function oneLine(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
-}
-
 /** A command's pick entry as a menu row. */
 function pickEntry(item: PickEntry): MenuEntry {
   return entry(item.label, item.detail ?? "", {
@@ -286,58 +197,12 @@ function pickEntry(item: PickEntry): MenuEntry {
   });
 }
 
-/** How a file mention is written: `@path`, quoted when the path has spaces. */
-function mentionText(path: string): string {
-  return /[\s"\\]/.test(path) ? `@"${path.replace(/["\\]/g, "\\$&")}"` : `@${path}`;
-}
-
-/** How often a file search the host is still indexing for is asked again. */
-const FILES_RETRY_MS = 300;
-/**
- * Keeps an entry for building a view again: a streamed chunk goes into the
- * entry of the item it streams into, so the item's text stays whole.
- */
-function keep(paged: Paged, logged: { seq: number; entry: LogEntry }): void {
-  const given = logged.entry;
-  if (given.type === "delta") {
-    const at = paged.items.get(given.itemId);
-    const kept = at === undefined ? undefined : paged.entries[at];
-    if (kept?.entry.type === "item")
-      kept.entry = { ...kept.entry, item: appendDelta(kept.entry.item, given.chunk) };
-    return;
-  }
-  paged.entries.push(logged);
-  if (given.type === "item") paged.items.set(given.item.id, paged.entries.length - 1);
-}
-
 /** The widest the column gets, in columns; ONEHARNESS_COLUMN sets another. */
 const COLUMN_WIDTH = 100;
 
 function columnWidth(): number {
   const set = Number(process.env["ONEHARNESS_COLUMN"]);
   return Number.isInteger(set) && set >= 40 ? set : COLUMN_WIDTH;
-}
-
-/** How many log entries a thread's view loads at a time. */
-const PAGE_ENTRIES = 400;
-/** The line over a view whose earlier turns are not loaded yet. */
-const EARLIER_ABOVE = "Earlier turns are above; scroll up to load them.";
-
-/** `$0.16`, or `<$0.01` for less. */
-function formatCost(usd: number): string {
-  return usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`;
-}
-
-function describeLimit(limit: RateLimit): string {
-  const used = limit.usedPercent === null ? limit.status : `${Math.round(limit.usedPercent)}% used`;
-  const resets =
-    limit.resetsAt === null ? "" : ` · resets ${new Date(limit.resetsAt).toLocaleString()}`;
-  return `${limit.label}: ${used}${resets}`;
-}
-
-/** When a thread last did something: its latest run, or its start. */
-function lastActive(thread: ThreadState): number {
-  return thread.lastRun?.endedAt ?? thread.lastRun?.startedAt ?? thread.createdAt;
 }
 
 export class App {
@@ -358,10 +223,8 @@ export class App {
   #currentId: string | null = null;
   /** Threads this terminal has seen created, whose views it built from the start. */
   #known = new Set<string>();
-  /** Threads whose logs are loading, and the live entries that arrived meanwhile. */
-  #loading = new Map<string, { seq: number; entry: LogEntry }[]>();
-  /** Threads whose views show only the newest part of their logs. */
-  #paged = new Map<string, Paged>();
+  /** Threads' logs, loaded into views of threads the terminal did not see start. */
+  #logs: ThreadLogs;
   /** Threads this terminal opened or showed, which its program status covers. */
   #own = new Set<string>();
   /** The line a thread being opened shows first, such as "New codex thread". */
@@ -393,20 +256,13 @@ export class App {
   #graphics = false;
   /** A character cell's size in pixels, which images are sized by. */
   #cell: CellSize = DEFAULT_CELL;
-  /** Pictures of image files, by path, as the host sent them. */
-  #images = new Map<string, Picture | null | "loading">();
+  /** Pictures of image files, by cells and path, as the host sent them. */
+  #images = new BoundedMap<string, Picture | null | "loading">(PICTURES_KEPT);
   /** What the last frame's transcript rows do when clicked, by screen row; `#top` is the first one's place. */
   #targets: (Hit | null)[] = [];
   /** Whether the host runs pages live, scripts and all. */
   #liveHost = false;
-  /** Live pages, by page, width, theme, and cells, and by the picture showing each. */
-  #livePages = new Map<string, LivePage>();
-  #liveByPicture = new Map<number, LivePage>();
-  /** The live pages the last frame showed: on screen, and kept moving until a frame does not show them. */
-  #liveShown = new Set<LivePage>();
-  #liveTimer: NodeJS.Timeout | null = null;
-  /** Bytes of live frames sent in the current second, and when that second began. */
-  #liveBudget = { since: 0, bytes: 0 };
+  #livePages: LivePages;
   #top = 0;
   /** The last frame's transcript rows as rendered, for picking a word out of one. */
   #shownRows: string[] = [];
@@ -419,10 +275,10 @@ export class App {
   #clicks = { at: 0, row: -1, column: -1, count: 0 };
   /** A word in the status line for a moment, such as what was copied. */
   #toast: { text: string; until: number } | null = null;
-  /** A picture on the whole screen, opened by a click on it, drawn sharper once it can be. */
-  #viewer: Viewer | null = null;
+  /** A picture on the whole screen, opened by a click on it. */
+  #viewer: PictureViewer | null = null;
   /** Pages drawn as pictures, by theme, width, cell size, and content. */
-  #pages = new Map<string, Picture | null | "loading">();
+  #pages = new BoundedMap<string, Picture | null | "loading">(PICTURES_KEPT);
   /** Diagrams and equations drawn as pictures; as more can be shown, the views draw again. */
   #figures = new Figures(() => this.#redrawViews());
   /** The default model's ID by thread, for a harness that names it only once a turn runs. */
@@ -448,27 +304,8 @@ export class App {
     | null = null;
   /** The host's progress lines, by request. */
   #progress = new Map<string, (level: "info" | "warning" | "error", text: string) => void>();
-  #slash: Menu | null = null;
-  /** Composer text at which the slash menu was dismissed. */
-  #slashDismissed: string | null = null;
-  /** Composer text at which the user moved in the slash menu, which keeps their choice. */
-  #slashMoved: string | null = null;
-  /** Completion for the words after a command, such as `/mcp login NAME`. */
-  #args: {
-    menu: Menu;
-    start: number;
-    items: Completion[];
-    moved: boolean;
-    typed: string;
-    required: boolean;
-  } | null = null;
-  /** Where the word goes that a chosen word needs after it, such as `/mcp show`'s server. */
-  #argsRequired: number | null = null;
-  #argsDismissed: string | null = null;
-  /** Files for `@` mentions, as the host found them, by folder and query. */
-  #fileResults = new Map<string, FileMatch[] | Promise<void>>();
-  #mention: { menu: Menu; start: number; entries: MenuEntry[]; matches: FileMatch[] } | null = null;
-  #mentionDismissed: string | null = null;
+  /** The lists that open under the composer: commands, their words, and files. */
+  #suggestions: Suggestions;
 
   #exitArmed = false;
   #exitTimer: NodeJS.Timeout | null = null;
@@ -483,12 +320,6 @@ export class App {
   #shownState: ThreadState | null = null;
   /** Whether the composer's text came from history, so ↑↓ keep walking it. */
   #recalled = false;
-  /** Loads of threads' logs in flight, which later callers wait for too. */
-  #loads = new Map<string, Promise<void>>();
-  /** Threads whose earlier turns are loading. */
-  #earlierLoading = new Set<string>();
-  /** Counts catch-ups with the host, so a load begun before one is dropped. */
-  #generation = 0;
   /** The thread shown when its first state arrived, while an open or resume waited on its reply. */
   #openedId: string | null = null;
   /** Opens and resumes waiting on their replies. */
@@ -545,6 +376,38 @@ export class App {
       pid: process.pid,
     };
     this.#connect = options.connect;
+    this.#livePages = new LivePages({
+      client: this.#client,
+      redraw: () => this.#redrawViews(),
+      schedule: () => this.#schedule(),
+      warn: (text) => this.#notice("warning", text),
+      focused: () => this.#focused,
+    });
+    this.#logs = new ThreadLogs({
+      client: this.#client,
+      views: this.#views,
+      newView: (id) => this.#newView(id, id === this.#currentId),
+      replaced: (old, view) => {
+        // The startup view keeps being the startup view.
+        if (old === this.#home) this.#home = view;
+      },
+      renderContext: () => this.#renderContext(),
+      notice: (level, text) => this.#notice(level, text),
+      schedule: () => this.#schedule(),
+    });
+    this.#suggestions = new Suggestions({
+      client: this.#client,
+      editor: this.#editor,
+      commands: this.#commands,
+      context: this.#context,
+      available: () => this.#available(),
+      isAvailable: (command) => this.#isAvailable(command),
+      skills: () => this.#nativeCommands,
+      cwd: () => this.#cwd(),
+      submit: (text) => this.#submit(text),
+      notice: (level, text) => this.#notice(level, text),
+      schedule: () => this.#schedule(),
+    });
     this.#client.on((event) => this.#hostEvent(event));
   }
 
@@ -627,15 +490,11 @@ export class App {
           this.#schedule();
         },
         pick: (title, entries, options) =>
-          this.#pick(
-            title,
-            entries.map(pickEntry),
-            options?.initial ?? 0,
-            options?.filter ?? false,
-            {
-              tabs: options?.tabs ?? false,
-            },
-          ),
+          this.#pick(title, entries.map(pickEntry), {
+            initial: options?.initial ?? 0,
+            filter: options?.filter ?? false,
+            tabs: options?.tabs ?? false,
+          }),
         progress: (text) => {
           const view = this.#view;
           const line = view.say("info", text);
@@ -644,8 +503,7 @@ export class App {
             line.level = level;
             line.text = outcome;
             // Loading earlier turns may have built the view again around the same line.
-            for (const shown of new Set([view, this.#home, ...this.#views.values()]))
-              shown.transcript.touch(line);
+            for (const shown of new Set([view, ...this.#allViews()])) shown.transcript.touch(line);
             this.#schedule();
           };
         },
@@ -1044,14 +902,12 @@ export class App {
       this.#settings = before.settings;
       this.#announce = null;
       // Back where the user was, unless they went elsewhere meanwhile.
-      if (this.#stayed(startedOn)) {
-        const again = previous ? this.#client.threads.get(previous.id) : undefined;
-        if (again && again.status !== "closed") this.#show(again);
-        else if (fallback && !this.#live && before.harness !== harness)
-          // Nothing to go back to: a thread on the harness that was in use, to type in.
-          // The same harness again would only fail again.
-          await this.#open(before.harness, { ...before.settings, resume: null }, false, false);
-      }
+      const stayed = this.#stayed(startedOn);
+      const back = stayed && previous !== undefined && this.#showIfOpen(previous.id);
+      // Nothing to go back to: a thread on the harness that was in use, to type in.
+      // The same harness again would only fail again.
+      if (stayed && !back && fallback && !this.#live && before.harness !== harness)
+        await this.#open(before.harness, { ...before.settings, resume: null }, false, false);
       this.#notice("error", `Could not start ${harness}: ${errorMessage(error)}`);
       return;
     } finally {
@@ -1078,12 +934,11 @@ export class App {
       if (this.#stayed(startedOn)) this.#show(state);
     } catch (error) {
       this.#announce = null;
-      if (this.#stayed(startedOn)) {
-        const again = previous ? this.#client.threads.get(previous.id) : undefined;
-        if (again && again.status !== "closed") this.#show(again);
-        // With nothing to show, start somewhere to type.
-        else if (!this.#live) await this.#open(harness, { ...this.#settings, resume: null }, false);
-      }
+      const stayed = this.#stayed(startedOn);
+      const back = stayed && previous !== undefined && this.#showIfOpen(previous.id);
+      // With nothing to show, start somewhere to type.
+      if (stayed && !back && !this.#live)
+        await this.#open(harness, { ...this.#settings, resume: null }, false);
       this.#notice("error", `Could not resume ${id}: ${errorMessage(error)}`);
     } finally {
       this.#announce = null;
@@ -1132,7 +987,6 @@ export class App {
     }
   }
 
-  /** Shows a thread, picking one from the tree of threads when no ID is given. */
   /**
    * Shows a thread by its ID, or picks one from the thread list, or, given
    * words, from the threads whose titles or transcripts mention them.
@@ -1141,9 +995,7 @@ export class App {
     const words = args.trim();
     const named = looksLikeThreadId(words) ? words : null;
     if (named) {
-      const open = this.#client.threads.get(named);
-      if (open && open.status !== "closed") this.#show(open);
-      else if (named !== this.#currentId) await this.#resume(named, this.#harness);
+      await this.#goTo(named);
       return;
     }
     // A list open already, such as an extension's question, is answered first.
@@ -1249,11 +1101,9 @@ export class App {
       return;
     }
     // Agents that finished are closed, so only the store still lists them.
-    const stored = await this.#client
-      .call("threads.list", { scope: "recent", limit: 200 })
-      .catch((): ThreadListing[] => []);
-    const { title } = this.#family(stored);
-    const view = new ResumeView(title || "Agents", () => this.#family(stored).agents, {
+    const stored = await this.#client.call("threads.list", { scope: "recent", limit: 200 });
+    const agents = () => family(stored, this.#client.threads.values(), this.#currentId);
+    const view = new ResumeView(agents().title || "Agents", () => agents().agents, {
       // On the thread they came from, the first agent; on an agent, that one.
       initial: this.#currentId,
       cwd: this.#cwd(),
@@ -1264,56 +1114,18 @@ export class App {
     this.#schedule();
   }
 
-  /**
-   * What /lineage shows: the title of the thread of yours the one on screen
-   * came from, and the agents under it, parents first, as they stand now.
-   */
-  #family(stored: readonly ThreadListing[]): { title: string; agents: ResumeEntry[] } {
-    type Node = { entry: ResumeEntry; parentId: string | null; createdAt: number };
-    const nodes = new Map<string, Node>();
-    for (const thread of stored)
-      nodes.set(thread.id, {
-        entry: listedEntry(thread),
-        parentId: thread.parentId,
-        createdAt: thread.createdAt,
-      });
-    // Threads open here as they stand now, over what the store last kept of them.
-    for (const thread of this.#client.threads.values()) {
-      const status = agentStatus(thread);
-      nodes.set(thread.id, {
-        entry: {
-          id: thread.id,
-          title: thread.title,
-          on: harnessLabel(thread),
-          cwd: thread.info.cwd,
-          updatedAt: lastActive(thread),
-          depth: 0,
-          // An agent at work, or waiting on you, says so with its dot.
-          dot: isLive(status) ? `${statusDot(status)} ` : "",
-        },
-        parentId: thread.parentId,
-        createdAt: thread.createdAt,
-      });
-    }
-    let root = this.#currentId ? nodes.get(this.#currentId) : undefined;
-    while (root?.parentId && nodes.has(root.parentId)) root = nodes.get(root.parentId);
-    if (!root) return { title: "", agents: [] };
-    const under = new Map<string, Node[]>();
-    for (const node of nodes.values())
-      if (node.parentId) under.set(node.parentId, [...(under.get(node.parentId) ?? []), node]);
-    const agentsOf = (id: string, depth: number): ResumeEntry[] =>
-      (under.get(id) ?? [])
-        .toSorted((a, b) => a.createdAt - b.createdAt)
-        .flatMap((node) => [{ ...node.entry, depth }, ...agentsOf(node.entry.id, depth + 1)]);
-    return { title: root.entry.title, agents: agentsOf(root.entry.id, 0) };
+  /** Shows a thread if it is open; returns whether it was. */
+  #showIfOpen(id: string): boolean {
+    const thread = this.#client.threads.get(id);
+    if (!thread || thread.status === "closed") return false;
+    this.#show(thread);
+    return true;
   }
 
   /** Puts a thread on screen, opening it again if it has closed. */
   async #goTo(id: string): Promise<void> {
     if (id === this.#currentId) return;
-    const target = this.#client.threads.get(id);
-    if (target && target.status !== "closed") this.#show(target);
-    else await this.#resume(id, this.#harness);
+    if (!this.#showIfOpen(id)) await this.#resume(id, this.#harness);
   }
 
   /** Shows a thread list and opens the thread chosen from it. */
@@ -1322,10 +1134,7 @@ export class App {
       this.#panel = { kind: "resume", view, onDone: resolve };
       this.#schedule();
     });
-    if (!chosen || chosen === this.#currentId) return;
-    const target = this.#client.threads.get(chosen);
-    if (target && target.status !== "closed") this.#show(target);
-    else await this.#resume(chosen, this.#harness);
+    if (chosen) await this.#goTo(chosen);
   }
 
   /**
@@ -1334,67 +1143,12 @@ export class App {
    */
   async #threadEntries(): Promise<ResumeEntry[]> {
     // Listed first: the host names threads for their harness's titles as it lists them,
-    // and the open threads below are read once those names have come.
+    // and the open threads are read once those names have come.
     const [recent, archived] = await Promise.all([
-      this.#client
-        .call("threads.list", { scope: "recent", limit: 100 })
-        .catch((): ThreadListing[] => []),
-      this.#client
-        .call("threads.list", { scope: "archived", limit: 100 })
-        .catch((): ThreadListing[] => []),
+      this.#client.call("threads.list", { scope: "recent", limit: 100 }),
+      this.#client.call("threads.list", { scope: "archived", limit: 100 }),
     ]);
-    // The thread on screen with nothing in it yet is where you are, not one to go back to.
-    const empty = (thread: { id: string; runCount: number }) =>
-      thread.runCount === 0 && thread.id === this.#currentId;
-    type Node = { entry: ResumeEntry; parentId: string | null; createdAt: number };
-    const nodes = new Map<string, Node>();
-    for (const thread of recent)
-      if (!empty(thread))
-        nodes.set(thread.id, {
-          entry: listedEntry(thread),
-          parentId: thread.parentId,
-          createdAt: thread.createdAt,
-        });
-    // Open threads as they stand now, over what the store last kept of them.
-    for (const thread of this.#threadOrder()) {
-      if (thread.status === "closed" || thread.archived || empty(thread)) continue;
-      const status = agentStatus(thread);
-      nodes.set(thread.id, {
-        entry: {
-          id: thread.id,
-          title: thread.title,
-          on: harnessLabel(thread),
-          cwd: thread.info.cwd,
-          updatedAt: lastActive(thread),
-          depth: 0,
-          // A thread at work, or waiting on you, says so with its dot.
-          dot: isLive(status) ? `${statusDot(status)} ` : "",
-        },
-        parentId: thread.parentId,
-        createdAt: thread.createdAt,
-      });
-    }
-    const roots: Node[] = [];
-    const agents = new Map<string, Node[]>();
-    for (const node of nodes.values()) {
-      if (node.parentId === null) roots.push(node);
-      // An agent whose thread is not listed, being archived or long gone, shows nowhere.
-      else if (nodes.has(node.parentId))
-        agents.set(node.parentId, [...(agents.get(node.parentId) ?? []), node]);
-    }
-    const withAgents = (node: Node, depth: number): ResumeEntry[] => [
-      { ...node.entry, depth },
-      ...(agents.get(node.entry.id) ?? [])
-        .toSorted((a, b) => a.createdAt - b.createdAt)
-        .flatMap((agent) => withAgents(agent, depth + 1)),
-    ];
-    const entries = roots
-      .toSorted((a, b) => b.entry.updatedAt - a.entry.updatedAt)
-      .flatMap((root) => withAgents(root, 0));
-    // Archived threads, which tab shows on their own.
-    for (const thread of archived)
-      if (thread.parentId === null) entries.push({ ...listedEntry(thread), archived: true });
-    return entries;
+    return threadEntries(recent, archived, this.#threadOrder(), this.#currentId);
   }
 
   /** A harness's name as people know it, such as `Claude Code`. */
@@ -1428,8 +1182,6 @@ export class App {
                 : "",
           }),
         ),
-        0,
-        false,
       );
       if (index === null) return;
       target = options[index]?.name ?? "";
@@ -1465,7 +1217,7 @@ export class App {
     this.#shownState = thread;
     this.#own.add(thread.id);
     if (changed) void this.#client.call("client.show", { threadId: thread.id }).catch(() => {});
-    if (!this.#views.has(thread.id)) void this.#load(thread.id);
+    if (!this.#views.has(thread.id)) void this.#logs.load(thread.id);
     // Opening a thread shows what it finished.
     this.#statusChanged();
     // A prompt belongs to the thread it asks for; it comes back with that thread.
@@ -1518,74 +1270,8 @@ export class App {
     return view;
   }
 
-  /**
-   * Builds the view of a thread the terminal did not see start, from the
-   * host's log of it, then follows it live.
-   */
-  #load(id: string): Promise<void> {
-    const loading = this.#loads.get(id);
-    if (loading) return loading;
-    const load = this.#loadNow(id).finally(() => {
-      if (this.#loads.get(id) === load) this.#loads.delete(id);
-    });
-    this.#loads.set(id, load);
-    return load;
-  }
-
-  async #loadNow(id: string): Promise<void> {
-    if (this.#loading.has(id)) return;
-    this.#loading.set(id, []);
-    const generation = this.#generation;
-    try {
-      const page = await this.#client.call("thread.attach", { threadId: id, limit: PAGE_ENTRIES });
-      const children = new Map(page.children.map((child) => [child.id, child]));
-      const live = (this.#loading.get(id) ?? []).filter((logged) => logged.seq > page.cursor);
-      // A load from before a resync is out of date; the one the resync started stands.
-      if (generation !== this.#generation) return;
-      const paged: Paged = {
-        entries: [...page.entries, ...live],
-        items: new Map(),
-        oldest: page.entries[0]?.seq ?? null,
-        more: page.more,
-        children,
-      };
-      const view = this.#views.get(id) ?? this.#newView(id, id === this.#currentId);
-      this.#replay(view, paged);
-      // Kept to build the view again with earlier pages; chunks go into their items.
-      const entries = paged.entries;
-      paged.entries = [];
-      for (const logged of entries) keep(paged, logged);
-      if (paged.more) this.#paged.set(id, paged);
-      view.awaiting(this.#client.threads.get(id)?.requests ?? []);
-    } catch (error) {
-      this.#notice("error", `Could not load ${id}: ${errorMessage(error)}`);
-    } finally {
-      // A resync since may have begun a load of its own, whose buffer this is not.
-      if (generation === this.#generation) this.#loading.delete(id);
-      this.#schedule();
-    }
-  }
-
-  /** Shows a thread's loaded entries in its view, oldest first. */
-  #replay(view: ThreadView, paged: Paged): void {
-    if (paged.more) view.earlier(EARLIER_ABOVE);
-    const context = this.#replayContext(paged);
-    for (const logged of paged.entries) view.apply(logged.entry, context);
-  }
-
-  /** How a view replays a log: as finished work, with the agents it knows of. */
-  #replayContext(paged: Paged): ViewContext {
-    return {
-      busy: false,
-      agent: (childId) => {
-        const child = this.#client.threads.get(childId) ?? paged.children.get(childId);
-        return child ? agentRowOf(child) : null;
-      },
-    };
-  }
-
   /** What the transcript renders with: the screen's width, and what is on. */
-  #renderContext() {
+  #renderContext(): RenderContext {
     return {
       width: this.#column().width,
       cwd: this.#cwd(),
@@ -1609,9 +1295,14 @@ export class App {
     };
   }
 
+  /** Every view, the startup one among them. */
+  #allViews(): Set<ThreadView> {
+    return new Set([this.#home, ...this.#views.values()]);
+  }
+
   /** Draws every view again, as when a picture they wait for comes. */
   #redrawViews(): void {
-    for (const view of new Set([this.#home, ...this.#views.values()])) view.transcript.invalidate();
+    for (const view of this.#allViews()) view.transcript.invalidate();
     this.#schedule();
   }
 
@@ -1626,20 +1317,17 @@ export class App {
     const light = isLightTheme();
     const digest = createHash("sha1").update(html).digest("hex");
     const key = `${light ? "light" : "dark"}:${columns}:${media.cell.width}x${media.cell.height}:${digest}`;
+    // A page is as tall as its content; it scrolls with the transcript, so it may run past the screen.
+    const rows = (shown: Picture) => {
+      const size = fit(shown, columns, { ...media, maxRows: PLACEHOLDER_LIMIT });
+      return { rows: pictureRows(shown, size), picture: { picture: shown, ...size } };
+    };
     // A page with scripts runs live where the host can; one that cannot is drawn once.
     if (this.#liveHost && runsScripts(html)) {
-      const live = this.#livePage(key, html, columns);
+      const live = this.#livePages.open(key, html, this.#pageSize(columns), !light);
       if (!live.failed || live.picture) {
         if (!live.picture) return { rows: [style.muted("Starting the page…")], live: true };
-        const shown = live.picture;
-        const size = fit(shown, columns, { ...media, maxRows: PLACEHOLDER_LIMIT });
-        return {
-          rows: Array.from({ length: size.rows }, (_, row) =>
-            placeholderRow(shown, row, size.columns),
-          ),
-          picture: { picture: shown, ...size },
-          live: true,
-        };
+        return { ...rows(live.picture), live: true };
       }
     }
     const known = this.#pages.get(key);
@@ -1659,150 +1347,7 @@ export class App {
       }
       return { rows: [style.muted("Drawing the page…")] };
     }
-    // A page is as tall as its content; it scrolls with the transcript, so it may run past the screen.
-    const size = fit(known, columns, { ...media, maxRows: PLACEHOLDER_LIMIT });
-    return {
-      rows: Array.from({ length: size.rows }, (_, row) => placeholderRow(known, row, size.columns)),
-      picture: { picture: known, ...size },
-    };
-  }
-
-  /** The live page for a page at a width, opened on the host the first time it is asked for. */
-  #livePage(key: string, html: string, columns: number): LivePage {
-    const known = this.#livePages.get(key);
-    if (known) return known;
-    const { width, scale } = this.#pageSize(columns);
-    const page: LivePage = {
-      html,
-      id: null,
-      picture: null,
-      css: { width, height: 0 },
-      inline: { width, height: 0, scale },
-      busy: true,
-      failed: false,
-      seen: Date.now(),
-    };
-    this.#livePages.set(key, page);
-    void this.#client
-      .call("page.open", { html, width, scale, dark: !isLightTheme() })
-      .then((frame) => {
-        page.id = frame.id;
-        page.inline = { width: frame.cssWidth, height: frame.cssHeight, scale };
-        this.#liveFrame(page, frame);
-        this.#pollLive();
-      })
-      .catch(() => {
-        page.failed = true;
-        this.#redrawViews();
-      })
-      .finally(() => {
-        page.busy = false;
-      });
-    return page;
-  }
-
-  /**
-   * Takes a live page's new frame into the picture showing it, so the rows
-   * that show it stay as they are and the terminal is sent the frame alone;
-   * a frame of another size lays them out again.
-   */
-  #liveFrame(page: LivePage, frame: LiveFrame | null): void {
-    if (!frame || page.failed) return;
-    // A frame too large is not sent: the page stops where it was, as a picture.
-    if (frame.width * frame.height > LIVE_MAX_PIXELS) {
-      page.failed = true;
-      if (page.id) void this.#client.call("page.close", { id: page.id }).catch(() => {});
-      this.#notice("warning", "A live page grew too large to keep running; it stays as it was.");
-      return;
-    }
-    this.#liveBudget.bytes += frame.data.length;
-    page.css = { width: frame.cssWidth, height: frame.cssHeight };
-    const current = page.picture;
-    if (!current) {
-      const first = picture(Buffer.from(frame.data, "base64"));
-      if (!first) return;
-      page.picture = first;
-      this.#liveByPicture.set(first.id, page);
-      this.#redrawViews();
-      return;
-    }
-    const size = pngSize(Buffer.from(frame.data.slice(0, 64), "base64"));
-    if (!size) return;
-    const resized = size.width !== current.pixelWidth || size.height !== current.pixelHeight;
-    current.data = frame.data;
-    current.pixelWidth = size.width;
-    current.pixelHeight = size.height;
-    current.version = (current.version ?? 0) + 1;
-    if (resized) this.#redrawViews();
-    else this.#schedule();
-  }
-
-  /** Passes what the user did to a live page, and shows what it did. */
-  #liveInput(page: LivePage, event: PageEvent): void {
-    if (!page.id) return;
-    void this.#client
-      .call("page.input", { id: page.id, event })
-      .then((frame) => this.#liveFrame(page, frame))
-      .catch(() => {});
-  }
-
-  /** Asks for new frames of the live pages on screen soon; at rest, now and then, to close old ones. */
-  #pollLive(delay = LIVE_MS): void {
-    if (this.#liveTimer || this.#exiting || this.#livePages.size === 0) return;
-    this.#liveTimer = setTimeout(() => {
-      this.#liveTimer = null;
-      this.#liveTick();
-    }, delay);
-  }
-
-  #liveTick(): void {
-    const now = Date.now();
-    let showing = false;
-    if (now - this.#liveBudget.since >= 1000) this.#liveBudget = { since: now, bytes: 0 };
-    // Pages move only while someone can be watching, and within the second's budget.
-    const paused = !this.#focused || this.#liveBudget.bytes >= LIVE_BYTES_PER_SECOND;
-    for (const [key, page] of this.#livePages) {
-      if (this.#liveShown.has(page)) page.seen = now;
-      if (now - page.seen > LIVE_IDLE_MS && !page.busy) {
-        this.#dropLive(key, page);
-        continue;
-      }
-      if (!this.#liveShown.has(page)) continue;
-      showing = true;
-      if (page.busy || !page.id || paused || page.failed) continue;
-      page.busy = true;
-      void this.#client
-        .call("page.frame", { id: page.id })
-        .then((frame) => this.#liveFrame(page, frame))
-        .catch(() => this.#dropLive(key, page))
-        .finally(() => {
-          page.busy = false;
-        });
-    }
-    this.#pollLive(showing ? LIVE_MS : 5000);
-  }
-
-  /** Forgets a live page, closed or lost; seen again, it opens afresh. */
-  #dropLive(key: string, page: LivePage): void {
-    if (this.#livePages.get(key) !== page) return;
-    this.#livePages.delete(key);
-    if (page.picture) this.#liveByPicture.delete(page.picture.id);
-    if (page.id) void this.#client.call("page.close", { id: page.id }).catch(() => {});
-    this.#redrawViews();
-  }
-
-  /** The live pages a frame shows are on screen, and kept moving. */
-  #liveSeen(pictures: readonly (Picture | undefined)[]): void {
-    const now = Date.now();
-    this.#liveShown = new Set();
-    for (const shown of pictures) {
-      const page = shown ? this.#liveByPicture.get(shown.id) : undefined;
-      if (page) {
-        page.seen = now;
-        this.#liveShown.add(page);
-      }
-    }
-    if (this.#liveShown.size > 0) this.#pollLive();
+    return rows(known);
   }
 
   /**
@@ -1812,7 +1357,7 @@ export class App {
    */
   #pageSize(columns: number): { width: number; scale: number } {
     const { cell } = this.#media();
-    const scale = Math.min(3, Math.max(1, Math.round((cell.height / 16) * 4) / 4));
+    const scale = screenDensity(cell);
     return { width: Math.round((columns * cell.width) / scale), scale };
   }
 
@@ -1870,10 +1415,7 @@ export class App {
         const size = fit(drawn, columns, media);
         const indent = " ".repeat(Math.max(0, Math.floor((columns - size.columns) / 2)));
         return {
-          rows: Array.from(
-            { length: size.rows },
-            (_, row) => indent + placeholderRow(drawn, row, size.columns),
-          ),
+          rows: pictureRows(drawn, size, indent),
           picture: { picture: drawn, ...size },
         };
       }
@@ -1902,65 +1444,6 @@ export class App {
     const screen = this.#screen.columns;
     const width = Math.min(screen, columnWidth());
     return { width, margin: Math.floor((screen - width) / 2) };
-  }
-
-  /**
-   * Loads the page of a thread's log before what its view shows, and shows
-   * the view again from there, keeping the rows on screen where they were.
-   */
-  async #loadEarlier(id: string): Promise<void> {
-    const paged = this.#paged.get(id);
-    // Live entries go on into the view meanwhile, since the page goes above them.
-    if (!paged?.more || paged.oldest === null || this.#loading.has(id) || this.#loads.has(id))
-      return;
-    if (this.#earlierLoading.has(id)) return;
-    this.#earlierLoading.add(id);
-    const generation = this.#generation;
-    try {
-      const page = await this.#client.call("thread.attach", {
-        threadId: id,
-        limit: PAGE_ENTRIES,
-        before: paged.oldest,
-      });
-      for (const child of page.children) paged.children.set(child.id, child);
-      if (generation !== this.#generation) return;
-      const shift = page.entries.length;
-      paged.entries = [...page.entries, ...paged.entries];
-      paged.items = new Map();
-      paged.entries.forEach((logged, index) => {
-        if (logged.entry.type === "item") paged.items.set(logged.entry.item.id, index);
-      });
-      paged.oldest = page.entries[0]?.seq ?? paged.oldest;
-      paged.more = page.more;
-      if (!paged.more) this.#paged.delete(id);
-      const old = this.#views.get(id);
-      if (!old) return;
-      // The startup view keeps being the startup view.
-      const wasHome = old === this.#home;
-      // Built again as one log, so a turn across the pages' cut reads whole, with the
-      // terminal's own lines back in their places.
-      const view = new ThreadView(id);
-      view.rebuild(
-        old,
-        paged.entries.map((logged) => logged.entry),
-        shift,
-        this.#replayContext(paged),
-        paged.more ? EARLIER_ABOVE : null,
-      );
-      view.turn = old.turn;
-      // Rows count from the bottom, so the same scroll shows the same rows; the rows
-      // added above are not new output for the view to hold still against.
-      view.scroll = old.scroll;
-      view.total = view.transcript.view(this.#renderContext(), 0, 0).total;
-      view.awaiting(this.#client.threads.get(id)?.requests ?? []);
-      this.#views.set(id, view);
-      if (wasHome) this.#home = view;
-    } catch (error) {
-      this.#notice("error", `Could not load earlier turns: ${errorMessage(error)}`);
-    } finally {
-      this.#earlierLoading.delete(id);
-      this.#schedule();
-    }
   }
 
   #viewContext(threadId: string): ViewContext {
@@ -2008,7 +1491,7 @@ export class App {
           !own.has(command.name) &&
           !command.aliases.some((alias) => own.has(alias)),
       );
-      this.#syncSlash();
+      this.#suggestions.sync();
       this.#schedule();
     } catch {
       // Completion is a convenience; a harness that cannot list commands still runs them.
@@ -2022,7 +1505,7 @@ export class App {
       const commands = await this.#client.call("commands.list", { threadId });
       if (this.#currentId !== threadId) return;
       this.#registerHostCommands(commands);
-      this.#syncSlash();
+      this.#suggestions.sync();
       this.#schedule();
     } catch {
       // The commands already registered stay.
@@ -2080,7 +1563,7 @@ export class App {
         (found) => {
           if (this.#completions.get(key) !== loading) return;
           this.#completions.set(key, found);
-          this.#syncCompletion();
+          this.#suggestions.sync();
           this.#schedule();
         },
         () => {
@@ -2113,6 +1596,7 @@ export class App {
     ]) {
       if (timer) clearTimeout(timer);
     }
+    this.#livePages.stop();
     this.#programStatus?.clear();
     this.#screen.leave();
     if (this.#stderrWrite) process.stderr.write = this.#stderrWrite;
@@ -2185,7 +1669,7 @@ export class App {
         break;
       case "removed": {
         this.#views.delete(event.threadId);
-        this.#paged.delete(event.threadId);
+        this.#logs.forget(event.threadId);
         this.#dropRequests(event.threadId);
         this.#own.delete(event.threadId);
         if (this.#shownState?.id === event.threadId) this.#shownState = null;
@@ -2202,14 +1686,7 @@ export class App {
         break;
       }
       case "entry": {
-        const loading = this.#loading.get(event.threadId);
-        if (loading) {
-          loading.push({ seq: event.seq, entry: event.entry });
-          break;
-        }
-        // A paged view keeps what it shows, to show it again with earlier pages.
-        const paged = this.#paged.get(event.threadId);
-        if (paged) keep(paged, { seq: event.seq, entry: event.entry });
+        if (!this.#logs.live(event.threadId, { seq: event.seq, entry: event.entry })) break;
         const view = this.#views.get(event.threadId);
         view?.apply(event.entry, this.#viewContext(event.threadId));
         // A call can arrive after the approval asking for it.
@@ -2225,11 +1702,6 @@ export class App {
         break;
       case "ui.done":
         if (this.#panel?.kind === "menu" && this.#panel.pick === event.id) this.#panel = null;
-        break;
-      case "commands":
-        void this.#refreshHostCommands();
-        break;
-      case "harnesses":
         break;
       case "resync":
         this.#resynced(event.hello);
@@ -2299,16 +1771,13 @@ export class App {
   #resynced(hello: HelloResult): void {
     const current = this.#currentId;
     // Loads begun before this catch-up read the old feed; their results are dropped.
-    this.#generation++;
-    this.#loads.clear();
-    this.#loading.clear();
+    this.#logs.resync();
     const restarted = this.#instance !== null && hello.instance !== this.#instance;
     this.#instance = hello.instance;
     this.#stored = hello.store !== null;
     this.#registerHostCommands(hello.commands);
     this.#views.clear();
     this.#unloaded.clear();
-    this.#paged.clear();
     this.#homeTaken = true;
     this.#requests = [];
     this.#prompt = null;
@@ -2325,7 +1794,7 @@ export class App {
           `1harness's server started again${this.#server.local ? "" : ` on ${this.#server.label}`}, and its threads are back. A parked thread's harness starts with your next message.`,
         );
     };
-    if (shown) void this.#load(shown.id).then(say);
+    if (shown) void this.#logs.load(shown.id).then(say);
     else {
       this.#currentId = null;
       say();
@@ -2382,13 +1851,12 @@ export class App {
         this.#panel = { kind: "info", title: request.title, rows: request.rows };
         return;
       case "pick": {
-        void this.#pick(
-          request.title,
-          request.entries.map(pickEntry),
-          request.initial,
-          request.filter,
-          { pick: request.id, tabs: request.tabs },
-        ).then((index) =>
+        void this.#pick(request.title, request.entries.map(pickEntry), {
+          initial: request.initial,
+          filter: request.filter,
+          tabs: request.tabs,
+          pick: request.id,
+        }).then((index) =>
           this.#client.call("ui.reply", { id: request.id, result: index }).catch(() => {}),
         );
         return;
@@ -2538,14 +2006,13 @@ export class App {
     this.#nextRequest();
   }
 
-  /** `pick` is the host's request the menu answers, when it asked; `tabs` groups entries in tabs. */
+  /** Shows a list to choose from; `pick` is the host's request it answers, when the host asked. */
   #pick(
     title: string,
     entries: MenuEntry[],
-    initial = 0,
-    filter = false,
-    options: { pick?: string; tabs?: boolean; describe?: boolean; count?: boolean } = {},
+    config: Partial<MenuConfig> & { pick?: string } = {},
   ): Promise<number | null> {
+    const { pick, ...menu } = config;
     return new Promise((resolve) => {
       if (entries.length === 0) {
         resolve(null);
@@ -2554,24 +2021,16 @@ export class App {
       // The menu this one replaces is dismissed, which answers a host waiting on it;
       // the same pick shown again, after a resync, is still waited on.
       const replaced = this.#panel;
-      if (replaced?.kind === "menu" && !(options.pick && replaced.pick === options.pick)) {
+      if (replaced?.kind === "menu" && !(pick && replaced.pick === pick)) {
         this.#panel = null;
         if (replaced.onReplaced) replaced.onReplaced();
         else replaced.onDone(null);
       }
       this.#panel = {
         kind: "menu",
-        menu: new Menu({
-          title,
-          entries,
-          initial,
-          filter,
-          ...(options.tabs ? { tabs: true } : {}),
-          ...(options.describe ? { describe: true } : {}),
-          ...(options.count === false ? { count: false } : {}),
-        }),
+        menu: new Menu({ ...menu, title, entries }),
         onDone: resolve,
-        ...(options.pick ? { pick: options.pick } : {}),
+        ...(pick ? { pick } : {}),
       };
       this.#schedule();
     });
@@ -2628,29 +2087,17 @@ export class App {
         return;
       case "background":
         setLightTheme(event.light);
-        for (const view of new Set([this.#home, ...this.#views.values()]))
-          view.transcript.invalidate();
+        this.#redrawViews();
         return;
       case "wheel":
-        if (this.#viewer?.live) {
-          const { live } = this.#viewer;
-          this.#liveInput(live, {
-            type: "wheel",
-            x: live.css.width / 2,
-            y: live.css.height / 2,
-            delta_y: event.delta * 100,
-          });
-        } else if (this.#viewer) this.#viewer.scroll += event.delta * WHEEL_ROWS;
+        if (this.#viewer) this.#viewer.wheel(event.delta);
         else this.#scrollBy(-event.delta * WHEEL_ROWS);
         return;
       case "mouse":
         this.#mouse(event);
         return;
       case "paste":
-        if (this.#viewer?.live) {
-          this.#liveInput(this.#viewer.live, { type: "text", text: event.text });
-          return;
-        }
+        if (this.#viewer?.paste(event.text)) return;
         if (this.#panel?.kind === "resume" || this.#panel?.kind === "lineage") {
           this.#panel.view.paste(event.text);
         } else if (this.#prompt) {
@@ -2660,7 +2107,7 @@ export class App {
         } else {
           this.#panel = null;
           this.#editor.insert(event.text);
-          this.#syncCompletion();
+          this.#suggestions.sync();
         }
         return;
       case "key":
@@ -2674,7 +2121,7 @@ export class App {
     const sinceLast = now - this.#typedAt;
     this.#typedAt = now;
     if (this.#viewer) {
-      this.#viewerKey(key);
+      this.#viewer.key(key);
       return;
     }
     // A key ends what the mouse selected.
@@ -2742,16 +2189,12 @@ export class App {
       (key.ctrl && (key.name === "p" || key.name === "n"));
     const walking = this.#recalled && historyKey;
     this.#recalled = walking;
-    if (!walking) {
-      if (this.#slash && this.#slashKey(key)) return;
-      if (this.#args && this.#argsKey(key)) return;
-      if (this.#mention && this.#mentionKey(key)) return;
-    }
+    if (!walking && this.#suggestions.key(key)) return;
     const before = this.#editor.text;
     this.#composerKey(key);
     // A text that history put there; the next ↑↓ walks on.
     if (historyKey && this.#editor.text !== before) this.#recalled = true;
-    this.#syncCompletion();
+    this.#suggestions.sync();
   }
 
   /** Keys for a panel; returns false for a key that closed an info panel and goes on to the composer. */
@@ -2767,13 +2210,13 @@ export class App {
       const result = panel.view.key(key, Math.max(1, this.#screen.rows - 12));
       if (result?.kind === "close") this.#panel = null;
       // The list stays open over the agent gone into, or the thread come back out to.
-      else if (result?.kind === "choose") void this.#goTo(result.id).catch(() => {});
+      else if (result?.kind === "choose") void this.#goTo(result.id);
       else if (result?.kind === "exit") {
         const parent = this.#current?.parentId;
         if (parent) {
           // Out to an agent, it is selected; out to the thread they came from, the one left stays.
           if (this.#client.threads.get(parent)?.parentId) panel.view.select(parent);
-          void this.#goTo(parent).catch(() => {});
+          void this.#goTo(parent);
         } else this.#notice("info", "This is the thread the agents came from.");
       }
       this.#schedule();
@@ -2802,113 +2245,6 @@ export class App {
     return true;
   }
 
-  /** Keys for the slash command menu; returns false for keys that go to the composer. */
-  #slashKey(key: Key): boolean {
-    const menu = this.#slash;
-    if (!menu) return false;
-    // The composer takes typing, so only arrows and ctrl+j/k move here.
-    const step = lineStep(key);
-    if (step) {
-      menu.move(step);
-      this.#slashMoved = this.#editor.text;
-      return true;
-    }
-    if (key.name === "escape") {
-      this.#slashDismissed = this.#editor.text;
-      this.#slash = null;
-      return true;
-    }
-    const selected = menu.selected();
-    if (!selected) return false;
-    if (key.name === "tab" && !key.shift) {
-      this.#editor.set(`${selected.label} `);
-      this.#syncCompletion();
-      return true;
-    }
-    if (key.name === "return" && !key.meta) {
-      this.#slash = null;
-      this.#editor.set(selected.label);
-      this.#submit(this.#editor.text);
-      return true;
-    }
-    return false;
-  }
-
-  #syncCompletion(): void {
-    this.#syncSlash();
-    this.#syncArgs();
-    this.#syncMention();
-  }
-
-  /** Opens, narrows, or closes the list of words that can follow a command. */
-  #syncArgs(): void {
-    const text = this.#editor.text;
-    if (text !== this.#argsDismissed) this.#argsDismissed = null;
-    const match = this.#argsDismissed === null ? /^\/(\S+) ([^\n]*)$/.exec(text) : null;
-    const command = match ? this.#commands.find(match[1] ?? "") : undefined;
-    const found =
-      match && command && this.#isAvailable(command)
-        ? (command.complete?.(this.#context, match[2] ?? "") ?? null)
-        : null;
-    if (!match || !found) {
-      this.#args = null;
-      return;
-    }
-    const typed = (match[2] ?? "").slice(found.start).toLowerCase();
-    const items = found.items.filter((item) => item.value.toLowerCase().startsWith(typed));
-    if (items.length === 0) {
-      this.#args = null;
-      return;
-    }
-    const entries = items.map((item) => entry(item.value, item.detail));
-    const menu = this.#args?.menu ?? new Menu({ title: "", entries, bare: true });
-    menu.setEntries(entries);
-    const start = text.length - (match[2] ?? "").length + found.start;
-    // Lined up under the word, past the composer's `┃ ` marker.
-    menu.indent = 2 + visibleWidth(text.slice(0, start));
-    // A move holds while the word is the same; typing more of it starts over.
-    const moved = this.#args?.start === start && this.#args.typed === typed && this.#args.moved;
-    // A word typed in full is chosen over longer ones, so /resume t1 is not t12.
-    const exact = items.find((item) => item.value.toLowerCase() === typed);
-    if (exact && !moved) menu.select(exact.value);
-    // The word after one that needs another, as `/mcp show NAME`, is the list's to give.
-    const required = this.#argsRequired === start;
-    this.#args = { menu, start, items, moved, typed, required };
-  }
-
-  /** Keys for the argument list; returns false for keys that go to the composer. */
-  #argsKey(key: Key): boolean {
-    const args = this.#args;
-    if (!args) return false;
-    const step = lineStep(key);
-    if (step) {
-      args.menu.move(step);
-      args.moved = true;
-      return true;
-    }
-    if (key.name === "escape") {
-      this.#argsDismissed = this.#editor.text;
-      this.#args = null;
-      return true;
-    }
-    const tab = key.name === "tab" && !key.shift;
-    if (!tab && !(key.name === "return" && !key.meta)) return false;
-    // With nothing typed for the word, the list only suggests: enter runs what is there,
-    // so `/harness codex ` does not become `/harness codex fresh`. Moving to a word picks it.
-    if (!tab && !args.moved && !args.required && this.#editor.text.slice(args.start).trim() === "")
-      return false;
-    const selected = args.menu.selected();
-    const item = args.items.find((candidate) => candidate.value === selected?.label);
-    if (!item) return false;
-    const text = `${this.#editor.text.slice(0, args.start)}${item.value}${item.more ? " " : ""}`;
-    this.#editor.set(text);
-    this.#argsRequired = item.more ? text.length : null;
-    // Enter runs a finished command; a word that needs another keeps the list open.
-    if (!tab && !item.more) this.#submit(text);
-    else this.#syncCompletion();
-    return true;
-  }
-
   /**
    * A list kept for the thread. The first call starts the fetch and returns
    * nothing; completion menus fill in when it arrives.
@@ -2928,7 +2264,7 @@ export class App {
       (items) => {
         if (thread !== this.#currentId || this.#lookups.get(key) !== loading) return items;
         this.#lookups.set(key, items);
-        this.#syncCompletion();
+        this.#suggestions.sync();
         this.#schedule();
         return items;
       },
@@ -2943,12 +2279,7 @@ export class App {
 
   /** Commands the current session can run: 1harness's in a set order, then the rest, then /quit. */
   #available(): CommandDefinition[] {
-    return this.#commands
-      .list()
-      .filter((command) => this.#isAvailable(command))
-      .map((command, index) => ({ command, index }))
-      .toSorted((a, b) => commandRank(a.command) - commandRank(b.command) || a.index - b.index)
-      .map(({ command }) => command);
+    return inMenuOrder(this.#commands.list().filter((command) => this.#isAvailable(command)));
   }
 
   #isAvailable(command: CommandDefinition): boolean {
@@ -2957,135 +2288,6 @@ export class App {
     } catch {
       return false;
     }
-  }
-
-  /** Opens, narrows, or closes the slash menu to match the composer. */
-  #syncSlash(): void {
-    const text = this.#editor.text;
-    if (text !== this.#slashDismissed) this.#slashDismissed = null;
-    if (!/^\/\S*$/.test(text) || this.#slashDismissed !== null) {
-      this.#slash = null;
-      return;
-    }
-    const entries: MenuEntry[] = [];
-    // A command typed in full comes first and is selected, so /mode runs /mode, not /model.
-    let exact: string | null = null;
-    const add = (names: string[], made: MenuEntry) => {
-      if (!names.some((name) => `/${name}`.startsWith(text))) return;
-      if (exact === null && names.some((name) => `/${name}` === text)) {
-        exact = made.label;
-        entries.unshift(made);
-      } else entries.push(made);
-    };
-    const own = this.#available();
-    const last = own.filter((command) => LAST_COMMANDS.includes(command.name));
-    for (const command of own.filter((candidate) => !last.includes(candidate)))
-      add(
-        [command.name, ...(command.aliases ?? [])],
-        entry(`/${command.name}`, command.description, { tag: command.group }),
-      );
-    for (const command of this.#nativeCommands)
-      add(
-        [command.name, ...command.aliases],
-        entry(`/${command.name}`, command.description, { tag: "Skills" }),
-      );
-    for (const command of last)
-      add(
-        [command.name, ...(command.aliases ?? [])],
-        entry(`/${command.name}`, command.description, { tag: command.group }),
-      );
-    if (entries.length === 0) {
-      this.#slash = null;
-      return;
-    }
-    if (this.#slash) this.#slash.setEntries(entries);
-    else this.#slash = new Menu({ title: "Commands", entries, describe: true });
-    // A command the user moved to stays chosen while the text is the same, as lists refresh.
-    if (this.#slashMoved !== text) this.#slashMoved = null;
-    if (exact !== null && this.#slashMoved === null) this.#slash.select(exact);
-  }
-
-  /** Opens, narrows, or closes the file menu for an `@` word at the cursor. */
-  #syncMention(): void {
-    const text = this.#editor.text;
-    if (text !== this.#mentionDismissed) this.#mentionDismissed = null;
-    const token = this.#slash || this.#args ? null : this.#editor.token("@");
-    const matches = token && this.#mentionDismissed === null ? this.#searchFiles(token.query) : [];
-    if (!token || matches.length === 0) {
-      this.#mention = null;
-      return;
-    }
-    const entries = matches.map((match) => {
-      const trimmed = match.directory ? match.path.slice(0, -1) : match.path;
-      const slash = trimmed.lastIndexOf("/");
-      const name = trimmed.slice(slash + 1) + (match.directory ? "/" : "");
-      return entry(name, trimmed.slice(0, slash + 1));
-    });
-    const menu = this.#mention?.menu ?? new Menu({ title: "Files", entries });
-    menu.setEntries(entries);
-    this.#mention = { menu, start: token.start, entries, matches };
-  }
-
-  /**
-   * Files matching an `@` mention, which the host searches where the thread
-   * runs. The first call for a query asks; the menu fills in when it answers,
-   * and again while the host is still indexing the folder.
-   */
-  #searchFiles(query: string): FileMatch[] {
-    const cwd = this.#cwd();
-    const key = `${cwd}\0${query}`;
-    const cached = this.#fileResults.get(key);
-    if (Array.isArray(cached)) return cached;
-    if (cached === undefined) {
-      if (this.#fileResults.size > 200) this.#fileResults.clear();
-      const asking = this.#client.call("files.search", { cwd, query, limit: MENTION_LIMIT }).then(
-        ({ matches, loading }) => {
-          if (this.#fileResults.get(key) !== asking) return;
-          this.#fileResults.set(key, matches);
-          // Results fill in as the host's first scan goes on.
-          if (loading)
-            setTimeout(() => {
-              if (this.#fileResults.get(key) === matches) this.#fileResults.delete(key);
-              this.#syncMention();
-              this.#schedule();
-            }, FILES_RETRY_MS).unref();
-          this.#syncMention();
-          this.#schedule();
-        },
-        (error: unknown) => {
-          this.#fileResults.set(key, []);
-          this.#notice("warning", `File completion is unavailable: ${errorMessage(error)}`);
-        },
-      );
-      this.#fileResults.set(key, asking);
-    }
-    return [];
-  }
-
-  /** Keys for the file menu; returns false for keys that go to the composer. */
-  #mentionKey(key: Key): boolean {
-    const mention = this.#mention;
-    if (!mention) return false;
-    // The composer takes typing, so only arrows and ctrl+j/k move here.
-    const step = lineStep(key);
-    if (step) {
-      mention.menu.move(step);
-      return true;
-    }
-    if (key.name === "escape") {
-      this.#mentionDismissed = this.#editor.text;
-      this.#mention = null;
-      return true;
-    }
-    const accept = (key.name === "tab" && !key.shift) || (key.name === "return" && !key.meta);
-    const selected = mention.menu.selected();
-    const match = selected ? mention.matches[mention.entries.indexOf(selected)] : undefined;
-    if (!accept || !match) return false;
-    // A folder stays open for its contents; a file ends the word.
-    const text = mentionText(match.path);
-    this.#editor.replaceToken(mention.start, match.directory ? text : `${text} `);
-    this.#syncCompletion();
-    return true;
   }
 
   #composerKey(key: Key): void {
@@ -3160,14 +2362,8 @@ export class App {
    * chooses a list's entry, copies a code block, or opens a picture whole.
    */
   #mouse(event: Extract<InputEvent, { type: "mouse" }>): void {
-    const viewer = this.#viewer;
-    if (viewer?.live) {
-      this.#viewerMouse(viewer, viewer.live, event);
-      return;
-    }
-    if (viewer) {
-      // Any click closes the view, but the one that opened it.
-      if (event.action === "release" && Date.now() - viewer.opened > CLICK_MS) this.#closeViewer();
+    if (this.#viewer) {
+      this.#viewer.mouse(event);
       return;
     }
     if (event.button !== 0) return;
@@ -3234,13 +2430,13 @@ export class App {
     if (!hit) return;
     const { target } = hit;
     // A live page takes a click on itself; its caption opens it whole.
-    const live = target.kind === "picture" ? this.#liveByPicture.get(target.picture.id) : undefined;
+    const live = target.kind === "picture" ? this.#livePages.showing(target.picture) : undefined;
     if (live && target.kind === "picture") {
       const columns = this.#column().width - IMAGE_INDENT * 2;
       const size = fit(target.picture, columns, { ...this.#media(), maxRows: PLACEHOLDER_LIMIT });
       const across = column - IMAGE_INDENT;
       if (hit.row < size.rows && across >= 0 && across < size.columns) {
-        this.#liveInput(live, {
+        this.#livePages.input(live, {
           type: "click",
           x: ((across + 0.5) / size.columns) * live.css.width,
           y: ((hit.row + 0.5) / size.rows) * live.css.height,
@@ -3305,204 +2501,33 @@ export class App {
     this.#schedule();
   }
 
-  /** Opens a picture on the whole screen, and draws it again for that size. */
+  /** Opens a picture on the whole screen, drawn again for that size where it can be. */
   #openViewer(target: Extract<Target, { kind: "picture" }>): void {
-    const live = this.#liveByPicture.get(target.picture.id);
-    const viewer: Viewer = {
-      target,
-      picture: target.picture,
-      scroll: 0,
-      opened: Date.now(),
-      ...(live ? { live } : {}),
-    };
-    this.#viewer = viewer;
     this.#selection = null;
-    this.#schedule();
-    if (!live) {
-      void this.#sharpen(viewer);
-      return;
-    }
-    // A live page keeps its width and is zoomed to the screen's, its viewport as tall as the screen.
-    const media = this.#media();
-    const room = {
-      width: Math.max(1, this.#screen.columns - 4) * media.cell.width,
-      height: Math.max(1, this.#screen.rows - 2) * media.cell.height,
-    };
-    const scale = Math.min(4, Math.max(live.inline.scale, room.width / live.inline.width));
-    if (live.id)
-      void this.#client
-        .call("page.resize", {
-          id: live.id,
-          width: live.inline.width,
-          height: Math.floor(room.height / scale),
-          scale,
-        })
-        .then((frame) => this.#liveFrame(live, frame))
-        .catch(() => {});
-  }
-
-  /**
-   * Draws the viewer's picture again at the screen's size, where it has
-   * something to draw from: its file, its diagram's source, or its page, drawn
-   * denser so it reads the same.
-   */
-  async #sharpen(viewer: Viewer): Promise<void> {
-    const media = this.#media();
-    const box = {
-      width: Math.max(1, this.#screen.columns - 4) * media.cell.width,
-      height: Math.max(1, this.#screen.rows - 2) * media.cell.height,
-    };
-    const { target } = viewer;
-    let sharper: Picture | null | undefined = null;
-    try {
-      if (target.path) {
-        const found = await this.#client.call("files.image", { path: target.path, ...box });
-        sharper = found ? picture(Buffer.from(found.data, "base64")) : null;
-      } else if (target.figure) {
-        sharper = this.#figures
-          .renderer(target.figure.kind)
-          .picture(target.figure.source, isLightTheme(), box.width, media.cell, box.height);
-      } else if (target.html !== undefined) {
-        const { width } = this.#pageSize(this.#column().width - IMAGE_INDENT * 2);
-        const scale = Math.round(Math.min(4, Math.max(1, box.width / width)) * 100) / 100;
-        const drawn = await this.#client.call("media.html", {
-          html: target.html,
-          width,
-          scale,
-          dark: !isLightTheme(),
-          transparent: true,
-        });
-        sharper = picture(Buffer.from(drawn.data, "base64"));
-      }
-    } catch {
-      // The picture it opened with stays.
-    }
-    if (sharper && this.#viewer === viewer) {
-      viewer.picture = sharper;
-      this.#schedule();
-    }
-  }
-
-  /** The mouse over a live page shown whole goes to it; a click off it closes the view. */
-  #viewerMouse(
-    viewer: Viewer,
-    live: LivePage,
-    event: Extract<InputEvent, { type: "mouse" }>,
-  ): void {
-    const layout = viewer.layout;
-    if (!layout || event.button !== 0) return;
-    const across = event.column - layout.left;
-    const down = event.row - layout.top;
-    const inside = across >= 0 && across < layout.columns && down >= 0 && down < layout.rows;
-    if (!inside) {
-      if (event.action === "release" && Date.now() - viewer.opened > CLICK_MS) this.#closeViewer();
-      return;
-    }
-    this.#liveInput(live, {
-      type: "mouse",
-      action:
-        event.action === "press"
-          ? "mousePressed"
-          : event.action === "release"
-            ? "mouseReleased"
-            : "mouseMoved",
-      x: ((across + 0.5) / layout.columns) * live.css.width,
-      y: ((down + layout.scroll + 0.5) / layout.rows) * live.css.height,
-      buttons: event.action === "release" ? 0 : 1,
+    this.#viewer = new PictureViewer(target, {
+      client: this.#client,
+      live: this.#livePages,
+      figures: this.#figures,
+      screen: () => ({ columns: this.#screen.columns, rows: this.#screen.rows }),
+      media: () => this.#media(),
+      pageSize: () => this.#pageSize(this.#column().width - IMAGE_INDENT * 2),
+      copy: (text, said) => this.#copy(text, said),
+      schedule: () => this.#schedule(),
+      closed: () => {
+        this.#viewer = null;
+      },
     });
+    this.#schedule();
   }
 
-  #closeViewer(): void {
-    const live = this.#viewer?.live;
-    this.#viewer = null;
-    this.#schedule();
-    // A live page goes back to the transcript's width and height.
-    if (live?.id)
-      void this.#client
-        .call("page.resize", {
-          id: live.id,
-          width: live.inline.width,
-          height: live.inline.height,
-          scale: live.inline.scale,
-        })
-        .then((frame) => this.#liveFrame(live, frame))
-        .catch(() => {});
-  }
-
-  /** Keys while a picture is shown whole: it scrolls, copies what it was drawn from, or closes. */
-  #viewerKey(key: Key): void {
-    const viewer = this.#viewer;
-    if (!viewer) return;
-    if (viewer.live) {
-      if (key.name === "escape" || (key.ctrl && key.name === "c")) this.#closeViewer();
-      else {
-        const event = pageKey(key);
-        if (event) this.#liveInput(viewer.live, event);
-      }
-      return;
-    }
-    const page = Math.max(1, this.#screen.rows - 4);
-    const step = lineStep(key);
-    if (step) viewer.scroll += step;
-    else if (key.name === "pageup" || key.name === "pagedown")
-      viewer.scroll += key.name === "pageup" ? -page : page;
-    else if (key.name === "home" || key.text === "g") viewer.scroll = 0;
-    else if (key.name === "end" || key.text === "G") viewer.scroll = Number.MAX_SAFE_INTEGER;
-    else if (key.text === "c") {
-      const { target } = viewer;
-      if (target.html !== undefined) this.#copy(target.html, "Copied the page's HTML");
-      else if (target.figure)
-        this.#copy(target.figure.source, FIGURE_NAMES[target.figure.kind].copied);
-      else if (target.path) this.#copy(target.path, "Copied the image's path");
-    } else if (
-      key.name === "escape" ||
-      key.name === "return" ||
-      key.name === "space" ||
-      key.text === "q" ||
-      (key.ctrl && key.name === "c")
-    )
-      this.#closeViewer();
-    this.#schedule();
+  /** The word in the status line for a moment, while it shows. */
+  #toastText(): string | null {
+    return this.#toast && Date.now() < this.#toast.until ? this.#toast.text : null;
   }
 
   /** The viewer's frame: the picture as large as the screen takes, under its name. */
-  #renderViewer(): void {
-    const viewer = this.#viewer;
-    if (!viewer) return;
-    const { target } = viewer;
-    const what =
-      target.html !== undefined
-        ? "HTML"
-        : target.figure
-          ? target.figure.kind === "math"
-            ? "TeX"
-            : "source"
-          : target.path
-            ? "path"
-            : "";
-    const toast = this.#toast && Date.now() < this.#toast.until ? `✓ ${this.#toast.text} · ` : "";
-    const hints = viewer.live
-      ? "the mouse and keys go to the page · esc closes"
-      : `${toast}${what ? `c copies the ${what} · ` : ""}esc closes`;
-    const shown = viewer.live?.picture ?? viewer.picture;
-    this.#liveSeen(viewer.live ? [shown] : []);
-    const frame = viewerFrame(
-      shown,
-      target.title,
-      hints,
-      { columns: this.#screen.columns, rows: this.#screen.rows },
-      this.#media(),
-      viewer.scroll,
-      target.html !== undefined && !viewer.live,
-    );
-    viewer.scroll = frame.scroll;
-    viewer.layout = {
-      left: frame.left,
-      top: frame.top,
-      columns: frame.shown.columns,
-      rows: frame.shown.rows,
-      scroll: frame.scroll,
-    };
+  #renderViewer(viewer: PictureViewer): void {
+    const frame = viewer.render(this.#toastText());
     this.#targets = [];
     this.#listAt = null;
     this.#screen.render(frame.rows, null, [frame.shown]);
@@ -3513,7 +2538,7 @@ export class App {
     view.scroll = Math.max(0, view.scroll + rows);
     // At the top of what is loaded, the page before it loads.
     if (rows > 0 && this.#currentId && view.scroll >= view.total - this.#screen.rows)
-      void this.#loadEarlier(this.#currentId);
+      void this.#logs.loadEarlier(this.#currentId);
   }
 
   #submit(raw: string): void {
@@ -3543,9 +2568,7 @@ export class App {
       return;
     }
     this.#editor.take();
-    this.#slash = null;
-    this.#args = null;
-    this.#mention = null;
+    this.#suggestions.clear();
     this.#view.scroll = 0;
     if (text.startsWith("/") && !text.startsWith("//")) {
       void this.#command(text);
@@ -3655,8 +2678,8 @@ export class App {
         if (!name) return;
         const takes = ownCommand ? Boolean(ownCommand.usage) : Boolean(nativeCommand?.argumentHint);
         this.#editor.set(`/${name}${takes ? " " : ""}`);
-        this.#slashDismissed = this.#editor.text;
-        this.#syncCompletion();
+        this.#suggestions.dismissCommands();
+        this.#suggestions.sync();
       },
     };
   }
@@ -3679,17 +2702,12 @@ export class App {
       ["Mode", `${info.runtimeMode}${info.interactionMode === "plan" ? " · plan" : ""}`],
       ["1harness", `v${this.#version}`],
     ];
-    if (usage && usage.contextTokens !== null && usage.contextWindow) {
-      const percent = Math.round((usage.contextTokens / usage.contextWindow) * 100);
-      rows.push([
-        "Context",
-        `${formatTokens(usage.contextTokens)} of ${formatTokens(usage.contextWindow)} (${percent}%)`,
-      ]);
-    }
-    const cost = usage?.costUsd ? formatCost(usage.costUsd) : null;
-    if (cost) rows.push(["Cost", cost]);
+    const context = usage ? contextUsed(usage) : null;
+    if (context)
+      rows.push(["Context", `${context.used} of ${context.window} (${context.percent}%)`]);
+    if (usage?.costUsd) rows.push(["Cost", formatCost(usage.costUsd)]);
     const limits = usage?.limits ?? [];
-    if (limits.length > 0) rows.push(["Limits", limits.map(describeLimit).join("\n")]);
+    if (limits.length > 0) rows.push(["Limits", limits.map(limitDetail).join("\n")]);
     rows.push(["Server", this.#serverLine()]);
     this.#panel = { kind: "info", title: "Status", rows };
   }
@@ -3748,21 +2766,6 @@ export class App {
     this.#schedule();
   }
 
-  #usageSummary(): string {
-    const usage = this.#current?.usage;
-    if (!usage) return "";
-    const parts: string[] = [];
-    if (usage.contextTokens !== null && usage.contextWindow) {
-      const percent = Math.round((usage.contextTokens / usage.contextWindow) * 100);
-      parts.push(
-        `ctx ${formatTokens(usage.contextTokens)}/${formatTokens(usage.contextWindow)} (${percent}%)`,
-      );
-    }
-    // Nothing spent yet, or a subscription that does not count it, shows no cost.
-    if (usage.costUsd) parts.push(formatCost(usage.costUsd));
-    return parts.join(" · ");
-  }
-
   #schedule(): void {
     if (this.#frame || this.#exiting) return;
     this.#frame = setTimeout(() => this.#renderNow(), FRAME_MS);
@@ -3773,7 +2776,7 @@ export class App {
     this.#frame = null;
     if (this.#exiting) return;
     if (this.#viewer) {
-      this.#renderViewer();
+      this.#renderViewer(this.#viewer);
       return;
     }
     const { width, margin } = this.#column();
@@ -3808,7 +2811,7 @@ export class App {
     this.#targets = view.targets;
     this.#top = view.top;
     this.#shownRows = view.rows;
-    this.#liveSeen(view.pictures.map((one) => one.picture));
+    this.#livePages.seen(view.pictures.map((one) => one.picture));
     const transcript = this.#selection
       ? paintSelection(view.rows, this.#selection, view.top, width)
       : view.rows;
@@ -3856,29 +2859,21 @@ export class App {
     list?: { menu: Menu; row: number };
   } {
     const rows: string[] = [""];
-    if (this.#view.turn && !this.#prompt) rows.push(this.#activity(width), "");
+    const { turn } = this.#view;
+    if (turn && !this.#prompt) {
+      const state = {
+        running: this.#view.transcript.running,
+        blink: this.#blinkOn,
+        steer: this.#current?.capabilities.steer === true,
+      };
+      rows.push(activityLine(turn, state, width), "");
+    }
     const queue = this.#current?.queue ?? [];
     // A queue held after a restart waits for the user's next message.
-    const held = this.#current?.held === true;
-    for (const queued of queue)
-      rows.push(
-        truncate(
-          style.muted(`  ↳ ${held ? "held" : "queued"}: ${oneLine(queuedText(queued))}`),
-          width,
-        ),
-      );
-    if (held && queue.length > 0)
-      rows.push(
-        ...wrap(
-          style.muted(
-            `    your next message runs ${queue.length === 1 ? "it" : "these"} first · /unqueue takes one back`,
-          ),
-          width,
-          "    ",
-        ),
-      );
+    rows.push(...queueRows(queue, this.#current?.held === true, width));
     if (queue.length > 0) rows.push("");
-    const attention = this.#attention(width);
+    const waiting = this.#requests.filter((open) => open.threadId !== this.#currentId);
+    const attention = attentionLine(waiting, this.#client.threads, width);
     if (attention) rows.push(attention, "");
 
     let cursor: CursorPosition | null = null;
@@ -3913,7 +2908,7 @@ export class App {
           ? this.#panel.menu
           : this.#panel
             ? null
-            : (this.#slash ?? this.#args?.menu ?? this.#mention?.menu ?? null);
+            : this.#suggestions.menu;
       // Lists and panels open above the composer, which keeps its place at the
       // bottom; the thread list takes the screen above it.
       const panel =
@@ -3948,105 +2943,24 @@ export class App {
     return { rows, cursor, ...(list ? { list } : {}) };
   }
 
-  /**
-   * The line that says another thread needs the user, such as an agent's
-   * approval: the oldest one, with how many more are waiting.
-   */
-  #attention(width: number): string | null {
-    const waiting = this.#requests.filter((open) => open.threadId !== this.#currentId);
-    const [first] = waiting;
-    const thread = first ? this.#client.threads.get(first.threadId) : undefined;
-    if (!first || !thread) return null;
-    const what = first.request.kind === "question" ? "has a question" : "needs approval";
-    const others = new Set(waiting.map((open) => open.threadId)).size - 1;
-    const more = others > 0 ? style.muted(` · ${others} more`) : "";
-    const left = `${style.attention("◆")} ${style.strong(thread.title || "New thread")}  ${style.attention(what)}${more}`;
-    return spread(truncate(left, Math.max(0, width - 14)), style.muted("ctrl+o open"), width);
-  }
-
-  /** fx's activity line: a blinking dot, the phase and elapsed time, then the token estimate. */
-  #activity(width: number): string {
-    const turn = this.#view.turn;
-    if (!turn) return "";
-    const seconds = Math.floor((Date.now() - turn.startedAt) / 1000);
-    // Streaming text, then running tools, then what the model says it is doing.
-    const phase =
-      turn.phase === "Generating"
-        ? "Generating"
-        : this.#view.transcript.running
-          ? "Running"
-          : (turn.heading ?? turn.phase);
-    const dot = this.#blinkOn ? style.text("•") : " ";
-    const tokens = `(↑${formatTokens(Math.ceil(turn.up))} ↓${formatTokens(Math.ceil(turn.down))})`;
-    const hint = this.#current?.capabilities.steer
-      ? "esc stop · enter adds to turn · tab queues"
-      : "esc stop · enter queues";
-    const left = `${dot} ${style.text(`${phase} (${seconds}s)`)} ${style.muted(tokens)}`;
-    // A narrow screen keeps what the turn is doing and drops the keys.
-    if (visibleWidth(left) + visibleWidth(hint) + 2 > width) return truncate(left, width);
-    return spread(left, style.muted(hint), width);
-  }
-
   #statusLine(width: number): string {
-    if (this.#exitArmed) return style.muted("Press ctrl+c again to exit");
-    if (this.#toast && Date.now() < this.#toast.until)
-      return truncate(`${style.added("✓")} ${style.text(this.#toast.text)}`, width);
-    const info = this.#info;
-    const parts: string[] = [this.#harness];
-    if (info) {
-      // Until the harness names its model, its default's ID, once its list says it.
-      const model = info.model ?? this.#defaultModel();
-      if (model) parts.push(model);
-      if (info.effort) parts.push(info.effort);
-    }
-    const usage = this.#usageSummary();
-    if (usage) parts.push(usage);
-    // With more than one thread, what the others are doing.
-    const threads = [...this.#client.threads.values()].filter(
-      (thread) => thread.status !== "closed",
+    const current = this.#current;
+    return statusLine(
+      {
+        exitArmed: this.#exitArmed,
+        toast: this.#toastText(),
+        harness: this.#harness,
+        currentId: this.#currentId,
+        current,
+        // Until the harness names its model, its default's ID, once its list says it.
+        model: current ? (current.info.model ?? this.#defaultModel()) : null,
+        runtimeMode: this.#settings.runtimeMode,
+        threads: this.#client.threads.values(),
+        server: this.#server.local ? null : this.#server.label,
+        scroll: this.#view.scroll,
+        details: this.#details,
+      },
+      width,
     );
-    const others = threads.filter(
-      (thread) =>
-        thread.id !== this.#currentId && thread.status !== "idle" && thread.status !== "parked",
-    ).length;
-    if (others > 0) parts.push(`${others} other ${others === 1 ? "thread" : "threads"} working`);
-    else {
-      // Threads of your own still open, not the agents they started, which ctrl+t lists
-      // under them, nor parked ones, which are earlier threads to resume.
-      const open = threads.filter(
-        (thread) =>
-          thread.id !== this.#currentId &&
-          thread.parentId === null &&
-          !thread.archived &&
-          thread.status !== "parked",
-      ).length;
-      if (open > 0) parts.push(`${open} other open · ctrl+t`);
-    }
-    if (!this.#server.local) parts.push(`on ${this.#server.label}`);
-    // Subscription limits appear once they need attention.
-    for (const limit of this.#current?.usage?.limits ?? []) {
-      if (limit.status === "ok") continue;
-      parts.push(
-        limit.status === "exceeded"
-          ? `${limit.label} limit reached`
-          : `${limit.label} ${limit.usedPercent === null ? "near limit" : `${Math.round(limit.usedPercent)}%`}`,
-      );
-    }
-    // A closed thread on screen says so first, since it takes no messages.
-    const state =
-      this.#current?.status === "closed"
-        ? `closed · ${info?.runtimeMode ?? this.#settings.runtimeMode}`
-        : (info?.runtimeMode ?? this.#settings.runtimeMode);
-    let left = `${style.text(state)}${style.muted(` · ${parts.join(" · ")}`)}`;
-    if (info?.interactionMode === "plan") left += `${style.muted(" · ")}${style.strong("plan")}`;
-    const scroll = this.#view.scroll;
-    // The right edge stays whole as the left is cut, so modes the keys toggle go there.
-    const right =
-      scroll > 0
-        ? style.muted(`↓ ${scroll} more lines · pgdn`)
-        : this.#details
-          ? style.muted("details · ctrl+x")
-          : "";
-    return spread(left, right, width);
   }
 }

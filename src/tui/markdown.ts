@@ -36,7 +36,7 @@ const TOKEN =
   /(\/\/.*$|#.*$|--.*$)|("(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|`(?:[^`\\]|\\.)*`?)|(\b\d[\d_.]*(?:e[+-]?\d+)?\b|\b0x[\da-f]+\b)|([A-Za-z_$][\w$]*)/gi;
 
 /** Light syntax coloring in fx's grays: keywords brighter, literals softer, comments muted. */
-export function highlight(line: string, lang: string): string {
+function highlight(line: string, lang: string): string {
   const language = lang.toLowerCase();
   if (language === "diff" || language === "patch") {
     if (line.startsWith("+") && !line.startsWith("+++")) return style.added(line);

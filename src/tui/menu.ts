@@ -95,8 +95,11 @@ export function lineStep(key: Key): number {
   return 0;
 }
 
-export function rule(width: number): string {
-  return style.rule("─".repeat(Math.max(0, width)));
+/** A rule across `width`, with `label` near its right end, as Codex counts its list. */
+export function rule(width: number, label = ""): string {
+  if (!label) return style.rule("─".repeat(Math.max(0, width)));
+  const tail = ` ${label} ─`;
+  return style.rule(`${"─".repeat(Math.max(0, width - visibleWidth(tail)))}${tail}`);
 }
 
 export function hints(parts: readonly string[], width: number): string {

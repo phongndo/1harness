@@ -3,7 +3,7 @@ import { stripVTControlCharacters } from "node:util";
 import { describe, it } from "node:test";
 import type { Message } from "../core/thread.ts";
 import type { LogEntry } from "../protocol.ts";
-import { formatElapsed, plainLine, type AgentRow } from "./agents.ts";
+import { plainLine, type AgentRow } from "./agents.ts";
 import { inline, renderMarkdown } from "./markdown.ts";
 import { visibleWidth, wrap } from "./text.ts";
 import { Transcript, renderBlock, type Block, type ToolItem } from "./transcript.ts";
@@ -18,8 +18,6 @@ const row = (overrides: Partial<AgentRow>): AgentRow => ({
   label: "claude · haiku",
   title: "Review the parser",
   status: "working",
-  startedAt: 35_000,
-  endedAt: null,
   detail: "",
   ...overrides,
 });
@@ -182,7 +180,7 @@ describe("agents", () => {
 
   it("groups agents a turn started under a count of their states", () => {
     const rows = [
-      row({ status: "done", endedAt: 57_000, detail: "Found 3 issues" }),
+      row({ status: "done", detail: "Found 3 issues" }),
       row({
         threadId: "t3",
         label: "codex",
@@ -215,13 +213,6 @@ describe("agents", () => {
     assert.equal(
       plainLine("\n## Fixed `__init__.py` and **the** [docs](https://x.y)"),
       "Fixed __init__.py and the docs (https://x.y)",
-    );
-  });
-
-  it("formats timers with padded seconds and minutes", () => {
-    assert.deepEqual(
-      [formatElapsed(9_400), formatElapsed(65_000), formatElapsed(3_720_000)],
-      ["9s", "1m 05s", "1h 02m"],
     );
   });
 });
@@ -258,15 +249,13 @@ describe("ThreadView", () => {
       label: "claude",
       title: "One",
       status: "working",
-      startedAt: 90_000,
-      endedAt: null,
       detail: "",
     };
     view.item(delegate("d1"), false, true);
     view.item(delegate("d2"), false, true);
     view.agent(agent);
     view.agent({ ...agent, threadId: "t3", title: "Two" });
-    view.agent({ ...agent, status: "done", endedAt: 95_000 });
+    view.agent({ ...agent, status: "done" });
     // An agent at work is not a tool running.
     view.item({ ...delegate("d1"), status: "completed" }, true, true);
     view.item({ ...delegate("d2"), status: "completed" }, true, true);
@@ -682,7 +671,7 @@ describe("loading earlier turns", () => {
 
   it("keeps the terminal's own lines in place", () => {
     const old = new ThreadView("t1");
-    old.earlier("Earlier turns are above");
+    old.notice("info", "Earlier turns are above");
     const late: LogEntry = {
       type: "item",
       item: { kind: "assistant_message", id: "late", text: "late reply" },

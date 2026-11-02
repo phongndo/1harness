@@ -234,11 +234,6 @@ export class ThreadView {
     }
   }
 
-  /** Says, at the top, that earlier turns are yet to load. */
-  earlier(text: string): void {
-    this.transcript.add({ kind: "notice", level: "info", text });
-  }
-
   /**
    * Shows a line of the terminal's own, such as a notice or a command's
    * report, and keeps where it goes among the log's entries, for `rebuild`.
@@ -275,7 +270,7 @@ export class ThreadView {
         this.#locals.push(local);
       }
     };
-    if (earlier) this.earlier(earlier);
+    if (earlier) this.notice("info", earlier);
     for (const [index, entry] of entries.entries()) {
       place(index);
       this.apply(entry, context);
@@ -283,6 +278,10 @@ export class ThreadView {
     place(Number.POSITIVE_INFINITY);
   }
 
+  /**
+   * A notice that comes of the log, such as why a turn failed, which
+   * building the view again from the log shows again; `say` keeps its own.
+   */
   notice(level: "info" | "warning" | "error", text: string): void {
     this.transcript.add({ kind: "notice", level, text });
   }

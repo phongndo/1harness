@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { plainText, spread, truncate, visibleWidth, wrap } from "./text.ts";
+import {
+  oneLineText,
+  outputText,
+  plainText,
+  spread,
+  truncate,
+  visibleWidth,
+  wrap,
+} from "./text.ts";
 
 const BOLD = "\x1b[1m";
 const RESET = "\x1b[0m";
@@ -71,9 +79,9 @@ describe("plainText and wide symbols", () => {
   it("keeps only what prints, as a terminal would show it", () => {
     assert.equal(plainText("a\tb\r\nc\x1b[31mred\x1b[0m"), "a    b\ncred");
     // A command's output overwrites with \r, as a terminal does; prose breaks the line.
-    assert.equal(plainText("Progress: 10\rProgress: 99", false, true), "Progress: 99");
+    assert.equal(outputText("Progress: 10\rProgress: 99"), "Progress: 99");
     assert.equal(plainText("line one\rline two"), "line one\nline two");
-    assert.equal(plainText("Steps:\n1. open\n2. sign in", true), "Steps: 1. open 2. sign in");
+    assert.equal(oneLineText("Steps:\n1. open\n2. sign in"), "Steps: 1. open 2. sign in");
     assert.equal(plainText("bell\x07 and\x85 del\x7f\n✓ 😀 café"), "bell and del\n✓ 😀 café");
   });
 
