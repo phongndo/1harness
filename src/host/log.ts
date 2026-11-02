@@ -157,11 +157,14 @@ export class ThreadLog {
     return this.#add(seq, { type: "html", title, html, at });
   }
 
-  /** Entries added or changed since the last call. */
-  flush(): LoggedEntry[] {
-    const dirty = [...this.#dirty];
-    this.#dirty.clear();
-    return dirty;
+  /** Entries added or changed since they were last written. */
+  unwritten(): LoggedEntry[] {
+    return [...this.#dirty];
+  }
+
+  /** Marks entries written, once the store has committed them. */
+  written(entries: readonly LoggedEntry[]): void {
+    for (const entry of entries) this.#dirty.delete(entry);
   }
 
   #add(seq: number, entry: LogEntry): LogEntry {
