@@ -493,6 +493,10 @@ export class App {
   #openedId: string | null = null;
   /** Opens and resumes waiting on their replies. */
   #opening = 0;
+  /** Until the first open or resume settles, which the composer takes input before. */
+  #starting = true;
+  /** Messages sent while a thread was still opening, for it once it opens. */
+  #held: string[] = [];
   /** A view for no thread, once the startup view belongs to one. */
   #nowhere = new ThreadView("none");
   /** Views standing in for shown threads whose logs are not loaded yet. */
@@ -855,7 +859,10 @@ export class App {
     const resume = this.#settings.resume;
     if (resume) await this.#resume(resume, this.#harness);
     else await this.#open(this.#harness, this.#settings, false);
+    this.#starting = false;
+    // The prompt given on start goes first; it was there before anything typed.
     if (initial.trim() !== "") this.#submit(initial);
+    this.#releaseHeld();
     await this.#done;
     return this.#next;
   }
@@ -1049,6 +1056,7 @@ export class App {
       return;
     } finally {
       this.#announce = null;
+      this.#releaseHeld();
     }
     // As asked for, since the harness may not report them all yet.
     this.#settings = { ...settings, resume: null };
@@ -1079,7 +1087,18 @@ export class App {
       this.#notice("error", `Could not resume ${id}: ${errorMessage(error)}`);
     } finally {
       this.#announce = null;
+      this.#releaseHeld();
     }
+  }
+
+  /** Sends what was held for the thread being opened, or hands it back if none opened. */
+  #releaseHeld(): void {
+    if (this.#starting || this.#opening > 0 || this.#held.length === 0) return;
+    const held = this.#held.splice(0);
+    if (this.#live) {
+      // Queued rather than steered, so each is its own turn, as typed.
+      for (const text of held) this.#send(text, false);
+    } else if (this.#editor.text.trim() === "") this.#editor.set(held.join("\n\n"));
   }
 
   /**
@@ -3500,6 +3519,12 @@ export class App {
     const text = raw.trim();
     if (text === "") return;
     const message = !text.startsWith("/") || text.startsWith("//");
+    if (message && !this.#live && (this.#starting || this.#opening > 0)) {
+      this.#editor.take();
+      if (this.#held.length === 0) this.#notice("info", "Sent once the thread opens.");
+      this.#held.push(text.startsWith("//") ? text.slice(1) : text);
+      return;
+    }
     if (message && !this.#live) {
       // The text stays in the composer for a thread that can take it, wherever it came from.
       if (this.#editor.text.trim() === "") this.#editor.set(raw);

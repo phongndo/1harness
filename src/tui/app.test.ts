@@ -8,7 +8,8 @@ import { HostClient } from "../client/client.ts";
 import { LocalConnection } from "../client/connection.ts";
 import { Host } from "../host/host.ts";
 import { Store } from "../store/store.ts";
-import { registerScripted, scriptedSettings } from "../testing/scripted.ts";
+import { registerDriver } from "../drivers/index.ts";
+import { registerScripted, ScriptedSession, scriptedSettings } from "../testing/scripted.ts";
 import { App } from "./app.ts";
 
 /**
@@ -103,7 +104,7 @@ afterEach(async () => {
 });
 
 async function start(
-  options: { prompt?: string | null; store?: Store | null } = {},
+  options: { prompt?: string | null; store?: Store | null; harness?: string } = {},
 ): Promise<Session> {
   const terminal = new Terminal();
   const keyboard = new Keyboard();
@@ -125,7 +126,7 @@ async function start(
   );
   const app = new App({
     client,
-    harness: "scripted",
+    harness: options.harness ?? "scripted",
     session: { ...scriptedSettings, cwd: root },
     version: "test",
     prompt: options.prompt ?? null,
@@ -199,6 +200,31 @@ describe("App", () => {
     assert.ok(screen.indexOf("Done with first message") < screen.indexOf("┃ second"));
     // The composer empties once a message is sent.
     assert.match(screen, /┃ Ask anything/);
+  });
+
+  it("sends a message typed while the first thread is still starting once it opens", async () => {
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => (open = resolve));
+    const unregisterSlow = registerDriver({
+      id: "slow",
+      label: "Slow",
+      unavailable: () => null,
+      create: (options) => Object.assign(new ScriptedSession(options), { start: () => opened }),
+    });
+    try {
+      const session = await start({ harness: "slow" });
+      await session.sees("Ask anything");
+      await session.type("early\r");
+      await session.type("later\r");
+      assert.doesNotMatch(session.terminal.text(), /No thread is open/);
+      open();
+      const screen = await session.sees("Done with later");
+      assert.ok(screen.indexOf("Done with early") < screen.indexOf("┃ later"));
+      // Neither message is left behind in the composer.
+      assert.match(screen, /┃ Ask anything/);
+    } finally {
+      unregisterSlow();
+    }
   });
 
   it("offers no way back on quitting before any turn ran", async () => {
