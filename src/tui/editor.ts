@@ -41,7 +41,7 @@ export class Editor {
 
   insert(text: string): void {
     const chars = Array.from(text.replace(/\r\n?/g, "\n"));
-    this.#chars.splice(this.#cursor, 0, ...chars);
+    this.#splice(this.#cursor, 0, chars);
     this.#cursor += chars.length;
   }
 
@@ -135,8 +135,13 @@ export class Editor {
   /** Replaces the text from `start` to the cursor, leaving the cursor after it. */
   replaceToken(start: number, text: string): void {
     const chars = Array.from(text);
-    this.#chars.splice(start, this.#cursor - start, ...chars);
+    this.#splice(start, this.#cursor - start, chars);
     this.#cursor = start + chars.length;
+  }
+
+  // Spreading a pasted blob into splice() passes each character as an argument, which overflows the stack.
+  #splice(start: number, deleteCount: number, chars: string[]): void {
+    this.#chars = this.#chars.slice(0, start).concat(chars, this.#chars.slice(start + deleteCount));
   }
 
   /** Whether the text is the user's own draft of several lines, which ↑↓ move within. */
