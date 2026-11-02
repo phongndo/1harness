@@ -23,7 +23,7 @@ import type {
 } from "../core/events.ts";
 import { looksLikeThreadId, shortThreadId } from "../core/thread-id.ts";
 import { errorMessage } from "../core/thread.ts";
-import { contextUsed, formatCost, limitDetail } from "../core/wording.ts";
+import { HARNESS_STATES, contextUsed, formatCost, limitDetail } from "../core/wording.ts";
 import type { ClientEvent, HostClient } from "../client/client.ts";
 import {
   RpcError,
@@ -214,6 +214,8 @@ export class App {
   #client: HostClient;
   /** The harness and settings the next thread starts with. */
   #harness: HarnessId;
+  /** Harness states already told of, so each is said once. */
+  #toldHarness = new Set<string>();
   #settings: SessionOptions;
   #version: string;
   #views = new Map<string, ThreadView>();
@@ -517,6 +519,7 @@ export class App {
         return this.#sessionHandle(live);
       },
       harnesses: () => this.#client.harnesses,
+      checkHarnesses: () => this.#client.call("harnesses.list", {}),
       threads: (scope) => this.#client.call("threads.list", { scope }),
       lookup: (key, load) => this.#lookup(key, load),
       fetch: (key, load) => this.#fetch(key, load),
@@ -1229,6 +1232,7 @@ export class App {
     // /new and /harness start from the thread on screen.
     const info = thread.info;
     this.#harness = thread.harness;
+    this.#tellHarness();
     this.#settings = {
       ...this.#settings,
       cwd: info.cwd,
@@ -1699,6 +1703,9 @@ export class App {
       }
       case "notice":
         this.#notice(event.level, event.text);
+        break;
+      case "harnesses":
+        this.#tellHarness();
         break;
       case "ui":
         this.#ui(event.request);
@@ -2687,6 +2694,33 @@ export class App {
     };
   }
 
+  /**
+   * Says once what stands in the way of the harness in use: that it must sign
+   * in, or what is not known of it. One not installed fails to start, which says so.
+   */
+  #tellHarness(): void {
+    const harness = this.#client.harnesses.find((candidate) => candidate.id === this.#harness);
+    if (!harness?.detail || (harness.state !== "signed-out" && harness.state !== "unchecked"))
+      return;
+    const key = `${harness.id}\0${harness.state}\0${harness.detail}`;
+    if (this.#toldHarness.has(key)) return;
+    this.#toldHarness.add(key);
+    const said = (harness.unavailable ?? `${harness.label}: ${harness.detail}`).replace(/\.$/, "");
+    if (harness.state === "signed-out")
+      this.#notice("warning", `${said}. Once it is, send your message again.`);
+    else this.#notice("info", `${said}.`);
+  }
+
+  /** A harness, its version, and where it stands, such as that it needs signing in. */
+  #harnessStatus(id: HarnessId, version: string | null): string {
+    const harness = this.#client.harnesses.find((candidate) => candidate.id === id);
+    const state = harness && harness.state !== "unchecked" ? HARNESS_STATES[harness.state] : "";
+    const detail = harness?.state === "signed-out" ? harness.detail : null;
+    return [`${this.#harnessLabel(id)}${version ? ` ${version}` : ""}`, state, detail]
+      .filter(Boolean)
+      .join(" · ");
+  }
+
   #status(): void {
     const info = this.#info;
     const current = this.#current;
@@ -2695,7 +2729,7 @@ export class App {
     const model = info.model ?? this.#defaultModel();
     const rows: [string, string][] = [
       ["Thread", `${current.id}${current.title ? ` · ${current.title}` : ""} · ${current.status}`],
-      ["Harness", `${this.#harnessLabel(info.harness)}${info.version ? ` ${info.version}` : ""}`],
+      ["Harness", this.#harnessStatus(info.harness, info.version)],
       ["Session", info.threadId ?? "starts with your first message"],
       ["Folder", info.cwd],
       [

@@ -20,6 +20,7 @@ import { Host } from "./host/host.ts";
 import { PROTOCOL_VERSION } from "./protocol.ts";
 import { serverCommand } from "./server/cli.ts";
 import { ensureServer } from "./server/lifecycle.ts";
+import { harnessesCommand } from "./client/harnesses-cli.ts";
 import { hostsCommand, whoami } from "./client/hosts-cli.ts";
 import { loadHosts, resolveServer } from "./client/hosts.ts";
 import { threadsCommand } from "./client/threads-cli.ts";
@@ -33,6 +34,7 @@ One terminal UI for ${labels.length > 1 ? `${labels.slice(0, -1).join(", ")}, an
 
 Usage: 1harness [options] [prompt]
        1harness server <command>   run, start, stop, or check the server
+       1harness harnesses          say which harnesses are ready, need signing in, or are missing
        1harness threads [words]    list this folder's threads, or search them; show <id> prints one
        1harness watch              report every thread's status to the terminal (OSC 7501)
        1harness hosts <command>    name servers on other machines, for -S
@@ -66,7 +68,7 @@ Environment:
   ONEHARNESS_AUTOSTART=0    run in this one process, with no server
   ONEHARNESS_SOCKET         the server's socket (default: $XDG_RUNTIME_DIR/1harness/server.sock)
   ONEHARNESS_SERVER         the server to use, as -S names one
-  ONEHARNESS_CLAUDE_PATH    claude executable (default: claude on PATH, else the SDK's copy)
+  ONEHARNESS_CLAUDE_PATH    claude executable (default: claude on PATH)
   ONEHARNESS_CODEX_PATH     codex executable (default: codex on PATH)
   ONEHARNESS_OPENCODE_PATH  opencode executable (default: opencode on PATH)
 `;
@@ -368,6 +370,8 @@ try {
   const [command, ...rest] = args;
   if (command === "server") {
     process.exitCode = await serverCommand(rest, version);
+  } else if (command === "harnesses") {
+    process.exitCode = await harnessesCommand(rest, () => connectClient(version, [], server));
   } else if (command === "threads") {
     process.exitCode = await threadsCommand(rest, () => connectClient(version, [], server));
   } else if (command === "watch") {
@@ -466,7 +470,6 @@ async function main(argv: string[], server: string | undefined, version: string)
         session,
         prompt,
         version,
-
         extensions,
         warnings,
         server,

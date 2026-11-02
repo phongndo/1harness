@@ -102,8 +102,10 @@ export interface CommandContext {
   readonly info: SessionInfo | null;
   /** The thread's session; throws when there is no thread. */
   session(): SessionHandle;
-  /** The harnesses threads can run on. */
+  /** The harnesses threads can run on, as last checked. */
   harnesses(): HarnessInfo[];
+  /** The harnesses after asking each whether it is installed and signed in. */
+  checkHarnesses(): Promise<HarnessInfo[]>;
   /** 1harness's threads, newest first, kept ones included. */
   threads(scope: "open" | "recent" | "archived"): Promise<ThreadListing[]>;
   /**

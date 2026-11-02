@@ -102,6 +102,9 @@ export class HostClient {
       case "removed":
         this.threads.delete(event.threadId);
         break;
+      case "harnesses":
+        this.harnesses = event.harnesses;
+        break;
       default:
         break;
     }

@@ -34,7 +34,7 @@ describe("ClaudeSession", () => {
       runtimeMode: "supervised",
       interactionMode: "default",
       resume: null,
-      executable: null,
+      executable: "claude",
       query: silent,
     });
     const events: HarnessEvent[] = [];

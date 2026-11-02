@@ -1,3 +1,4 @@
+import type { HarnessState } from "../protocol.ts";
 import {
   modeRank,
   type ApprovalAction,
@@ -217,4 +218,12 @@ export const EFFORT_DESCRIPTIONS: Record<string, string> = {
   high: "reasons longer before answering",
   xhigh: "reasons much longer, for hard problems",
   max: "the most reasoning the model allows",
+};
+
+/** Where a harness stands, as lists say it, in the same words for every harness. */
+export const HARNESS_STATES: Record<HarnessState, string> = {
+  ready: "ready",
+  "signed-out": "needs sign-in",
+  missing: "not installed",
+  unchecked: "installed",
 };

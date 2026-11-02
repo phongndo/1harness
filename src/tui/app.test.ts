@@ -251,6 +251,24 @@ describe("App", () => {
     }
   });
 
+  it("says once that the harness in use must sign in, through its own CLI", async () => {
+    const unregisterSignedOut = registerDriver({
+      id: "signedout",
+      label: "Signed Out",
+      unavailable: () => null,
+      signIn: async () => ({ state: "signed-out", detail: "run `signedout login` to sign in" }),
+      create: (options) => new ScriptedSession(options),
+    });
+    try {
+      const session = await start({ harness: "signedout" });
+      const screen = await session.sees(/Once it is, send your\s+message again/);
+      assert.match(screen, /Signed Out is not signed in: run `signedout login` to sign in\./);
+      assert.equal(screen.match(/is not signed in/g)?.length, 1);
+    } finally {
+      unregisterSignedOut();
+    }
+  });
+
   it("offers no way back on quitting before any turn ran", async () => {
     const session = await start();
     await session.sees("Ask anything");

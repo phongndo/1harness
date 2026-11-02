@@ -107,8 +107,8 @@ const HISTORY_MESSAGES = 200;
 const STDERR_TAIL_BYTES = 16_384;
 
 export interface ClaudeSessionConfig extends SessionOptions {
-  /** A `claude` executable to run instead of the SDK's bundled one. */
-  executable: string | null;
+  /** The user's own `claude`, never the SDK's bundled copy, so its login and settings apply. */
+  executable: string;
   /** Starts the SDK query; tests give a fake. */
   query?: typeof query;
 }
@@ -364,7 +364,7 @@ export class ClaudeSession implements HarnessSession {
       ...(this.#bypassAllowed ? { allowDangerouslySkipPermissions: true } : {}),
       ...(this.info.model ? { model: this.info.model } : {}),
       ...(this.info.effort ? { effort: this.info.effort as EffortLevel } : {}),
-      ...(this.#config.executable ? { pathToClaudeCodeExecutable: this.#config.executable } : {}),
+      pathToClaudeCodeExecutable: this.#config.executable,
       ...(resume ? { resume } : {}),
       // Added to the servers Claude Code reads from its own settings, for this session only.
       ...(this.#config.mcpServers ? { mcpServers: claudeMcpServers(this.#config.mcpServers) } : {}),

@@ -14,7 +14,13 @@ import { configDir, stateDir } from "../core/paths.ts";
 import { errorMessage, type Thread } from "../core/thread.ts";
 import { isThreadIdPrefix, shortThreadId } from "../core/thread-id.ts";
 import { formatTokens } from "../core/wording.ts";
-import { drivers, findDriver, harnessName as label } from "../drivers/index.ts";
+import {
+  checkHarness,
+  drivers,
+  findDriver,
+  harnessInfo,
+  harnessName as label,
+} from "../drivers/index.ts";
 import type { ToolDefinition } from "../extensions/api.ts";
 import type { ExtensionHost } from "../extensions/host.ts";
 import { ToolServer } from "../extensions/tool-server.ts";
@@ -219,6 +225,8 @@ export class Host {
   /** The tools that show the user pages, which every session gets with the orchestrator's. */
   readonly pageTools: ToolDefinition[];
   #feed: EventFeed;
+  /** The harnesses as clients were last told of them. */
+  #harnessesSaid = "";
   #logs = new Map<string, ThreadLog>();
   /** The state each thread was last announced with. */
   #announced = new Map<string, string>();
@@ -287,6 +295,10 @@ export class Host {
       ...(options.idleCloseMs === undefined ? {} : { idleCloseMs: options.idleCloseMs }),
     });
     this.orchestrator = new Orchestrator(this.manager, options.env);
+    // Through the host, so clients hear of what a delegation's check finds.
+    this.orchestrator.checkHarness = async (driver) =>
+      (await this.#checkHarnesses(driver.id)).find((harness) => harness.id === driver.id) ??
+      harnessInfo(driver, options.env ?? process.env);
     this.orchestrator.storedTask = (id) => {
       const row = this.#store?.thread(id);
       return row ? { ...row, runs: this.#store!.runs(id) } : null;
@@ -679,6 +691,13 @@ export class Host {
           managed.thread.message(id),
         );
         if (entry) this.#feed.emit({ type: "entry", threadId: managed.id, entry });
+        // A harness that fails may have been signed out; asking it lets clients say so.
+        if (
+          (change.type === "turn.ended" && change.status === "failed") ||
+          (change.type === "session.closed" && change.error) ||
+          (change.type === "error" && change.unsent)
+        )
+          void this.#checkHarnesses(managed.harness, true).catch(() => {});
         // Streamed text changes nothing a thread's state shows.
         if (change.type !== "item.delta") this.#announce(managed);
         return;
@@ -923,13 +942,27 @@ export class Host {
 
   // Commands
 
+  /** What is known of each harness now, from the last check. */
   #harnesses(): HarnessInfo[] {
     const env = this.#options.env ?? process.env;
-    return drivers().map((driver) => ({
-      id: driver.id,
-      label: driver.label,
-      unavailable: driver.unavailable(env),
-    }));
+    return drivers().map((driver) => harnessInfo(driver, env));
+  }
+
+  /**
+   * Asks a harness, or every one, where it stands, and tells every client when
+   * that changed. Returns what is known of them all.
+   */
+  async #checkHarnesses(id?: HarnessId, force = false): Promise<HarnessInfo[]> {
+    const env = this.#options.env ?? process.env;
+    const asked = drivers().filter((driver) => id === undefined || driver.id === id);
+    await Promise.all(asked.map((driver) => checkHarness(driver, env, force)));
+    const harnesses = this.#harnesses();
+    const said = JSON.stringify(harnesses);
+    if (said !== this.#harnessesSaid) {
+      this.#harnessesSaid = said;
+      this.#feed.emit({ type: "harnesses", harnesses });
+    }
+    return harnesses;
   }
 
   #commandThread(managed: ManagedThread, client: Client): CommandThread {
@@ -993,6 +1026,7 @@ export class Host {
         return sessionHandle(managed.thread);
       },
       harnesses: () => this.#harnesses(),
+      checkHarnesses: () => this.#checkHarnesses(),
       threads: (scope) => this.call(client.id, "threads.list", { scope }),
       lookup: <T>(key: string, load: () => Promise<T[]>): T[] => {
         const cached = client.lookups.get(prefix + key);
@@ -1271,6 +1305,8 @@ export class Host {
             origin: "user",
             openedBy: client.id,
           });
+          // What was known of its harness may be old; a change goes out as an event.
+          void this.#checkHarnesses(managed.harness).catch(() => {});
           return this.#state(managed);
         } catch (error) {
           // One that could not start leaves nothing to show.
@@ -1285,21 +1321,26 @@ export class Host {
         }
       },
       "thread.resume": async (client, { id: typed, harness, settings }) => {
+        // As thread.open does, the harness it comes back on is asked where it stands.
+        const shown = (managed: ManagedThread) => {
+          void this.#checkHarnesses(managed.harness).catch(() => {});
+          return this.#state(managed);
+        };
         const id = this.#resolveId(typed);
         const own = this.manager.get(id);
-        if (own && own.status !== "closed") return this.#state(own);
+        if (own && own.status !== "closed") return shown(own);
         // A stored one, closed or not, comes back parked.
         const reopened = await this.#reopen(id);
-        if (reopened) return this.#state(reopened);
+        if (reopened) return shown(reopened);
         if (own) throw new RpcError("thread_closed", `${id} is closed`);
         // A native thread a 1harness thread runs, or ran, opens that thread.
         const running = this.manager
           .list()
           .find((managed) => managed.status !== "closed" && managed.thread.info.threadId === id);
-        if (running) return this.#state(running);
+        if (running) return shown(running);
         const stored = this.#store?.threadByNative(id);
         const again = stored ? await this.#reopen(stored.id) : null;
-        if (again) return this.#state(again);
+        if (again) return shown(again);
         return this.#handlers["thread.open"](client, {
           harness,
           settings: { ...settings, resume: id },
@@ -1553,7 +1594,7 @@ export class Host {
         await this.#open(threadId).thread.command(command, args);
         return null;
       },
-      "harnesses.list": async () => this.#harnesses(),
+      "harnesses.list": async (_client, { id }) => this.#checkHarnesses(id),
       "commands.list": async (client, { threadId }) => this.#commandList(client, threadId),
       "commands.run": async (client, { threadId, name, args }) => {
         const command = (await this.#commandSet(client, threadId)).commands.find(name);

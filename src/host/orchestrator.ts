@@ -1,7 +1,14 @@
 import { isRuntimeMode, modeRank } from "../core/events.ts";
-import { drivers, findDriver } from "../drivers/index.ts";
+import {
+  checkHarness,
+  drivers,
+  findDriver,
+  harnessInfo,
+  type DriverDefinition,
+} from "../drivers/index.ts";
 import type { ToolContext, ToolDefinition } from "../extensions/api.ts";
 import type { TaskRow } from "../store/store.ts";
+import type { HarnessInfo } from "../protocol.ts";
 import {
   ModeError,
   titleFrom,
@@ -116,6 +123,9 @@ export class Orchestrator {
   #byRequest = new Map<string, Promise<Task>>();
   /** Tasks being started in each tree, counted against its limits before their threads exist. */
   #reserved = new Map<string, number>();
+  /** Asks a harness where it stands before work goes to it; the host tells its clients too. */
+  checkHarness: (driver: DriverDefinition) => Promise<HarnessInfo> = (driver) =>
+    checkHarness(driver, this.#env);
   /** A finished task's thread once it has left memory for the store. */
   storedTask: (id: string) => Pick<ManagedThread, "harness" | "title" | "runs" | "error"> | null =
     () => null;
@@ -475,7 +485,7 @@ export class Orchestrator {
         plan: info.interactionMode === "plan",
       },
       harnesses: drivers().map((driver) => {
-        const reason = driver.unavailable(this.#env);
+        const reason = harnessInfo(driver, this.#env).unavailable;
         return {
           id: driver.id,
           label: driver.label,
@@ -533,7 +543,7 @@ export class Orchestrator {
     const harness = text(input, "harness") ?? caller.harness;
     const driver = findDriver(harness);
     if (!driver) throw new OrchestrationError("harness_unavailable", `no harness named ${harness}`);
-    const reason = driver.unavailable(this.#env);
+    const { unavailable: reason } = await this.checkHarness(driver);
     if (reason) throw new OrchestrationError("harness_unavailable", reason);
 
     const info = caller.thread.info;

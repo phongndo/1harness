@@ -8,9 +8,11 @@ work to each other across harnesses.
 ## Use
 
 1harness drives the harnesses you already have installed, with their own
-logins and settings: `claude`, `codex`, `opencode`, or `fx` on `PATH`.
+logins and settings: `claude`, `codex`, `opencode`, or `fx` on `PATH`. Each
+signs in through its own CLI, such as `claude auth login` or `codex login`.
 
 ```sh
+1harness harnesses        # which harnesses are ready, need signing in, or are missing
 1harness                  # Claude Code in the current folder
 1harness -H codex         # another harness
 1harness --help           # every option, subcommand, and environment variable

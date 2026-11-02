@@ -1,0 +1,98 @@
+import assert from "node:assert/strict";
+import { describe, it, mock } from "node:test";
+import type { HarnessInfo } from "../protocol.ts";
+import type { HostClient } from "./client.ts";
+import { HARNESSES_HELP, harnessesCommand, harnessesText } from "./harnesses-cli.ts";
+
+const harnesses: HarnessInfo[] = [
+  {
+    id: "claude",
+    label: "Claude Code",
+    state: "ready",
+    detail: null,
+    unavailable: null,
+    path: "/usr/local/bin/claude",
+  },
+  {
+    id: "codex",
+    label: "Codex",
+    state: "signed-out",
+    detail: "run `codex login` to sign in",
+    unavailable: "Codex is not signed in: run `codex login` to sign in",
+    path: "/usr/local/bin/codex",
+  },
+  {
+    id: "acme",
+    label: "Acme",
+    state: "unchecked",
+    detail: null,
+    unavailable: null,
+    path: "/opt/acme",
+  },
+  {
+    id: "fx",
+    label: "fx",
+    state: "missing",
+    detail: "fx is not installed: no `fx` on PATH",
+    unavailable: "fx is not installed: no `fx` on PATH",
+    path: null,
+  },
+];
+
+describe("harnessesText", () => {
+  it("says where each harness stands, and what to do about it or where it is", () => {
+    assert.equal(
+      harnessesText(harnesses),
+      [
+        "claude  ready          /usr/local/bin/claude",
+        "codex   needs sign-in  run `codex login` to sign in",
+        "acme    installed      /opt/acme",
+        "fx      not installed  fx is not installed: no `fx` on PATH",
+        "",
+      ].join("\n"),
+    );
+  });
+});
+
+describe("harnessesCommand", () => {
+  it("prints its help without reaching a server", async () => {
+    let output = "";
+    const write = mock.method(process.stdout, "write", (chunk: unknown) => {
+      output += String(chunk);
+      return true;
+    });
+    try {
+      const status = await harnessesCommand(["--help"], async () => {
+        throw new Error("reached a server");
+      });
+      assert.equal(status, 0);
+    } finally {
+      write.mock.restore();
+    }
+    assert.equal(output, HARNESSES_HELP);
+  });
+
+  it("asks the server for every harness", async () => {
+    let output = "";
+    const asked: unknown[] = [];
+    const client = {
+      connect: async () => {},
+      close: async () => {},
+      call: async (method: string, params: unknown) => {
+        asked.push([method, params]);
+        return harnesses;
+      },
+    } as unknown as HostClient;
+    const write = mock.method(process.stdout, "write", (chunk: unknown) => {
+      output += String(chunk);
+      return true;
+    });
+    try {
+      assert.equal(await harnessesCommand(["--json"], async () => client), 0);
+    } finally {
+      write.mock.restore();
+    }
+    assert.deepEqual(asked, [["harnesses.list", {}]]);
+    assert.deepEqual(JSON.parse(output), harnesses);
+  });
+});

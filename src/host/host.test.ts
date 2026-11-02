@@ -13,7 +13,7 @@ import { agentRowOf } from "../tui/agents.ts";
 import { ThreadView } from "../tui/view.ts";
 import { Store } from "../store/store.ts";
 import { ScriptedSession, registerScripted } from "../testing/scripted.ts";
-import { registerDriver } from "../drivers/index.ts";
+import { registerDriver, type DriverDefinition, type SignIn } from "../drivers/index.ts";
 import { Host } from "./host.ts";
 import { UNKNOWN_OUTCOME } from "./manager.ts";
 
@@ -49,6 +49,11 @@ after(() => {
   for (const undo of unregister) undo();
   rmSync(root, { recursive: true, force: true });
 });
+
+/** Where the `gated` harness stands, as a client last heard. */
+function gatedState(client: HostClient): string | undefined {
+  return client.harnesses.find((harness) => harness.id === "gated")?.state;
+}
 
 function newHost(extensions: string[] = [], store: Store | null = null): Host {
   host = new Host({
@@ -217,6 +222,53 @@ describe("Host", () => {
       await client.call("thread.rename", { threadId: first.id, title: "kept" });
       await settle();
       assert.ok(client.threads.has(first.id), "the thread gone back to stays");
+    } finally {
+      undo();
+    }
+  });
+
+  it("asks a thread's harness where it stands as it opens, comes back, or fails to start a turn", async () => {
+    newHost();
+    let answer: SignIn = { state: "signed-out", detail: "run `gated login` to sign in" };
+    let asked = 0;
+    const gated: DriverDefinition = {
+      id: "gated",
+      label: "Gated",
+      unavailable: () => null,
+      signIn: async () => {
+        asked++;
+        return answer;
+      },
+      create: (options) =>
+        Object.assign(new ScriptedSession(options), {
+          startTurn: async () => {
+            throw new Error("Not logged in");
+          },
+        }),
+    };
+    const undo = registerDriver(gated);
+    try {
+      const client = await connect("tui");
+      const thread = await client.call("thread.open", { harness: "gated", settings });
+      await settle();
+      assert.equal(asked, 1);
+      assert.equal(gatedState(client), "signed-out", "clients hear what the check found");
+      await client.call("thread.resume", { id: thread.id, harness: "gated", settings });
+      await settle();
+      assert.equal(asked, 2);
+      answer = { state: "ready" };
+      await client.call("harnesses.list", { id: "gated" });
+      assert.equal(gatedState(client), "ready");
+      // A ready harness is not asked again, unless a turn will not start on it.
+      answer = { state: "signed-out", detail: "run `gated login` to sign in" };
+      await client.call("thread.send", { threadId: thread.id, text: "hi" });
+      await settle();
+      assert.equal(gatedState(client), "signed-out");
+      // A delegation's check reaches clients too.
+      answer = { state: "ready" };
+      assert.equal((await host.orchestrator.checkHarness(gated)).state, "ready");
+      await settle();
+      assert.equal(gatedState(client), "ready");
     } finally {
       undo();
     }

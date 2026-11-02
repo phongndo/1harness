@@ -125,11 +125,24 @@ export interface CommandInfo {
   completes: boolean;
 }
 
+/**
+ * Where a harness stands, the same for every harness: `ready` is installed and
+ * signed in; `signed-out` is installed but must sign in, in its own CLI;
+ * `missing` is not installed; `unchecked` is installed, with its sign-in not
+ * known, as for a harness with no way to ask.
+ */
+export type HarnessState = "ready" | "signed-out" | "missing" | "unchecked";
+
 export interface HarnessInfo {
   id: HarnessId;
   label: string;
-  /** Why it cannot run here, or null when it can. */
+  state: HarnessState;
+  /** What to do about the state, such as how to sign in or install it; null when ready. */
+  detail: string | null;
+  /** Why it cannot run here, or null when it can: the detail of `missing` and `signed-out`. */
   unavailable: string | null;
+  /** The executable it runs, where it is installed. */
+  path: string | null;
 }
 
 /** What the host asks of the client running a command, or tells it. */
@@ -170,7 +183,9 @@ export type HostEvent =
   | { seq: number; type: "notice"; level: "info" | "warning" | "error"; text: string }
   | { seq: number; type: "ui"; clientId: string; request: UiRequest }
   /** A pending pick was answered or dropped; the client closes it. */
-  | { seq: number; type: "ui.done"; clientId: string; id: string };
+  | { seq: number; type: "ui.done"; clientId: string; id: string }
+  /** What a check found of the harnesses, when it changed. */
+  | { seq: number; type: "harnesses"; harnesses: HarnessInfo[] };
 
 /** A thread a client can open again, from the host's records. */
 export interface ThreadListing {
@@ -367,7 +382,8 @@ export interface Methods {
     params: { threadId: string; command: NativeCommand; args: string };
     result: null;
   };
-  "harnesses.list": { params: Record<string, never>; result: HarnessInfo[] };
+  /** Every harness, after asking `id`, or all of them, whether it is installed and signed in. */
+  "harnesses.list": { params: { id?: HarnessId }; result: HarnessInfo[] };
   "commands.list": { params: { threadId: string | null }; result: CommandInfo[] };
   "commands.run": {
     params: { threadId: string | null; name: string; args: string };

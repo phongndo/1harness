@@ -1,14 +1,15 @@
 import type { McpAction, McpServer, ModelOption } from "../core/events.ts";
-import type { ThreadListing } from "../protocol.ts";
+import type { HarnessInfo, ThreadListing } from "../protocol.ts";
 import { looksLikeThreadId, shortThreadId } from "../core/thread-id.ts";
 import { errorMessage } from "../core/thread.ts";
-import { EFFORT_DESCRIPTIONS, MODE_DESCRIPTIONS } from "../core/wording.ts";
+import { EFFORT_DESCRIPTIONS, HARNESS_STATES, MODE_DESCRIPTIONS } from "../core/wording.ts";
 import {
   completion,
   liveSession,
   type CommandContext,
   type CommandDefinition,
   type Completions,
+  type PickEntry,
 } from "./registry.ts";
 import { describeMcpServer, mcpListReport, mcpServerReport } from "./reports.ts";
 
@@ -80,14 +81,33 @@ const quit: CommandDefinition = {
   run: (context) => context.exit(),
 };
 
-/** Every harness, with the current one marked. */
+/** A harness as a pick lists it: where it stands, and what to do about that. */
+export function harnessEntry(harness: HarnessInfo, current: string | null): PickEntry {
+  const state = HARNESS_STATES[harness.state];
+  return {
+    label: harness.id,
+    detail: harness.detail ? `${harness.label} · ${harness.detail}` : harness.label,
+    tag:
+      harness.id !== current ? state : harness.state === "ready" ? "current" : `current · ${state}`,
+  };
+}
+
+/** Every harness, with the current one marked, and those that cannot run saying why. */
 function harnessCompletions(context: CommandContext): Completions {
   return {
     start: 0,
     items: context
       .harnesses()
-      .map((driver) =>
-        completion(driver.id, driver.id === context.harness ? "current" : driver.label),
+      .map((harness) =>
+        completion(
+          harness.id,
+          [
+            harness.id === context.harness ? "current" : harness.label,
+            harness.unavailable ? HARNESS_STATES[harness.state] : "",
+          ]
+            .filter(Boolean)
+            .join(" · "),
+        ),
       ),
   };
 }
@@ -209,20 +229,16 @@ const harness: CommandDefinition = {
     };
   },
   async run(context, args) {
-    const all = context.harnesses();
     const [name = "", flag = ""] = args.split(/\s+/);
+    // A pick shows where each stands now, such as one signed in since.
+    const all = name ? context.harnesses() : await context.checkHarnesses();
     if (flag && flag !== "fresh") throw new Error("Usage: /harness [name] [fresh]");
     const fresh = flag === "fresh";
     let chosen = name ? namedHarness(context, name) : undefined;
     if (!chosen) {
       const index = await context.ui.pick(
         "Harnesses",
-        all.map((driver) => ({
-          label: driver.id,
-          detail: driver.unavailable ?? driver.label,
-          tag:
-            driver.id === context.harness ? "current" : driver.unavailable ? "not installed" : "",
-        })),
+        all.map((driver) => harnessEntry(driver, context.harness)),
         {
           initial: Math.max(
             0,
