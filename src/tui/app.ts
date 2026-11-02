@@ -1639,6 +1639,7 @@ export class App {
       figure: (figure: Figure, columns: number) => this.#figure(figure, columns),
       image: (path: string) => this.#image(path),
       html: (html: string, columns: number) => this.#page(html, columns),
+      threadTitle: (threadId: string) => this.#client.threads.get(threadId)?.title || null,
     };
   }
 
@@ -3948,7 +3949,7 @@ export class App {
     const what = first.request.kind === "question" ? "has a question" : "needs approval";
     const others = new Set(waiting.map((open) => open.threadId)).size - 1;
     const more = others > 0 ? style.muted(` · ${others} more`) : "";
-    const left = `${style.attention("◆")} ${style.text(thread.id)} ${style.soft(harnessLabel(thread))}${style.muted(" · ")}${style.strong(thread.title || "untitled")} ${style.attention(what)}${more}`;
+    const left = `${style.attention("◆")} ${style.strong(thread.title || "New thread")}  ${style.attention(what)}${more}`;
     return spread(truncate(left, Math.max(0, width - 14)), style.muted("ctrl+o open"), width);
   }
 

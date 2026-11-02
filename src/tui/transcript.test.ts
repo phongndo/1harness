@@ -143,9 +143,9 @@ describe("tool groups", () => {
 });
 
 describe("agents", () => {
-  it("shows one agent with its status and timer", () => {
+  it("shows one agent by what it is doing, and what it runs on", () => {
     assert.deepEqual(plain(renderBlock({ kind: "agents", rows: [row({})] }, context)), [
-      "● t2 Review the parser  claude · haiku        working 1m 05s",
+      "● Review the parser                           claude · haiku",
     ]);
   });
 
@@ -162,14 +162,14 @@ describe("agents", () => {
     ];
     assert.deepEqual(plain(renderBlock({ kind: "agents", rows }, context)), [
       "● 2 agents · 1 needs you · 1 done",
-      "├ t2 Review the parser  claude · haiku              done 22s",
-      "│ Found 3 issues",
-      "└ t3 Write the tests  codex                 needs you 1m 05s",
-      "  Needs approval · ctrl+o to answer",
+      "├ ● Review the parser                         claude · haiku",
+      "│   Found 3 issues",
+      "└ ◆ Write the tests                                    codex",
+      "    Needs approval · ctrl+o to answer",
     ]);
   });
 
-  it("keeps who an agent is when its status does not fit", () => {
+  it("keeps what an agent is doing when what it runs on does not fit", () => {
     const rows = renderBlock(
       { kind: "agents", rows: [row({ status: "needs you" })] },
       {
@@ -177,7 +177,7 @@ describe("agents", () => {
         width: 17,
       },
     );
-    assert.deepEqual(plain(rows), ["◆ t2 Review the …"]);
+    assert.deepEqual(plain(rows), ["◆ Review the par…"]);
   });
 
   it("previews a reply as the transcript reads it, code spans whole", () => {
@@ -221,8 +221,8 @@ describe("ThreadView", () => {
     assert.equal(view.transcript.running, false);
     assert.deepEqual(plain(view.transcript.view(context, 10, 0).rows).slice(-3), [
       "● 2 agents · 1 working · 1 done",
-      "├ t2 One  claude                                     done 5s",
-      "└ t3 Two  claude                                 working 10s",
+      "├ ● One                                               claude",
+      "└ ● Two                                               claude",
     ]);
   });
 
@@ -244,9 +244,9 @@ describe("ThreadView", () => {
       "● Ran ls",
       "",
       "● 3 agents · 3 working",
-      "├ t2 One  codex                               working 1m 05s",
-      "├ t3 Two  codex                               working 1m 05s",
-      "└ t4 Three  codex                             working 1m 05s",
+      "├ ● One                                                codex",
+      "├ ● Two                                                codex",
+      "└ ● Three                                              codex",
       "",
       "● Ran git status",
     ]);

@@ -95,7 +95,7 @@ export interface AgentRow {
   threadId: string;
   /** The parent's tool call that started the agent, which this row shows instead. */
   callId: string | null;
-  /** `claude · haiku`. */
+  /** What it runs on: `codex · gpt-6.1-sol · xhigh`. */
   label: string;
   title: string;
   status: AgentStatus;
@@ -109,14 +109,13 @@ export function agentRowOf(thread: ThreadState): AgentRow {
   const status = agentStatus(thread);
   const run = thread.lastRun;
   const asking = thread.requests[0];
+  // Only what asks for something: a question or approval, or why it failed.
   const detail =
     status === "needs you"
       ? `${asking?.kind === "question" ? "Has a question" : "Needs approval"} · ctrl+o to answer`
-      : status === "done"
-        ? plainLine(run?.result ?? "") || "Finished without a reply"
-        : status === "failed"
-          ? plainLine(run?.error ?? thread.error ?? "")
-          : "";
+      : status === "failed"
+        ? plainLine(run?.error ?? thread.error ?? "")
+        : "";
   return {
     threadId: thread.id,
     callId: thread.parentCallId,
@@ -128,10 +127,14 @@ export function agentRowOf(thread: ThreadState): AgentRow {
   };
 }
 
-/** `claude · haiku`, or the harness alone when its model is its default. */
+/** What a thread runs on, `codex · gpt-6.1-sol · xhigh`; a default model or effort is left out. */
+export function runsOn(harness: string, model: string | null, effort: string | null): string {
+  return [harness, model, effort].filter(Boolean).join(" · ");
+}
+
+/** What a live thread runs on, as `runsOn` says it. */
 export function harnessLabel(thread: ThreadState): string {
-  const model = thread.info.model;
-  return model ? `${thread.harness} · ${model}` : thread.harness;
+  return runsOn(thread.harness, thread.info.model, thread.info.effort);
 }
 
 /** The first line of text with Markdown markers dropped, for one-line previews. */

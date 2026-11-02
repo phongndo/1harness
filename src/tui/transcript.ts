@@ -3,7 +3,6 @@ import { fileURLToPath } from "node:url";
 import type { ReportSpan } from "../commands/registry.ts";
 import type { CommandAction, FileChange, Item, TodoStep } from "../core/events.ts";
 import {
-  formatElapsed,
   isLive,
   paintStatus,
   plainLine,
@@ -126,6 +125,8 @@ export interface RenderContext {
   mark?: (target: Target, start: number, end: number) => void;
   /** An image file's picture, fetched where the thread runs; undefined until it arrives. */
   image?: (path: string) => Picture | null | undefined;
+  /** What a thread is doing, by its title, for naming the agents that report back. */
+  threadTitle?: (threadId: string) => string | null;
   /**
    * A page's rows at a width: placeholder rows and the picture they show, or
    * a line saying it is being drawn; null to show its text instead.
@@ -375,7 +376,7 @@ export function renderBlock(block: Block, context: RenderContext): string[] {
     case "user":
       return userRows(block, context);
     case "result":
-      return resultRows(block, width);
+      return resultRows(block, context);
     case "thinking":
       return thinkingRows(block.text, context);
     case "worked":
@@ -704,8 +705,11 @@ function userRows(block: Extract<Block, { kind: "user" }>, context: RenderContex
 const THUMBNAIL_ROWS = 12;
 
 /** Who a result is from and how the task ended, over its first line. */
-function resultRows(block: Extract<Block, { kind: "result" }>, width: number): string[] {
-  const head = `${statusDot(block.status)} ${style.text(`Result from ${block.from}`)}`;
+function resultRows(block: Extract<Block, { kind: "result" }>, context: RenderContext): string[] {
+  const { width } = context;
+  // The agent by what it was doing, where the client knows its title.
+  const from = plainText(context.threadTitle?.(block.from) || block.from, true);
+  const head = `${statusDot(block.status)} ${style.text(`Result from ${from}`)}`;
   const rows = [truncate(`${head} ${style.muted("·")} ${paintStatus(block.status)}`, width)];
   const line = plainLine(block.text);
   if (line) rows.push(truncate(`  ${style.muted(line)}`, width));
@@ -1180,17 +1184,25 @@ const STATUS_ORDER: readonly AgentStatus[] = [
   "idle",
 ];
 
-/** One agent's rows: who and what with its status and timer, then what it found or asks. */
+/**
+ * One agent's rows: its status dot and what it is doing, with what it runs
+ * on at the right, then, where it asks for something, what.
+ */
 function agentRow(row: AgentRow, lead: string, hang: string, context: RenderContext): string[] {
-  const time = formatElapsed((row.endedAt ?? context.now) - row.startedAt);
-  // The title comes before the harness, so a narrow screen cuts the harness first.
-  const title = plainText(row.title, true);
-  const left = `${lead}${style.text(row.threadId)} ${style.strong(title)}  ${style.soft(row.label)}`;
-  const right = `${paintStatus(row.status)} ${style.muted(time)}`;
+  const title = `${lead}${style.strong(plainText(row.title, true))}`;
+  // Too narrow for both, what it is doing stays and what it runs on goes.
+  const fits = visibleWidth(title) + 2 + visibleWidth(row.label) <= context.width;
+  const rows = [
+    fits ? spread(title, style.muted(row.label), context.width) : truncate(title, context.width),
+  ];
   const shown = plainText(row.detail, true);
-  const detail = row.status === "needs you" ? style.attention(shown) : style.muted(shown);
-  const rows = [spread(left, right, context.width)];
-  if (row.detail) rows.push(truncate(hang + detail, context.width));
+  if (shown)
+    rows.push(
+      truncate(
+        hang + (row.status === "needs you" ? style.attention(shown) : style.muted(shown)),
+        context.width,
+      ),
+    );
   return rows;
 }
 
@@ -1214,8 +1226,14 @@ function agentRows(block: Extract<Block, { kind: "agents" }>, context: RenderCon
   ];
   block.rows.forEach((row, index) => {
     const last = index === block.rows.length - 1;
+    const dot = isLive(row.status) && !context.blink ? "  " : `${statusDot(row.status)} `;
     rows.push(
-      ...agentRow(row, style.muted(last ? "└ " : "├ "), style.muted(last ? "  " : "│ "), context),
+      ...agentRow(
+        row,
+        `${style.muted(last ? "└ " : "├ ")}${dot}`,
+        style.muted(last ? "    " : "│   "),
+        context,
+      ),
     );
   });
   return rows;

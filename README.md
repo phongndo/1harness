@@ -117,16 +117,17 @@ its thread's ID, such as `t2`, and a retried `requestId` returns the same task. 
 eight threads working and sixteen with a harness running; `task_cancel` on a
 finished task closes its thread.
 
-A thread an agent starts appears as a row in its parent's conversation, with its
-status, a timer, and what it found; on Claude Code and Codex the row takes the
-place of the call that started it. Its approvals and questions wait in its own
+A thread an agent starts appears as a row in its parent's conversation: a dot
+for its status, what it is doing, and the harness, model, and effort it runs
+on; on Claude Code and Codex the row takes the place of the call that started
+it. Its approvals and questions wait in its own
 thread: a line above the composer says an agent needs you, ctrl+o opens it, and
-alt+↑ goes back to the thread that started it. `/threads` (or ctrl+t) switches
-between threads, shown as a tree. Esc and `/stop` stop the thread on screen and
+alt+↑ goes back to the thread that started it. `/resume` (or ctrl+t) switches
+between threads. Esc stops the thread on screen and
 every agent under it; what they would have reported is not sent back, but
 messages you queued still run.
 `/close` ends a thread along with the threads it started. A thread you leave
-stays open, working or idle, and `/threads` switches back to it; one you leave
+stays open, working or idle, and `/resume` switches back to it; one you leave
 with nothing in it is dropped. A thread whose harness sits idle for 30 minutes,
 or ends on its own, keeps its place: the harness is closed to free it, and your
 next message resumes the harness's own thread, or starts a new one with a
