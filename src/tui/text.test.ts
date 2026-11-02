@@ -74,6 +74,7 @@ describe("plainText and wide symbols", () => {
     assert.equal(plainText("Progress: 10\rProgress: 99", false, true), "Progress: 99");
     assert.equal(plainText("line one\rline two"), "line one\nline two");
     assert.equal(plainText("Steps:\n1. open\n2. sign in", true), "Steps: 1. open 2. sign in");
+    assert.equal(plainText("bell\x07 and\x85 del\x7f\n✓ 😀 café"), "bell and del\n✓ 😀 café");
   });
 
   it("counts emoji that terminals draw wide as two columns", () => {

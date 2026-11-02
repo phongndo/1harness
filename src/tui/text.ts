@@ -94,6 +94,15 @@ function wideEnclosed(code: number): boolean {
   );
 }
 
+/** Whether text has only printable characters and line breaks, as `plainText` leaves it. */
+function isPlain(text: string): boolean {
+  for (let index = 0; index < text.length; index++) {
+    const code = text.charCodeAt(index);
+    if (code < 0x20 ? code !== 0x0a : code >= 0x7f && code < 0xa0) return false;
+  }
+  return true;
+}
+
 /**
  * Text from outside, such as a command's output or a tool's input, as plain
  * printable text: escape sequences and control characters would move the
@@ -102,6 +111,8 @@ function wideEnclosed(code: number): boolean {
  * ends as, for a command's output.
  */
 export function plainText(text: string, oneLine = false, overwrite = false): string {
+  // Most text is plain already, as a reply is; taking it apart to find so is slow.
+  if (!oneLine && isPlain(text)) return text;
   const unified = stripVTControlCharacters(text).replace(/\r\n/g, "\n");
   // Outside a terminal's output, a lone \r is a line break, as old Mac text has it.
   const lines = (overwrite ? unified : unified.replace(/\r/g, "\n")).split("\n").map((line) => {
