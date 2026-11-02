@@ -230,7 +230,10 @@ after a restart; the agent can ask with `task_status`. Text still streaming when
 
 `/resume` (or ctrl+t) lists your threads by what each is doing, with the
 harness, model, and effort it runs on, newest first. It lists your own
-threads, not the agents they started. A thread is named for what it
+threads, not the agents they started. `/lineage` lists those the same way:
+the agents under the thread on screen, kept up to date as they work. Enter
+goes into an agent, ← back out to the thread that started it, and the list
+stays open over both until esc. A thread is named for what it
 does by its harness, Claude Code or Codex, after its first turns; until then,
 and on harnesses that name none, by its first message. `/resume 3f9c2a1b` opens a
 thread by its ID, or a harness's own session by its ID, and `/resume <words>`

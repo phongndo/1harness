@@ -444,6 +444,7 @@ export class App {
       }
     | { kind: "info"; title: string; rows: [string, string][] }
     | { kind: "resume"; view: ResumeView; onDone: (id: string | null) => void }
+    | { kind: "lineage"; view: ResumeView }
     | null = null;
   /** The host's progress lines, by request. */
   #progress = new Map<string, (level: "info" | "warning" | "error", text: string) => void>();
@@ -646,6 +647,7 @@ export class App {
         },
         setInput: (text) => this.#editor.set(text),
         threads: (query) => this.#switchThread(query),
+        lineage: () => this.#lineage(),
       },
       session: () => {
         const live = this.#live;
@@ -1181,7 +1183,7 @@ export class App {
   /**
    * The thread list: each of your threads by what it is doing, newest first.
    * With `words`, the threads that mention them. The agents threads started
-   * are left out.
+   * show only in /lineage.
    */
   async #pickThread(
     words: string,
@@ -1215,6 +1217,83 @@ export class App {
         ...(words ? { all: true } : {}),
       }),
     );
+  }
+
+  /**
+   * /lineage: the agents under the thread of yours the one on screen came
+   * from, in the thread list's layout, kept up to date, to go in and out of.
+   */
+  async #lineage(): Promise<void> {
+    if (this.#panel?.kind === "menu") {
+      this.#notice("info", "Answer the open list first; then /lineage shows the agents.");
+      return;
+    }
+    // Agents that finished are closed, so only the store still lists them.
+    const stored = await this.#client
+      .call("threads.list", { scope: "recent", limit: 200 })
+      .catch((): ThreadListing[] => []);
+    const { title } = this.#family(stored);
+    const view = new ResumeView(title || "Agents", () => this.#family(stored).agents, {
+      // On the thread they came from, the first agent; on an agent, that one.
+      initial: this.#currentId,
+      cwd: this.#cwd(),
+      home: homedir(),
+      lineage: true,
+    });
+    this.#panel = { kind: "lineage", view };
+    this.#schedule();
+  }
+
+  /**
+   * What /lineage shows: the title of the thread of yours the one on screen
+   * came from, and the agents under it, parents first, as they stand now.
+   */
+  #family(stored: readonly ThreadListing[]): { title: string; agents: ResumeEntry[] } {
+    type Node = { entry: ResumeEntry; parentId: string | null; createdAt: number };
+    const nodes = new Map<string, Node>();
+    for (const thread of stored)
+      nodes.set(thread.id, {
+        entry: listedEntry(thread),
+        parentId: thread.parentId,
+        createdAt: thread.createdAt,
+      });
+    // Threads open here as they stand now, over what the store last kept of them.
+    for (const thread of this.#client.threads.values()) {
+      const status = agentStatus(thread);
+      nodes.set(thread.id, {
+        entry: {
+          id: thread.id,
+          title: thread.title,
+          on: harnessLabel(thread),
+          cwd: thread.info.cwd,
+          updatedAt: lastActive(thread),
+          depth: 0,
+          // An agent at work, or waiting on you, says so with its dot.
+          dot: isLive(status) ? `${statusDot(status)} ` : "",
+        },
+        parentId: thread.parentId,
+        createdAt: thread.createdAt,
+      });
+    }
+    let root = this.#currentId ? nodes.get(this.#currentId) : undefined;
+    while (root?.parentId && nodes.has(root.parentId)) root = nodes.get(root.parentId);
+    if (!root) return { title: "", agents: [] };
+    const under = new Map<string, Node[]>();
+    for (const node of nodes.values())
+      if (node.parentId) under.set(node.parentId, [...(under.get(node.parentId) ?? []), node]);
+    const agentsOf = (id: string, depth: number): ResumeEntry[] =>
+      (under.get(id) ?? [])
+        .toSorted((a, b) => a.createdAt - b.createdAt)
+        .flatMap((node) => [{ ...node.entry, depth }, ...agentsOf(node.entry.id, depth + 1)]);
+    return { title: root.entry.title, agents: agentsOf(root.entry.id, 0) };
+  }
+
+  /** Puts a thread on screen, opening it again if it has closed. */
+  async #goTo(id: string): Promise<void> {
+    if (id === this.#currentId) return;
+    const target = this.#client.threads.get(id);
+    if (target && target.status !== "closed") this.#show(target);
+    else await this.#resume(id, this.#harness);
   }
 
   /** Shows a thread list and opens the thread chosen from it. */
@@ -2552,7 +2631,7 @@ export class App {
           this.#liveInput(this.#viewer.live, { type: "text", text: event.text });
           return;
         }
-        if (this.#panel?.kind === "resume") {
+        if (this.#panel?.kind === "resume" || this.#panel?.kind === "lineage") {
           this.#panel.view.paste(event.text);
         } else if (this.#prompt) {
           if (this.#prompt.prompt.typing) this.#prompt.prompt.paste(event.text);
@@ -2663,6 +2742,22 @@ export class App {
       // A panel to read closes on any key; typing goes on into the composer.
       this.#panel = null;
       return key.name === "escape" || key.name === "return" || (key.ctrl && key.name === "c");
+    }
+    if (panel.kind === "lineage") {
+      const result = panel.view.key(key, Math.max(1, this.#screen.rows - 12));
+      if (result?.kind === "close") this.#panel = null;
+      // The list stays open over the agent gone into, or the thread come back out to.
+      else if (result?.kind === "choose") void this.#goTo(result.id).catch(() => {});
+      else if (result?.kind === "exit") {
+        const parent = this.#current?.parentId;
+        if (parent) {
+          // Out to an agent, it is selected; out to the thread they came from, the one left stays.
+          if (this.#client.threads.get(parent)?.parentId) panel.view.select(parent);
+          void this.#goTo(parent).catch(() => {});
+        } else this.#notice("info", "This is the thread the agents came from.");
+      }
+      this.#schedule();
+      return true;
     }
     if (panel.kind === "resume") {
       const result = panel.view.key(key, Math.max(1, this.#screen.rows - 12));
@@ -3799,9 +3894,12 @@ export class App {
                 width,
                 Math.max(8, height - rows.length - composer.length - 3),
               )
-            : listed
-              ? listed.render(width, listRows)
-              : [];
+            : this.#panel?.kind === "lineage"
+              ? // Short enough to watch the thread on screen above it.
+                this.#panel.view.render(width, Math.max(10, Math.floor(height * 0.45)))
+              : listed
+                ? listed.render(width, listRows)
+                : [];
       if (listed) list = { menu: listed, row: rows.length };
       if (panel.length > 0) rows.push(...panel, "");
       if (!this.#panel)

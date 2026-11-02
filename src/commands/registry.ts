@@ -57,6 +57,8 @@ export interface CommandUI {
    * mention it, and opens the one chosen; where the client has such a list.
    */
   threads?(query: string): Promise<void>;
+  /** Shows the thread's family as a tree, it and the agents under it, to open one. */
+  lineage?(): Promise<void>;
 }
 
 /** The current thread as a command reaches it, wherever the thread runs. */

@@ -13,6 +13,9 @@ import { pad, plainText, spread, truncate, visibleWidth } from "./text.ts";
 // shows every folder's, then the archived ones. Only your own threads show,
 // not the agents they started. ctrl+r renames the selected thread, ctrl+a
 // archives it or brings it back.
+//
+// /lineage is the same list over one thread's agents, kept up to date as they
+// work: enter goes into one, ← back out, and the list stays open over both.
 
 export interface ResumeEntry {
   id: string;
@@ -48,6 +51,8 @@ export type ResumeResult =
   | { kind: "close" }
   /** A thread renamed, or archived or brought back; the list stays open. */
   | { kind: "rename"; id: string; title: string }
+  /** In /lineage, ← out of the agent on screen. */
+  | { kind: "exit" }
   | { kind: "archive"; id: string; archived: boolean }
   | null;
 
@@ -92,7 +97,10 @@ function age(time: number, now: number): string {
 
 export class ResumeView {
   readonly title: string;
-  #entries: ResumeEntry[];
+  /** The entries, or for /lineage where they change as agents work, how to read them. */
+  #source: ResumeEntry[] | (() => ResumeEntry[]);
+  /** /lineage: every entry, agents at their depths, and no scopes, renames, or archiving. */
+  readonly #lineage: boolean;
   #cwd: string;
   #home: string;
   #scope: Scope;
@@ -100,43 +108,67 @@ export class ResumeView {
   /** The title being written for the selected thread, while ctrl+r renames it. */
   #renaming: { id: string; text: string } | null = null;
   #index = 0;
+  /** /lineage: the agent selected, kept as agents come in above it. */
+  #chosen: string | undefined;
   /** The first entry in view, kept so the selection stays in it. */
   #top = 0;
 
   constructor(
     title: string,
-    entries: ResumeEntry[],
-    options: { initial?: string | null; cwd: string; home?: string; all?: boolean },
+    source: ResumeEntry[] | (() => ResumeEntry[]),
+    options: {
+      initial?: string | null;
+      cwd: string;
+      home?: string;
+      all?: boolean;
+      lineage?: boolean;
+    },
   ) {
     this.title = title;
-    this.#entries = entries;
+    this.#source = source;
+    this.#lineage = options.lineage === true;
+    const entries = this.#entries;
     this.#cwd = options.cwd;
     this.#home = options.home ?? "";
     // This folder's threads, unless it has none, or every folder's were asked for.
     const here = entries.some((entry) => !entry.archived && entry.cwd === options.cwd);
-    this.#scope = (options.all ?? !here) ? "all" : "folder";
+    // /lineage's agents work where their thread does, so no folder column.
+    this.#scope = !this.#lineage && (options.all ?? !here) ? "all" : "folder";
     // On an agent, the thread that started it.
     let initial = options.initial;
     let owner: ResumeEntry | undefined;
     for (const entry of entries) {
       if (entry.depth === 0) owner = entry;
-      else if (entry.id === options.initial) initial = owner?.id;
+      else if (!this.#lineage && entry.id === options.initial) initial = owner?.id;
     }
     this.#index = Math.max(
       0,
       this.#visible().findIndex((entry) => entry.id === initial),
     );
+    this.#chosen = this.selected?.id;
   }
 
-  /** Your threads in scope, less what a search leaves out. */
+  /** /lineage: back on the agent selected, wherever it now is in the list. */
+  #follow(): void {
+    if (!this.#lineage) return;
+    const at = this.#visible().findIndex((entry) => entry.id === this.#chosen);
+    if (at >= 0) this.#index = at;
+  }
+
+  get #entries(): ResumeEntry[] {
+    return typeof this.#source === "function" ? this.#source() : this.#source;
+  }
+
+  /** Your threads in scope, or /lineage's agents, less what a search leaves out. */
   #visible(): ResumeEntry[] {
     const query = this.#query.toLowerCase();
     const shown = this.#entries.filter(
       (entry) =>
-        entry.depth === 0 &&
-        (this.#scope === "archived"
-          ? entry.archived === true
-          : !entry.archived && (this.#scope === "all" || entry.cwd === this.#cwd)),
+        this.#lineage ||
+        (entry.depth === 0 &&
+          (this.#scope === "archived"
+            ? entry.archived === true
+            : !entry.archived && (this.#scope === "all" || entry.cwd === this.#cwd))),
     );
     if (!query) return shown;
     return shown.filter((entry) =>
@@ -159,12 +191,20 @@ export class ResumeView {
     const line = text.replace(/\s+/g, " ");
     if (this.#renaming) this.#renaming.text += line;
     else this.#setQuery(this.#query + line);
+    this.#chosen = this.selected?.id;
   }
 
   #setQuery(query: string): void {
     this.#query = query;
     this.#index = 0;
     this.#top = 0;
+  }
+
+  /** Moves the selection to a thread, where it is listed. */
+  select(id: string): void {
+    const at = this.#visible().findIndex((entry) => entry.id === id);
+    if (at >= 0) this.#index = at;
+    this.#chosen = this.selected?.id;
   }
 
   #move(step: number): void {
@@ -194,7 +234,18 @@ export class ResumeView {
   }
 
   key(key: Key, page = 10): ResumeResult {
+    this.#follow();
+    const result = this.#key(key, page);
+    this.#chosen = this.selected?.id;
+    return result;
+  }
+
+  #key(key: Key, page: number): ResumeResult {
     if (this.#renaming) return this.#renameKey(key);
+    if (this.#lineage) {
+      if (key.name === "left") return { kind: "exit" };
+      if (key.name === "tab" || (key.ctrl && (key.name === "r" || key.name === "a"))) return null;
+    }
     if (key.ctrl && key.name === "r") {
       const chosen = this.selected;
       if (chosen) this.#renaming = { id: chosen.id, text: chosen.title };
@@ -263,12 +314,15 @@ export class ResumeView {
 
   /** The list in at most `height` rows: heading, search line, threads, and hints. */
   render(width: number, height: number, now = Date.now()): string[] {
+    this.#follow();
     const visible = this.#visible();
-    const scopes = SCOPES.map((option) =>
-      option.scope === this.#scope
-        ? style.strong(`◉ ${option.label}`)
-        : style.muted(`○ ${option.label}`),
-    ).join("  ");
+    const scopes = this.#lineage
+      ? ""
+      : SCOPES.map((option) =>
+          option.scope === this.#scope
+            ? style.strong(`◉ ${option.label}`)
+            : style.muted(`○ ${option.label}`),
+        ).join("  ");
     const search = this.#renaming
       ? `${style.strong("rename ›")} ${style.text(this.#renaming.text)}${style.strong("▏")}`
       : this.#query
@@ -288,11 +342,13 @@ export class ResumeView {
         style.muted(
           this.#query
             ? "  No thread matches"
-            : this.#scope === "archived"
-              ? "  No archived threads"
-              : this.#scope === "all"
-                ? "  No threads yet"
-                : "  No threads in this folder · tab shows every folder's",
+            : this.#lineage
+              ? "  No agents"
+              : this.#scope === "archived"
+                ? "  No archived threads"
+                : this.#scope === "all"
+                  ? "  No threads yet"
+                  : "  No threads in this folder · tab shows every folder's",
         ),
       );
     else {
@@ -309,14 +365,16 @@ export class ResumeView {
     const count = visible.length > 0 ? `${this.#index + 1} / ${visible.length}` : "0";
     const keys = this.#renaming
       ? ["enter rename", "esc back"]
-      : [
-          "↑↓ navigate",
-          "tab scope",
-          "ctrl+r rename",
-          this.#scope === "archived" ? "ctrl+a unarchive" : "ctrl+a archive",
-          "enter resume",
-          "esc close",
-        ];
+      : this.#lineage
+        ? ["↑↓ navigate", "enter go in", "← back out", "esc close"]
+        : [
+            "↑↓ navigate",
+            "tab scope",
+            "ctrl+r rename",
+            this.#scope === "archived" ? "ctrl+a unarchive" : "ctrl+a archive",
+            "enter resume",
+            "esc close",
+          ];
     rows.push(rule(width, count), hints(keys, width));
     return rows;
   }

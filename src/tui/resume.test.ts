@@ -76,6 +76,42 @@ describe("ResumeView", () => {
     assert.match(plain(shown.render(72, 20, NOW)).join("\n"), /No thread matches/);
   });
 
+  it("lists a thread's agents the same way for /lineage, kept up to date", () => {
+    const agents = [
+      thread("t4", "Review the change", 1),
+      thread("t5", "Check the tests", 1, { depth: 1 }),
+    ];
+    const shown = new ResumeView("Fix the login redirect", () => agents, {
+      initial: "t5",
+      cwd: HERE,
+      lineage: true,
+    });
+    agents.push(thread("t6", "Review it again", 0));
+    const rows = plain(shown.render(72, 20, NOW));
+    assert.deepEqual(rows.slice(1, 10), [
+      "Fix the login redirect",
+      "",
+      "> type to search",
+      "",
+      "    1h ago    Review the change                     claude · opus · high",
+      "  › 1h ago      Check the tests                     claude · opus · high",
+      "    now       Review it again                       claude · opus · high",
+      "──────────────────────────────────────────────────────────────── 2 / 3 ─",
+      "↑↓ navigate   enter go in   ← back out   esc close",
+    ]);
+    assert.deepEqual(shown.key(key("return")), { kind: "choose", id: "t5" });
+    // An agent come in above the one selected leaves the selection on it.
+    agents.splice(1, 0, thread("t7", "Read the diff", 0, { depth: 1 }));
+    assert.deepEqual(shown.key(key("return")), { kind: "choose", id: "t5" });
+    // So does one come in after a paste searched the list.
+    shown.key(key("home"));
+    shown.paste("check");
+    agents.unshift(thread("t8", "Check the docs", 0));
+    assert.deepEqual(shown.key(key("return")), { kind: "choose", id: "t5" });
+    assert.deepEqual(shown.key(key("left")), { kind: "exit" });
+    assert.equal(shown.key(key("tab")), null);
+  });
+
   it("searches as you type, and esc clears the search before it closes", () => {
     const shown = view();
     for (const char of "set") shown.key(key(char, char));

@@ -143,6 +143,16 @@ const resume: CommandDefinition = {
   },
 };
 
+const lineage: CommandDefinition = {
+  name: "lineage",
+  description: "watch the agents under this thread, and go in and out of them",
+  group: "Threads",
+  async run(context) {
+    if (!context.ui.lineage) throw new Error("/lineage needs the terminal's thread list");
+    await context.ui.lineage();
+  },
+};
+
 const harness: CommandDefinition = {
   name: "harness",
   usage: "[name] [fresh]",
@@ -443,6 +453,7 @@ export const BUILTIN_COMMANDS: readonly CommandDefinition[] = [
   quit,
   newThread,
   resume,
+  lineage,
   harness,
   compact,
   unqueue,
