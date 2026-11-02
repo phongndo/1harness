@@ -777,6 +777,8 @@ export class Thread {
     } catch (error) {
       ended = true;
       this.#receive(session, { type: "session.closed", error: errorMessage(error) });
+      // The thread is done with it, but its process may still run; a wake would start a second.
+      void session.close().catch(() => {});
     }
     // A harness whose events end without saying it closed.
     if (!ended) this.#receive(session, { type: "session.closed", error: null });
@@ -879,7 +881,14 @@ export class Thread {
   }
 
   #emit(event: ThreadEvent): void {
-    for (const listener of this.#listeners) listener(event);
+    for (const listener of this.#listeners) {
+      // One listener's bug must not cost the others the event, or end the session in #pump.
+      try {
+        listener(event);
+      } catch (error) {
+        console.error(`1harness: a thread listener failed on ${event.type}:`, error);
+      }
+    }
   }
 }
 
