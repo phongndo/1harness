@@ -10,9 +10,9 @@ import { pad, plainText, spread, truncate, visibleWidth } from "./text.ts";
 // pickers are: a search line, then a thread a row, when it last moved at the
 // left, what it is doing, and what it runs on at the right, with its folder
 // when every folder's threads show. This folder's threads come first; tab
-// shows every folder's, then the archived ones. The agents a thread started
-// are indented under it. ctrl+r renames the selected thread, ctrl+a archives
-// it or brings it back.
+// shows every folder's, then the archived ones. Only your own threads show,
+// not the agents they started. ctrl+r renames the selected thread, ctrl+a
+// archives it or brings it back.
 
 export interface ResumeEntry {
   id: string;
@@ -115,34 +115,35 @@ export class ResumeView {
     // This folder's threads, unless it has none, or every folder's were asked for.
     const here = entries.some((entry) => !entry.archived && entry.cwd === options.cwd);
     this.#scope = (options.all ?? !here) ? "all" : "folder";
+    // On an agent, the thread that started it.
+    let initial = options.initial;
+    let owner: ResumeEntry | undefined;
+    for (const entry of entries) {
+      if (entry.depth === 0) owner = entry;
+      else if (entry.id === options.initial) initial = owner?.id;
+    }
     this.#index = Math.max(
       0,
-      this.#visible().findIndex((entry) => entry.id === options.initial),
+      this.#visible().findIndex((entry) => entry.id === initial),
     );
   }
 
-  /** The entries in scope that the search keeps; searched, agents are listed as threads. */
+  /** Your threads in scope, less what a search leaves out. */
   #visible(): ResumeEntry[] {
     const query = this.#query.toLowerCase();
-    // An agent goes with the thread that started it, wherever it ran.
-    const scoped: ResumeEntry[] = [];
-    let inScope = false;
-    for (const entry of this.#entries) {
-      if (entry.depth === 0)
-        inScope =
-          this.#scope === "archived"
-            ? entry.archived === true
-            : !entry.archived && (this.#scope === "all" || entry.cwd === this.#cwd);
-      if (inScope) scoped.push(entry);
-    }
-    if (!query) return scoped;
-    return scoped
-      .filter((entry) =>
-        `${entry.title} ${entry.on} ${shortPath(entry.cwd, this.#home)}`
-          .toLowerCase()
-          .includes(query),
-      )
-      .map((entry) => ({ ...entry, depth: 0 }));
+    const shown = this.#entries.filter(
+      (entry) =>
+        entry.depth === 0 &&
+        (this.#scope === "archived"
+          ? entry.archived === true
+          : !entry.archived && (this.#scope === "all" || entry.cwd === this.#cwd)),
+    );
+    if (!query) return shown;
+    return shown.filter((entry) =>
+      `${entry.title} ${entry.on} ${shortPath(entry.cwd, this.#home)}`
+        .toLowerCase()
+        .includes(query),
+    );
   }
 
   get selected(): ResumeEntry | undefined {

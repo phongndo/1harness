@@ -229,8 +229,8 @@ after a restart; the agent can ask with `task_status`. Text still streaming when
 1harness crashes is kept up to the last write, a moment before.
 
 `/resume` (or ctrl+t) lists your threads by what each is doing, with the
-harness, model, and effort it runs on: the open ones first, each with the
-agents it started under it, then earlier ones. A thread is named for what it
+harness, model, and effort it runs on, newest first. It lists your own
+threads, not the agents they started. A thread is named for what it
 does by its harness, Claude Code or Codex, after its first turns; until then,
 and on harnesses that name none, by its first message. `/resume 3f9c2a1b` opens a
 thread by its ID, or a harness's own session by its ID, and `/resume <words>`

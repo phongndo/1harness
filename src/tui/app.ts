@@ -1179,9 +1179,9 @@ export class App {
   }
 
   /**
-   * The thread list: each of your threads by what it is doing, newest first,
-   * the agents a thread started under it. With `words`, the threads that
-   * mention them.
+   * The thread list: each of your threads by what it is doing, newest first.
+   * With `words`, the threads that mention them. The agents threads started
+   * are left out.
    */
   async #pickThread(
     words: string,
@@ -1193,97 +1193,109 @@ export class App {
       const titled = await this.#client.call("threads.list", { scope: "recent", query: words });
       const seen = new Map<string, ThreadListing>();
       for (const thread of [...found.map((match) => match.thread), ...titled])
-        if (!seen.has(thread.id)) seen.set(thread.id, thread);
+        if (thread.parentId === null && !seen.has(thread.id)) seen.set(thread.id, thread);
       entries = [...seen.values()].map(listedEntry);
       if (entries.length === 0 && !loading.dismissed()) {
         this.#notice("info", `No thread mentions ${words}.`);
         return;
       }
-    } else {
-      // Listed first: the host names threads for their harness's titles as it lists them,
-      // and the open threads below are read once those names have come.
-      const [recent, archived] = await Promise.all([
-        this.#client
-          .call("threads.list", { scope: "recent", limit: 100 })
-          .catch((): ThreadListing[] => []),
-        this.#client
-          .call("threads.list", { scope: "archived", limit: 100 })
-          .catch((): ThreadListing[] => []),
-      ]);
-      // The thread on screen with nothing in it yet is where you are, not one to go back to.
-      const empty = (thread: { id: string; runCount: number }) =>
-        thread.runCount === 0 && thread.id === this.#currentId;
-      const open = this.#threadOrder().filter(
-        (thread) => thread.status !== "closed" && !thread.archived && !empty(thread),
-      );
-      // Each of your threads with the agents it started, the groups newest first.
-      const groups: { at: number; rows: ResumeEntry[] }[] = [];
-      const depth = (thread: ThreadState): number => {
-        const parent = thread.parentId ? this.#client.threads.get(thread.parentId) : undefined;
-        return parent && open.includes(parent) ? depth(parent) + 1 : 0;
-      };
-      for (const thread of open) {
-        const status = agentStatus(thread);
-        const made: ResumeEntry = {
-          id: thread.id,
-          title: thread.title,
-          on: harnessLabel(thread),
-          cwd: thread.info.cwd,
-          updatedAt: lastActive(thread),
-          depth: depth(thread),
-          // A thread at work, or waiting on you, says so with its dot.
-          dot: isLive(status) ? `${statusDot(status)} ` : "",
-        };
-        if (made.depth > 0) groups.at(-1)?.rows.push(made);
-        else groups.push({ at: made.updatedAt, rows: [made] });
-      }
-      const shown = new Set(open.map((thread) => thread.id));
-      // Agents whose threads closed, as finished tasks' do, go under the thread that started them.
-      const agents = new Map<string, ThreadListing[]>();
-      for (const thread of recent.toSorted((a, b) => a.createdAt - b.createdAt)) {
-        if (shown.has(thread.id) || empty(thread)) continue;
-        if (thread.parentId === null)
-          groups.push({ at: thread.updatedAt, rows: [listedEntry(thread)] });
-        else agents.set(thread.parentId, [...(agents.get(thread.parentId) ?? []), thread]);
-      }
-      const withAgents = (parent: ResumeEntry): ResumeEntry[] => [
-        parent,
-        ...(agents.get(parent.id) ?? []).flatMap((agent) =>
-          withAgents({ ...listedEntry(agent), depth: parent.depth + 1 }),
-        ),
-      ];
-      entries = groups
-        .toSorted((a, b) => b.at - a.at)
-        .flatMap((group) => group.rows)
-        .flatMap(withAgents);
-      // Archived threads, which tab shows on their own.
-      for (const thread of archived)
-        if (thread.parentId === null) entries.push({ ...listedEntry(thread), archived: true });
-    }
+    } else entries = await this.#threadEntries();
     if (loading.dismissed()) return;
     if (entries.length === 0) {
       this.#notice("info", "No threads yet.");
       return;
     }
     loading.clear();
+    await this.#openFrom(
+      new ResumeView(words ? `Threads mentioning ${words}` : "Resume", entries, {
+        initial: this.#currentId,
+        cwd: this.#cwd(),
+        home: homedir(),
+        // What mentions the words, from every folder.
+        ...(words ? { all: true } : {}),
+      }),
+    );
+  }
+
+  /** Shows a thread list and opens the thread chosen from it. */
+  async #openFrom(view: ResumeView): Promise<void> {
     const chosen = await new Promise<string | null>((resolve) => {
-      this.#panel = {
-        kind: "resume",
-        view: new ResumeView(words ? `Threads mentioning ${words}` : "Resume", entries, {
-          initial: this.#currentId,
-          cwd: this.#cwd(),
-          home: homedir(),
-          // What mentions the words, from every folder.
-          ...(words ? { all: true } : {}),
-        }),
-        onDone: resolve,
-      };
+      this.#panel = { kind: "resume", view, onDone: resolve };
       this.#schedule();
     });
     if (!chosen || chosen === this.#currentId) return;
     const target = this.#client.threads.get(chosen);
     if (target && target.status !== "closed") this.#show(target);
     else await this.#resume(chosen, this.#harness);
+  }
+
+  /**
+   * Your threads, newest first, each followed by the agents it started, at
+   * their depths, oldest first; then your archived threads.
+   */
+  async #threadEntries(): Promise<ResumeEntry[]> {
+    // Listed first: the host names threads for their harness's titles as it lists them,
+    // and the open threads below are read once those names have come.
+    const [recent, archived] = await Promise.all([
+      this.#client
+        .call("threads.list", { scope: "recent", limit: 100 })
+        .catch((): ThreadListing[] => []),
+      this.#client
+        .call("threads.list", { scope: "archived", limit: 100 })
+        .catch((): ThreadListing[] => []),
+    ]);
+    // The thread on screen with nothing in it yet is where you are, not one to go back to.
+    const empty = (thread: { id: string; runCount: number }) =>
+      thread.runCount === 0 && thread.id === this.#currentId;
+    type Node = { entry: ResumeEntry; parentId: string | null; createdAt: number };
+    const nodes = new Map<string, Node>();
+    for (const thread of recent)
+      if (!empty(thread))
+        nodes.set(thread.id, {
+          entry: listedEntry(thread),
+          parentId: thread.parentId,
+          createdAt: thread.createdAt,
+        });
+    // Open threads as they stand now, over what the store last kept of them.
+    for (const thread of this.#threadOrder()) {
+      if (thread.status === "closed" || thread.archived || empty(thread)) continue;
+      const status = agentStatus(thread);
+      nodes.set(thread.id, {
+        entry: {
+          id: thread.id,
+          title: thread.title,
+          on: harnessLabel(thread),
+          cwd: thread.info.cwd,
+          updatedAt: lastActive(thread),
+          depth: 0,
+          // A thread at work, or waiting on you, says so with its dot.
+          dot: isLive(status) ? `${statusDot(status)} ` : "",
+        },
+        parentId: thread.parentId,
+        createdAt: thread.createdAt,
+      });
+    }
+    const roots: Node[] = [];
+    const agents = new Map<string, Node[]>();
+    for (const node of nodes.values()) {
+      if (node.parentId === null) roots.push(node);
+      // An agent whose thread is not listed, being archived or long gone, shows nowhere.
+      else if (nodes.has(node.parentId))
+        agents.set(node.parentId, [...(agents.get(node.parentId) ?? []), node]);
+    }
+    const withAgents = (node: Node, depth: number): ResumeEntry[] => [
+      { ...node.entry, depth },
+      ...(agents.get(node.entry.id) ?? [])
+        .toSorted((a, b) => a.createdAt - b.createdAt)
+        .flatMap((agent) => withAgents(agent, depth + 1)),
+    ];
+    const entries = roots
+      .toSorted((a, b) => b.entry.updatedAt - a.entry.updatedAt)
+      .flatMap((root) => withAgents(root, 0));
+    // Archived threads, which tab shows on their own.
+    for (const thread of archived)
+      if (thread.parentId === null) entries.push({ ...listedEntry(thread), archived: true });
+    return entries;
   }
 
   /** A harness's name as people know it, such as `Claude Code`. */

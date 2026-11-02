@@ -43,15 +43,14 @@ const plain = (rows: string[]) => rows.map((row) => stripVTControlCharacters(row
 describe("ResumeView", () => {
   it("lists this folder's threads, a row each: age, title, and what it runs on", () => {
     const rows = plain(view().render(72, 20, NOW));
-    assert.deepEqual(rows.slice(1, 9), [
+    assert.deepEqual(rows.slice(1, 8), [
       "Resume                                  ◉ This folder  ○ All  ○ Archived",
       "",
       "> type to search",
       "",
       "  › 1h ago    Fix the login redirect                claude · opus · high",
-      "    1h ago      Review the change                   claude · opus · high",
       "    10d ago   Set up the repo                       claude · opus · high",
-      "──────────────────────────────────────────────────────────────── 1 / 3 ─",
+      "──────────────────────────────────────────────────────────────── 1 / 2 ─",
     ]);
     assert.match(rows.at(-1) ?? "", /tab scope/);
   });
@@ -62,7 +61,19 @@ describe("ResumeView", () => {
     const text = plain(shown.render(90, 20, NOW)).join("\n");
     assert.match(text, /○ This folder {2}◉ All/);
     assert.match(text, /30h|1d ago {4}Plan the release +claude · opus · high {2}~\/code\/site/);
-    assert.match(text, /1 \/ 4/);
+    assert.match(text, /1 \/ 3/);
+  });
+
+  it("leaves out the agents threads started, even from a search", () => {
+    const shown = new ResumeView("Resume", ENTRIES, { initial: "t4", cwd: HERE });
+    const rows = plain(shown.render(72, 20, NOW));
+    // Opened on an agent, the list starts on the thread that started it.
+    assert.ok(
+      rows.includes("  › 1h ago    Fix the login redirect                claude · opus · high"),
+    );
+    assert.ok(!rows.some((row) => row.includes("Review the change")));
+    for (const char of "review") shown.key(key(char, char));
+    assert.match(plain(shown.render(72, 20, NOW)).join("\n"), /No thread matches/);
   });
 
   it("searches as you type, and esc clears the search before it closes", () => {
