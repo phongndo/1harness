@@ -24,6 +24,7 @@ import type {
   SessionOptions,
 } from "../core/events.ts";
 import type { FileMatch } from "../core/files.ts";
+import { looksLikeThreadId, shortThreadId } from "../core/thread-id.ts";
 import { appendDelta, errorMessage } from "../core/thread.ts";
 import type { ClientEvent, HostClient } from "../client/client.ts";
 import {
@@ -712,7 +713,7 @@ export class App {
           if (!current) throw new Error("No thread to rename");
           if (!args) throw new Error("Usage: /rename <title>");
           await this.#client.call("thread.rename", { threadId: current.id, title: args });
-          this.#notice("info", `Renamed ${current.id}: ${args}`);
+          this.#notice("info", `Renamed ${shortThreadId(current.id)}: ${args}`);
         },
       },
       {
@@ -788,7 +789,7 @@ export class App {
           const thread = id ? this.#client.threads.get(id) : undefined;
           if (!thread) throw new Error(`No thread ${id ?? ""}`);
           await this.#client.call("thread.close", { threadId: thread.id });
-          this.#notice("info", `Closed ${thread.id} ${thread.title}`.trim());
+          this.#notice("info", `Closed ${shortThreadId(thread.id)} ${thread.title}`.trim());
         },
       },
     ];
@@ -1051,7 +1052,7 @@ export class App {
     this.#settings = { ...settings, resume: null };
   }
 
-  /** Opens an earlier thread: 1harness's own, such as `t42`, or a harness's by its ID. */
+  /** Opens an earlier thread: 1harness's own, by its ID or the start of it, or a harness's by its ID. */
   async #resume(id: string, harness: HarnessId): Promise<void> {
     const previous = this.#current;
     const startedOn = this.#currentId;
@@ -1116,7 +1117,7 @@ export class App {
    */
   async #switchThread(args: string): Promise<void> {
     const words = args.trim();
-    const named = /^t\d+$/.test(words) ? words : null;
+    const named = looksLikeThreadId(words) ? words : null;
     if (named) {
       const open = this.#client.threads.get(named);
       if (open && open.status !== "closed") this.#show(open);

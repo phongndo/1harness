@@ -294,11 +294,14 @@ export class Store {
     }
   }
 
-  /** A new thread ID, such as `t42`, never given out before. */
-  nextThreadId(): string {
-    const next = Number(this.#meta("next_thread") ?? "1");
-    this.#setMeta("next_thread", String(next + 1));
-    return `t${next}`;
+  /** The IDs of up to `limit` threads whose IDs start with `prefix`, the latest first. */
+  threadIdsStartingWith(prefix: string, limit = 5): string[] {
+    // A prefix is hex and dashes, so it holds none of LIKE's wildcards.
+    return this.#all(
+      "SELECT id FROM threads WHERE id LIKE ? ORDER BY updated_at DESC LIMIT ?",
+      `${prefix.toLowerCase()}%`,
+      limit,
+    ).map((row) => String(row["id"]));
   }
 
   /** The newest log entry's number, which the host's feed continues from. */

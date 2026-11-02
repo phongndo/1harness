@@ -1,3 +1,4 @@
+import { shortThreadId } from "../core/thread-id.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -568,6 +569,14 @@ describe("Host with a store", () => {
       settings,
     });
     assert.equal(byId.id, thread.id);
+    const byShort = await client.call("thread.resume", {
+      id: shortThreadId(thread.id),
+      harness: "scripted",
+      settings,
+    });
+    assert.equal(byShort.id, thread.id);
+    const page = await client.call("thread.attach", { threadId: shortThreadId(thread.id) });
+    assert.equal(page.thread.id, thread.id);
   });
 
   it("reopens a closed thread still in memory without telling clients it went away", async () => {

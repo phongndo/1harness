@@ -15,6 +15,7 @@ import { homedir } from "node:os";
 import { join as joinPath, resolve as resolvePath } from "node:path";
 import { configDir, stateDir } from "../core/paths.ts";
 import { errorMessage, type Thread, type ThreadEvent } from "../core/thread.ts";
+import { isThreadIdPrefix, shortThreadId } from "../core/thread-id.ts";
 import { formatTokens } from "../core/wording.ts";
 import { drivers, findDriver, harnessName as label } from "../drivers/index.ts";
 import type { ToolDefinition } from "../extensions/api.ts";
@@ -306,7 +307,6 @@ export class Host {
       tools: this.tools,
       onWarning: (text) => this.#broadcast("warning", text),
       ...(options.idleCloseMs === undefined ? {} : { idleCloseMs: options.idleCloseMs }),
-      ...(store ? { nextId: () => store.nextThreadId() } : {}),
     });
     this.orchestrator = new Orchestrator(this.manager, options.env);
     this.pageTools = this.#pageTools();
@@ -485,6 +485,31 @@ export class Host {
         usage: restoredUsage(row.usage),
       },
     };
+  }
+
+  /**
+   * The thread a typed ID names: itself when a thread has it, else the one
+   * thread whose ID starts with it. Matching none, it is returned as typed,
+   * for a harness's own ID; matching several, the caller is asked for more.
+   */
+  #resolveId(typed: string): string {
+    const id = typed.trim();
+    if (this.manager.get(id) || this.#store?.thread(id) || !isThreadIdPrefix(id)) return id;
+    const prefix = id.toLowerCase();
+    const matches = new Set(
+      this.manager
+        .list()
+        .map((managed) => managed.id)
+        .filter((candidate) => candidate.startsWith(prefix)),
+    );
+    for (const stored of this.#store?.threadIdsStartingWith(prefix) ?? []) matches.add(stored);
+    const [only, ...others] = matches;
+    if (!only) return id;
+    if (others.length === 0) return only;
+    throw new RpcError(
+      "thread_ambiguous",
+      `${id} could be ${[...matches].join(", ")}; type more of it`,
+    );
   }
 
   /** Brings a stored thread back into memory, parked, such as a closed one reopened. */
@@ -1248,7 +1273,7 @@ export class Host {
       "info",
       harness === managed.harness
         ? `Starting ${label(harness)} over…`
-        : `Moving ${managed.id} to ${label(harness)}…`,
+        : `Moving ${shortThreadId(managed.id)} to ${label(harness)}…`,
     );
     try {
       const result = await this.manager.switchHarness(managed.id, harness, { fresh });
@@ -1525,7 +1550,8 @@ export class Host {
           unsubscribe();
         }
       },
-      "thread.resume": async (client, { id, harness, settings }) => {
+      "thread.resume": async (client, { id: typed, harness, settings }) => {
+        const id = this.#resolveId(typed);
         const own = this.manager.get(id);
         if (own && own.status !== "closed") return this.#state(own);
         // A stored one, closed or not, comes back parked.
@@ -1545,7 +1571,8 @@ export class Host {
           settings: { ...settings, resume: id },
         });
       },
-      "thread.attach": async (_client, { threadId, before, limit }) => {
+      "thread.attach": async (_client, { threadId: typed, before, limit }) => {
+        const threadId = this.#resolveId(typed);
         const managed = this.manager.get(threadId);
         // A stored thread not in memory can be read without being opened.
         const row = managed ? null : this.#store?.thread(threadId);
@@ -1740,7 +1767,7 @@ export class Host {
         this.#notice(
           managed.id,
           "info",
-          `Forked from ${source.id} after turn ${last}. Your first message brings ${label(source.harness)} up to date on ${last} ${last === 1 ? "turn" : "turns"}.`,
+          `Forked from ${shortThreadId(source.id)} after turn ${last}. Your first message brings ${label(source.harness)} up to date on ${last} ${last === 1 ? "turn" : "turns"}.`,
         );
         return this.#state(managed);
       },

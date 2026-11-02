@@ -133,6 +133,19 @@ describe("statusRecords", () => {
       ],
     );
   });
+
+  it("reports UUID threads by their short IDs", () => {
+    const root = "3f9c2a1b-7d4e-4a10-9b2c-0123456789ab";
+    const child = "77aa0000-0000-4000-8000-000000000003";
+    const records = statusRecords(
+      [thread(root, { status: "working" }), thread(child, { parentId: root, status: "working" })],
+      () => 0,
+    );
+    assert.deepEqual(
+      records.map((record) => record.id),
+      [null, "3f9c2a1b", "3f9c2a1b/77aa0000"],
+    );
+  });
 });
 
 describe("StatusReporter", () => {

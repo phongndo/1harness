@@ -61,7 +61,7 @@ export interface CommandUI {
 
 /** The current thread as a command reaches it, wherever the thread runs. */
 export interface CommandThread {
-  /** 1harness's ID for it, such as `t3`. */
+  /** 1harness's ID for it, a UUID. */
   readonly id: string;
   readonly closed: boolean;
   readonly busy: boolean;
@@ -115,7 +115,7 @@ export interface CommandContext {
   /** Starts a thread: another harness, a resumed one, or a fresh one by default. */
   openThread(options?: {
     harness?: HarnessId;
-    /** A 1harness thread ID such as `t42`, or a harness's own thread ID. */
+    /** A 1harness thread ID or the start of one, or a harness's own thread ID. */
     resume?: string;
     defaultModel?: boolean;
   }): Promise<void>;

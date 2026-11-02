@@ -18,6 +18,7 @@ import {
 import { createSession, drivers, findDriver, harnessName as label } from "../drivers/index.ts";
 import type { ExtensionHost } from "../extensions/host.ts";
 import type { ToolGrant, ToolServer } from "../extensions/tool-server.ts";
+import { newThreadId } from "../core/thread-id.ts";
 import { combineHandoffs, handoffText, stripHandoff } from "./handoff.ts";
 
 /**
@@ -129,8 +130,6 @@ export interface ManagerOptions {
    * the process; the next message resumes it. 0 keeps sessions open.
    */
   idleCloseMs?: number;
-  /** Gives each new thread its ID, such as from a store, so IDs are never reused. */
-  nextId?: () => string;
 }
 
 /** A thread as a store kept it, to bring back parked. */
@@ -243,7 +242,6 @@ export class ThreadManager {
   #grants = new Map<string, ToolGrant>();
   /** Each thread's extensions. */
   #extensions = new Map<string, ExtensionHost>();
-  #counter = 0;
   /** What each thread looked like when last announced. */
   #keys = new Map<string, string>();
   /** Idle threads whose sessions close when the timer fires. */
@@ -318,7 +316,7 @@ export class ThreadManager {
     created = thread;
     mcp.grant?.bind(thread);
     const managed: ManagedThread = {
-      id: this.#options.nextId?.() ?? `t${++this.#counter}`,
+      id: newThreadId(),
       title: options.title ?? "",
       named: options.named ?? Boolean(options.title),
       harness: options.harness,

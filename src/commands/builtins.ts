@@ -1,5 +1,6 @@
 import type { McpAction, McpServer, ModelOption } from "../core/events.ts";
 import type { ThreadListing } from "../protocol.ts";
+import { looksLikeThreadId, shortThreadId } from "../core/thread-id.ts";
 import { errorMessage } from "../core/thread.ts";
 import { EFFORT_DESCRIPTIONS, MODE_DESCRIPTIONS } from "../core/wording.ts";
 import {
@@ -122,14 +123,14 @@ const resume: CommandDefinition = {
       .lookup("stored", () => storedThreads(context))
       .map((thread: ThreadListing) =>
         completion(
-          thread.id,
+          shortThreadId(thread.id),
           `${oneLine(thread.title).slice(0, 50)} · ${[thread.harness, thread.model, thread.effort].filter(Boolean).join(" · ")}`,
         ),
       ),
   }),
   async run(context, args) {
-    // An ID, 1harness's such as t42 or a harness's own session's, opens that thread.
-    if (/^t\d+$/.test(args) || /^[\w-]{16,}$/.test(args)) {
+    // An ID, 1harness's or the start of one, or a harness's own session's, opens that thread.
+    if (looksLikeThreadId(args) || /^[\w-]{16,}$/.test(args)) {
       await context.openThread({ resume: args });
       return;
     }

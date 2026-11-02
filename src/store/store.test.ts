@@ -61,15 +61,19 @@ function row(id: string, overrides: Partial<ThreadRow> = {}): ThreadRow {
 const message = (id: string) => ({ id, input: { text: id }, origin: { type: "user" as const } });
 
 describe("Store", () => {
-  it("gives out thread IDs once, across opens", () => {
-    const path = join(root, "ids.db");
-    const first = Store.open(path);
-    assert.equal(first.nextThreadId(), "t1");
-    assert.equal(first.nextThreadId(), "t2");
-    first.close();
-    const second = Store.open(path);
-    assert.equal(second.nextThreadId(), "t3");
-    second.close();
+  it("finds threads by the start of their IDs", () => {
+    const store = Store.memory();
+    store.saveThread(row("3f9c2a1b-0000-4000-8000-000000000001", { updatedAt: 1 }));
+    store.saveThread(row("3f9c2a1b-0000-4000-8000-000000000002", { updatedAt: 2 }));
+    store.saveThread(row("77aa0000-0000-4000-8000-000000000003"));
+    assert.deepEqual(store.threadIdsStartingWith("3F9C2A1B"), [
+      "3f9c2a1b-0000-4000-8000-000000000002",
+      "3f9c2a1b-0000-4000-8000-000000000001",
+    ]);
+    assert.deepEqual(store.threadIdsStartingWith("77aa0000"), [
+      "77aa0000-0000-4000-8000-000000000003",
+    ]);
+    assert.deepEqual(store.threadIdsStartingWith("00000000"), []);
   });
 
   it("keeps what the harness last said of context and cost", () => {

@@ -1,4 +1,5 @@
 import { parseArgs } from "node:util";
+import { shortThreadId } from "../core/thread-id.ts";
 import { shortTime } from "../core/wording.ts";
 import type { LogEntry, ThreadListing } from "../protocol.ts";
 import type { HostClient } from "./client.ts";
@@ -127,11 +128,11 @@ export async function threadsCommand(
       );
       return 0;
     }
-    const width = Math.max(4, ...threads.map((thread) => thread.id.length));
+    const width = Math.max(4, ...threads.map((thread) => shortThreadId(thread.id).length));
     for (const thread of threads) {
       const mark = thread.pinned ? "pinned" : thread.unseen ? "new" : "";
       process.stdout.write(
-        `${thread.id.padEnd(width)}  ${thread.status.padEnd(7)}  ${thread.harness.padEnd(8)}  ${shortTime(thread.updatedAt).padEnd(17)}  ${oneLine(thread.title || "untitled", 60)}${mark ? `  [${mark}]` : ""}${values.all && thread.cwd !== process.cwd() ? `  ${thread.cwd}` : ""}\n`,
+        `${shortThreadId(thread.id).padEnd(width)}  ${thread.status.padEnd(7)}  ${thread.harness.padEnd(8)}  ${shortTime(thread.updatedAt).padEnd(17)}  ${oneLine(thread.title || "untitled", 60)}${mark ? `  [${mark}]` : ""}${values.all && thread.cwd !== process.cwd() ? `  ${thread.cwd}` : ""}\n`,
       );
     }
     return 0;

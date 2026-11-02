@@ -490,7 +490,7 @@ describe("Switching harness", () => {
     const handed = second.prompts[0] ?? "";
     assert.match(
       handed,
-      /^<1harness-handoff>\n1harness thread t\d+ has moved to you \(Fake B\) from Fake\./,
+      /^<1harness-handoff>\n1harness thread [0-9a-f-]{36} has moved to you \(Fake B\) from Fake\./,
     );
     assert.match(handed, /Turn 1 · Fake\nUser: plan the parser\nReply: done: plan the parser/);
     assert.ok(handed.endsWith("The next message follows.\n\nwrite it"));
@@ -518,7 +518,7 @@ describe("Switching harness", () => {
     const delta = third.prompts[0] ?? "";
     assert.match(
       delta,
-      /You are back on 1harness thread t\d+\. While you were away it ran on Fake B/,
+      /You are back on 1harness thread [0-9a-f-]{36}\. While you were away it ran on Fake B/,
     );
     assert.match(delta, /Turn 2 · Fake B\nUser: write it/);
     assert.doesNotMatch(delta, /Turn 1/);
@@ -751,7 +751,7 @@ describe("Orchestrator", () => {
     const session = parent.thread.session as unknown as FakeSession;
     assert.match(
       session.prompts[0] ?? "",
-      /^\[1harness\] Task t\d+ \(fake: slow work SLOW\) completed:\n\ndone: slow work SLOW/,
+      /^\[1harness\] Task [0-9a-f-]{36} \(fake: slow work SLOW\) completed:\n\ndone: slow work SLOW/,
     );
     assert.equal(parent.runs[0]?.input, "done: slow work SLOW");
     assert.deepEqual(parent.runs[0]?.origin, {

@@ -54,7 +54,7 @@ Options:
                          machine's server, its home)
   -S, --server <name>    use another server: a name from \`1harness hosts\`, host:port,
                          or a socket path (default: ONEHARNESS_SERVER, else this machine's)
-  -r, --resume <id>      reopen a thread: 1harness's, such as t42, or a harness's own
+  -r, --resume <id>      reopen a thread: 1harness's, such as 3f9c2a1b, or a harness's own
   -x, --extension <path> load an extension module (repeatable); others load from
                          ~/.config/1harness/extensions and a trusted .1harness/extensions
   -p, --print            run the prompt once without the UI and print the reply;

@@ -1,5 +1,6 @@
 import { stripVTControlCharacters } from "node:util";
 import type { MessageOrigin } from "../core/thread.ts";
+import { shortThreadId } from "../core/thread-id.ts";
 import type { ThreadState } from "../protocol.ts";
 import { inline } from "./markdown.ts";
 import { style } from "./theme.ts";
@@ -120,7 +121,7 @@ export function agentRowOf(thread: ThreadState): AgentRow {
     threadId: thread.id,
     callId: thread.parentCallId,
     label: harnessLabel(thread),
-    title: thread.title || thread.id,
+    title: thread.title || shortThreadId(thread.id),
     status,
     ...agentSpan(thread),
     detail,

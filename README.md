@@ -28,7 +28,7 @@ From a checkout, run `pnpm dev` or `node dist/cli.js` after `pnpm build`.
 1harness                          # Claude Code in the current folder
 1harness -H codex -m <model>      # Codex with a chosen model
 1harness --mode auto-edit --plan  # start in plan mode, edits auto-accepted
-1harness -r t42                   # reopen a 1harness thread, from any folder
+1harness -r 3f9c2a1b              # reopen a 1harness thread, from any folder
 1harness -r <thread-id>           # resume a harness's own thread or session
 1harness -p "summarize README.md" # one turn without the UI
 ```
@@ -117,7 +117,7 @@ when it finishes; `task_status` and `task_cancel` follow it up; `thread_list`,
 `thread_wait`, and `thread_interrupt` work on any thread; `orchestrator_capabilities` lists the harnesses and limits. A task never
 gets a broader permission mode than the thread that started it, or leaves plan
 mode, and a harness that cannot run it that narrowly is refused. A task goes by
-its thread's ID, such as `t2`, and a retried `requestId` returns the same task. Delegation stops at three levels deep, and, within one tree of threads, at
+its thread's ID, and a retried `requestId` returns the same task. Delegation stops at three levels deep, and, within one tree of threads, at
 eight threads working and sixteen with a harness running; `task_cancel` on a
 finished task closes its thread.
 
@@ -214,9 +214,12 @@ which servers answer and who each takes you to be.
 
 1harness keeps every thread in `~/.local/state/1harness/1harness.db` (SQLite,
 under `$XDG_STATE_HOME`): what was said, each run, the harnesses it ran on, and
-your always-allow choices. Thread IDs such as `t42` are never reused. When
+your always-allow choices. Each thread's ID is a random UUID; lists show its
+first eight characters, such as `3f9c2a1b`, and those, or any part of the ID
+from its start that only one thread's begins with, are enough to name it.
+Threads from before UUIDs keep IDs such as `t42`. When
 1harness stops, its threads stop with their harnesses but keep their place; the
-next 1harness brings them back, and `1harness -r t42` or `/resume` opens one,
+next 1harness brings them back, and `1harness -r 3f9c2a1b` or `/resume` opens one,
 along with your harness's own earlier threads under a second tab. Nothing
 starts by itself after a restart. A turn that was running when 1harness
 stopped is marked interrupted, since how it ended is unknown, and is never sent
@@ -229,14 +232,14 @@ after a restart; the agent can ask with `task_status`. Text still streaming when
 harness, model, and effort it runs on: the open ones first, each with the
 agents it started under it, then earlier ones. A thread is named for what it
 does by its harness, Claude Code or Codex, after its first turns; until then,
-and on harnesses that name none, by its first message. `/resume t42` opens a
+and on harnesses that name none, by its first message. `/resume 3f9c2a1b` opens a
 thread by its ID, or a harness's own session by its ID, and `/resume <words>`
 searches what every thread said. `/rename` names a thread, and a name you give
 it stays. `/fork [turn]` starts a new thread on the same harness and
 folder from this one's turns, all of them or up to a turn; its first message
 carries them, and its agent can read the rest with `thread_read`. Outside the
 terminal, `1harness threads` lists this folder's threads (`--all` for every
-folder, words to search, `--json` for scripts), and `1harness threads show t42`
+folder, words to search, `--json` for scripts), and `1harness threads show 3f9c2a1b`
 prints one. Closed threads are kept until you forget them; set
 `retainClosedDays` in `settings.json` to delete ones closed longer ago when the
 server starts. Pinned ones are always kept.

@@ -307,7 +307,7 @@ export interface Methods {
     result: ThreadListing[];
   };
   "thread.open": { params: OpenParams; result: ThreadState };
-  /** Opens a stored thread or a native one: a 1harness ID such as `t42`, or a harness's own. */
+  /** Opens a stored thread or a native one: a 1harness ID or the start of one, or a harness's own. */
   "thread.resume": {
     params: { id: string; harness: HarnessId; settings: SessionOptions };
     result: ThreadState;
