@@ -115,6 +115,9 @@ export class Orchestrator {
   #byRequest = new Map<string, Promise<Task>>();
   /** Tasks being started in each tree, counted against its limits before their threads exist. */
   #reserved = new Map<string, number>();
+  /** A finished task's thread once it has left memory for the store. */
+  storedTask: (id: string) => Pick<ManagedThread, "harness" | "title" | "runs" | "error"> | null =
+    () => null;
 
   constructor(manager: ThreadManager, env: NodeJS.ProcessEnv = process.env) {
     this.#manager = manager;
@@ -643,6 +646,11 @@ export class Orchestrator {
     return run ? run.status !== "running" : child.thread.idle;
   }
 
+  #storedChild(id: string) {
+    const stored = this.storedTask(id);
+    return stored && { ...stored, status: "closed" as const };
+  }
+
   /** Waits for the task to finish, or to need the user, or for the timeout. */
   #waitTask(task: Task, timeoutMs: number): Promise<void> {
     const child = this.#manager.get(task.id);
@@ -664,7 +672,7 @@ export class Orchestrator {
   }
 
   #taskView(task: Task, timedOut: boolean) {
-    const child = this.#manager.get(task.id);
+    const child = this.#manager.get(task.id) ?? this.#storedChild(task.id);
     const run = child?.runs[0];
     const finished = this.#finished(task);
     if (finished) task.seen = true;

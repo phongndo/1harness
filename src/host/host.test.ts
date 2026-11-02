@@ -559,6 +559,39 @@ describe("Host with a store", () => {
     );
   });
 
+  it("records the messages admitted while the disk failed, in order, once it writes again", async () => {
+    const store = fresh();
+    const first = newHost([], store);
+    const client = await connect("tui");
+    const thread = await client.call("thread.open", { harness: "scripted", settings });
+    await settle();
+    let failing = true;
+    for (const name of ["recordMessage", "setMessageState"] as const) {
+      const real = store[name].bind(store) as (...args: unknown[]) => void;
+      (store as unknown as Record<string, unknown>)[name] = (...args: unknown[]) => {
+        if (failing) throw new Error("disk I/O error");
+        real(...args);
+      };
+    }
+    // Runs, so it must not be stored as still queued; the next one waits behind it.
+    await client.call("thread.send", { threadId: thread.id, text: "go ASK" });
+    await settle();
+    await client.call("thread.send", { threadId: thread.id, text: "queued while failing" });
+    await settle();
+    failing = false;
+    await client.call("thread.send", { threadId: thread.id, text: "queued after" });
+    await settle();
+    crash(store);
+    await first.manager.closeAll();
+
+    newHost([], Store.open(file));
+    const again = await connect("tui");
+    assert.deepEqual(
+      again.threads.get(thread.id)?.queue.map((message) => message.input.text),
+      ["queued while failing", "queued after"],
+    );
+  });
+
   it("answers a retried message from before a restart without sending it", async () => {
     const store = fresh();
     newHost([], store);

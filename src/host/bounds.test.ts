@@ -225,6 +225,26 @@ describe("A long-lived host", () => {
       [cancelled.taskId, finished.taskId].toSorted(),
     );
   });
+
+  it("brings a reopened thread's tasks back with it, to report how they went", async () => {
+    newHost(Store.memory());
+    const client = await connect("tui");
+    const parent = await client.call("thread.open", { harness: "scripted", settings });
+    const tool = (name: string) => host.orchestrator.tools.find((found) => found.name === name)!;
+    const call = async (name: string, input: Record<string, unknown>) =>
+      JSON.parse(
+        String(await tool(name).execute(input, { thread: host.manager.get(parent.id)!.thread })),
+      ) as { taskId: string; status: string; result: string | null };
+    const { taskId } = await call("delegate_task", { task: "help", wait: true });
+    const finished = await call("task_status", { taskId });
+    await client.call("thread.close", { threadId: parent.id });
+    await settle();
+    assert.equal(host.manager.get(parent.id), undefined);
+    await client.call("thread.resume", { id: parent.id, harness: "scripted", settings });
+    const reopened = await call("task_status", { taskId });
+    assert.equal(reopened.status, finished.status);
+    assert.equal(reopened.result, finished.result);
+  });
 });
 
 const settle = (ms = 20) => new Promise((done) => setTimeout(done, ms));

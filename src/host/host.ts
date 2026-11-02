@@ -305,6 +305,8 @@ export class Host {
   #reopening = new Set<string>();
   /** Closed threads to take out of memory once they are stored. */
   #closedThreads = new Set<string>();
+  /** Admissions a failed write left out, in order. */
+  #unadmitted: [ManagedThread, ThreadEvent][] = [];
   #releaseTimer: NodeJS.Immediate | null = null;
   /** Each task as last written. */
   #savedTasks = new Map<string, string>();
@@ -329,6 +331,10 @@ export class Host {
       ...(options.idleCloseMs === undefined ? {} : { idleCloseMs: options.idleCloseMs }),
     });
     this.orchestrator = new Orchestrator(this.manager, options.env);
+    this.orchestrator.storedTask = (id) => {
+      const row = this.#store?.thread(id);
+      return row ? { ...row, runs: this.#store!.runs(id) } : null;
+    };
     this.pageTools = this.#pageTools();
     this.#orchestratorTools = new Map(
       [...this.orchestrator.tools, ...this.pageTools].map((tool) => [tool.name, { tool }]),
@@ -591,6 +597,9 @@ export class Host {
       { ...this.#restored({ ...row, state: "parked" }, store.runs(id)), extensions },
     ]);
     if (!managed) return null;
+    // Tasks left memory with it; one still in memory has its own, which may be newer.
+    if (!existing)
+      this.orchestrator.restoreTasks(store.tasks().filter((task) => task.parentId === id));
     this.#dirty.add(id);
     this.#scheduleFlush();
     return managed;
@@ -770,7 +779,10 @@ export class Host {
     const dirty = [...this.#dirty];
     const logs: [ThreadLog, LoggedEntry[]][] = [];
     const tasks: [string, string][] = [];
+    const admitted = this.#unadmitted.length;
     store.transaction(() => {
+      for (const [managed, event] of this.#unadmitted.slice(0, admitted))
+        this.#record(store, managed, event);
       for (const id of dirty) {
         const managed = this.manager.get(id);
         if (!managed) continue;
@@ -795,6 +807,7 @@ export class Host {
       }
       store.saveSeq(this.#seq);
     });
+    this.#unadmitted.splice(0, admitted);
     for (const id of dirty) this.#dirty.delete(id);
     for (const [log, changed] of logs) log.written(changed);
     for (const [id, key] of tasks) this.#savedTasks.set(id, key);
@@ -832,17 +845,24 @@ export class Host {
     };
   }
 
-  /** Admission is written at once, before the harness is sent anything. */
+  /**
+   * Admission is written at once, before the harness is sent anything. One that
+   * fails waits, with every later one so they stay in order, for the next write.
+   */
   #admit(managed: ManagedThread, change: ManagerEvent & { type: "thread.event" }): void {
     const store = this.#store;
     if (!store) return;
-    try {
-      this.#record(store, managed, change.event);
-    } catch (error) {
-      if (!this.#storeFailed)
-        this.#broadcast("error", `Could not save threads: ${errorMessage(error)}`);
-      this.#storeFailed = true;
-    }
+    if (this.#unadmitted.length === 0)
+      try {
+        this.#record(store, managed, change.event);
+        return;
+      } catch (error) {
+        if (!this.#storeFailed)
+          this.#broadcast("error", `Could not save threads: ${errorMessage(error)}`);
+        this.#storeFailed = true;
+      }
+    this.#unadmitted.push([managed, change.event]);
+    this.#scheduleFlush();
   }
 
   #record(store: Store, managed: ManagedThread, event: ThreadEvent): void {
