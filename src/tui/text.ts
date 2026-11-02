@@ -195,6 +195,10 @@ function scan(
   }
 }
 
+/** Styles in effect after a sequence, by the styles before it and the sequence. */
+const tracked = new Map<string, string>();
+const TRACKED = 1024;
+
 /**
  * The styles in effect after an SGR sequence, as the shortest sequence that
  * sets them again: one entry per kind, so a long styled line does not carry
@@ -202,11 +206,18 @@ function scan(
  */
 function trackStyle(active: string, sequence: string): string {
   if (!sequence.endsWith("m")) return active;
+  // The transcript's few styles meet in few ways, each met again on every row wrapped.
+  const key = `${active}\0${sequence}`;
+  const known = tracked.get(key);
+  if (known !== undefined) return known;
   const state = new Map<string, string>();
   // What is in effect is a run of SGR sequences, each `ESC [ params m`.
   for (const part of active.split("\x1b[").slice(1)) applySgr(state, part.slice(0, -1));
   applySgr(state, sequence.slice(2, -1));
-  return [...state.values()].map((codes) => `\x1b[${codes}m`).join("");
+  const after = [...state.values()].map((codes) => `\x1b[${codes}m`).join("");
+  if (tracked.size >= TRACKED) tracked.clear();
+  tracked.set(key, after);
+  return after;
 }
 
 /** Applies one SGR's parameters to the styles in effect, by kind. */
