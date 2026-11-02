@@ -9,7 +9,7 @@ import { serverHello } from "../client/socket.ts";
 import { Host } from "../host/host.ts";
 import { CLIENT_HEADER, HostServer } from "./http.ts";
 import { listen } from "./listeners.ts";
-import type { TailscaleRunner } from "./tailscale.ts";
+import { Whois, type TailscaleRunner } from "./tailscale.ts";
 
 let root: string;
 let host: Host;
@@ -184,6 +184,21 @@ describe("listeners", () => {
     const { ports } = await listen(server, "tcp://127.0.0.1:0", { allowAnonymous: true });
     assert.equal((await serverHello({ url: `http://127.0.0.1:${ports[0]}` })).identity, null);
     await assert.rejects(listen(server, "ftp://x:1"), /Cannot listen on/);
+  });
+});
+
+describe("Whois", () => {
+  it("asks again after tailscale failed to answer", async () => {
+    let calls = 0;
+    const whois = new Whois(async () => {
+      calls++;
+      if (calls === 1) throw new Error("tailscaled is restarting");
+      return JSON.stringify({ Node: { Name: "laptop." }, UserProfile: { LoginName: "me@x.com" } });
+    });
+    assert.equal(await whois.lookup("100.64.0.1"), null);
+    assert.equal((await whois.lookup("100.64.0.1"))?.login, "me@x.com");
+    assert.equal((await whois.lookup("100.64.0.1"))?.login, "me@x.com");
+    assert.equal(calls, 2);
   });
 });
 
