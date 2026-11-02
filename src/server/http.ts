@@ -29,6 +29,9 @@ export type Authorizer = (
   request: IncomingMessage,
 ) => Promise<{ identity: string | null } | { refused: string }>;
 
+/** The local socket, which only this user can open. */
+const LOCAL: Authorizer = async () => ({ identity: null });
+
 export interface ServerOptions {
   version: string;
   autostarted: boolean;
@@ -79,7 +82,7 @@ export class HostServer {
    */
   async listen(
     target: { path: string } | { fd: number } | { port: number; host: string },
-    authorize: Authorizer = async () => ({ identity: null }),
+    authorize: Authorizer = LOCAL,
   ): Promise<AddressInfo | string | null> {
     const server = createServer((request, response) => {
       void this.#handle(request, response, authorize).catch((error: unknown) => {
@@ -161,6 +164,7 @@ export class HostServer {
       });
       return;
     }
+    if (authorize !== LOCAL) this.#host.markRemote(client);
     if (request.method === "POST" && url.pathname === "/v1/rpc") {
       await this.#rpc(client, request, response);
       return;

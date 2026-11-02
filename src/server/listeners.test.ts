@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +7,7 @@ import { after, afterEach, before, describe, it } from "node:test";
 import { resolveServer } from "../client/hosts.ts";
 import { serverHello } from "../client/socket.ts";
 import { Host } from "../host/host.ts";
-import { HostServer } from "./http.ts";
+import { CLIENT_HEADER, HostServer } from "./http.ts";
 import { listen } from "./listeners.ts";
 import type { TailscaleRunner } from "./tailscale.ts";
 
@@ -139,6 +139,43 @@ describe("listeners", () => {
       });
     assert.equal(await hello("me@example.com"), 200);
     assert.equal(await hello("someone@else.com"), 403);
+  });
+
+  it("loads extension modules only for clients on the local socket", async () => {
+    start();
+    const marker = join(root, "loaded");
+    const extension = join(root, "marker.mjs");
+    writeFileSync(
+      extension,
+      `import { appendFileSync } from "node:fs";\nappendFileSync(${JSON.stringify(marker)}, "x");\nexport default () => {};\n`,
+    );
+    const { ports } = await listen(server, "tcp://127.0.0.1:0", { allowAnonymous: true });
+    const socket = join(root, "local.sock");
+    await server.listen({ path: socket });
+    const hello = (target: { port?: number | undefined; socketPath?: string }, client: string) =>
+      new Promise<number>((resolve, reject) => {
+        const outgoing = request({
+          ...(target.port ? { host: "127.0.0.1", port: target.port } : target),
+          path: "/v1/rpc",
+          method: "POST",
+          headers: { "Content-Type": "application/json", [CLIENT_HEADER]: client },
+        });
+        outgoing.on("error", reject);
+        outgoing.on("response", (response) => {
+          response.resume();
+          resolve(response.statusCode ?? 0);
+        });
+        outgoing.end(
+          JSON.stringify({
+            method: "client.hello",
+            params: { clientId: client, cwd: root, version: "test", extensions: [extension] },
+          }),
+        );
+      });
+    assert.equal(await hello({ port: ports[0] }, "remote"), 200);
+    assert.equal(existsSync(marker), false);
+    assert.equal(await hello({ socketPath: socket }, "local"), 200);
+    assert.equal(existsSync(marker), true);
   });
 
   it("refuses plain TCP unless anonymous callers are allowed", async () => {

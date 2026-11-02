@@ -88,6 +88,8 @@ interface Client {
   sent: Map<string, string>;
   /** Extension modules it named, which load for the threads it opens. */
   extensions: string[];
+  /** It calls from another machine, so the modules it names are not loaded here. */
+  remote: boolean;
 }
 
 /** One folder's extensions, with a set of named modules, and the commands they register. */
@@ -562,6 +564,11 @@ export class Host {
     const first = this.#recent[0];
     if (!first || first.seq > after + 1) return null;
     return this.#recent.filter((event) => event.seq > after);
+  }
+
+  /** Marks a client as one on a remote listener, from its first request on. */
+  markRemote(clientId: string): void {
+    this.#client(clientId).remote = true;
   }
 
   /** Runs one client request. */
@@ -1051,6 +1058,7 @@ export class Host {
         lookups: new Map(),
         sent: new Map(),
         extensions: [...(this.#options.extensions ?? [])],
+        remote: false,
       };
       this.#clients.set(id, client);
     }
@@ -1451,9 +1459,13 @@ export class Host {
     return {
       "client.hello": async (client, params) => {
         client.cwd = expandHome(params.cwd);
-        client.extensions = params.extensions.map((path) => resolvePath(client.cwd, path));
+        // Loading a module runs it here, which no one on another machine may make this host do.
+        const named = client.remote ? [] : params.extensions;
+        client.extensions = named.map((path) => resolvePath(client.cwd, path));
         client.connected = true;
         const warnings = [...(this.#options.warnings ?? [])];
+        if (named.length < params.extensions.length)
+          warnings.push("Extensions load only for clients on this machine; yours were left out.");
         const set = this.#set(client.cwd, client.extensions);
         await set.ready;
         const waiting = set.host.untrusted.length;
