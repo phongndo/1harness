@@ -346,7 +346,12 @@ export interface Methods {
       /** The client's own ID for this message; a retry with the same ID sends nothing. */
       requestId?: string;
     };
-    result: { messageId: string };
+    /**
+     * `seq` is the feed position when it was sent; `ahead` is how many turns
+     * end before the one it starts, which follows them. Both are absent on a
+     * retry, which sent nothing.
+     */
+    result: { messageId: string; seq?: number; ahead?: number };
   };
   "thread.respond": {
     params: { threadId: string; requestId: string; response: RequestResponse };

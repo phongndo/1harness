@@ -439,6 +439,26 @@ describe("operations", () => {
     );
   });
 
+  it("counts messages still passing input handlers among the turns ahead", async () => {
+    newHost();
+    const folder = join(root, `config-${count}`, "extensions");
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(
+      join(folder, "slow.ts"),
+      `export default function (api) {
+        api.onInput(async (input) => { await new Promise((done) => setTimeout(done, 20)); return input; });
+      }`,
+    );
+    const person = await connect("tui");
+    const opened = await call(person, "thread_open", { runtimeMode: "supervised" });
+    const threadId = String(opened["threadId"]);
+    await person.call("thread.send", { threadId, text: "first ASK" });
+    for (let tries = 0; tries < 100 && !host.manager.get(threadId)?.thread.busy; tries++)
+      await settle(5);
+    const sent = await person.call("thread.send", { threadId, text: "second" });
+    assert.equal(sent.ahead, 1, "the running turn ends first");
+  });
+
   it("reads and forks a closed thread that only the store keeps", async () => {
     newHost({}, Store.memory());
     const person = await connect("tui");

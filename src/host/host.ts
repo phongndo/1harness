@@ -1523,7 +1523,11 @@ export class Host {
           // Only recent retries matter.
           if (client.sent.size > 200) client.sent.delete(client.sent.keys().next().value!);
         }
-        return { messageId: message.id };
+        return {
+          messageId: message.id,
+          seq: this.#feed.seq,
+          ahead: thread.turnsBefore(message.id),
+        };
       },
       "thread.respond": async (_client, { threadId, requestId, response }) => {
         const managed = this.#open(threadId);

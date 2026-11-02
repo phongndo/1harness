@@ -7,6 +7,7 @@ import { parseArgs } from "node:util";
 import {
   DEFAULT_RUNTIME_MODE,
   RUNTIME_MODES,
+  isRuntimeMode,
   type HarnessId,
   type RuntimeMode,
   type SessionOptions,
@@ -31,6 +32,7 @@ import { harnessesCommand } from "./client/harnesses-cli.ts";
 import { hostsCommand, whoami } from "./client/hosts-cli.ts";
 import { loadHosts, resolveServer } from "./client/hosts.ts";
 import { threadsCommand } from "./client/threads-cli.ts";
+import { ACP_HELP, serveAcp } from "./client/acp-agent.ts";
 import { MCP_HELP, mcpBridge } from "./client/mcp-bridge.ts";
 import { opCommand } from "./client/ops-cli.ts";
 import { watch } from "./client/watch.ts";
@@ -48,6 +50,7 @@ Usage: 1harness [options] [prompt]
        1harness watch              report every thread's status to the terminal (OSC 7501)
        1harness op [name] [k=v…]   list what 1harness can do, or do it: open, steer, or move threads
        1harness mcp                serve that to agents 1harness does not run, as an MCP server
+       1harness acp                be an Agent Client Protocol agent for editors, over every harness
        1harness hosts <command>    name servers on other machines, for -S
        1harness whoami             who the server takes you to be
 
@@ -425,6 +428,8 @@ try {
           return client;
         },
       });
+  } else if (command === "acp") {
+    await acp(rest, server, version);
   } else if (command === "hosts") {
     process.exitCode = await hostsCommand(rest);
   } else if (command === "whoami") {
@@ -436,6 +441,39 @@ try {
   const message = error instanceof Error ? error.message : String(error);
   process.stderr.write(`1harness: ${message}\n`);
   process.exitCode = 2;
+}
+
+/** `1harness acp`: an ACP agent over stdio until the editor closes it. */
+async function acp(args: string[], server: string | undefined, version: string): Promise<void> {
+  const { values } = parseArgs({
+    args,
+    options: {
+      harness: { type: "string", short: "H" },
+      mode: { type: "string" },
+      help: { type: "boolean", short: "h" },
+    },
+  });
+  if (values.help) {
+    process.stdout.write(ACP_HELP);
+    return;
+  }
+  if (values.mode !== undefined && !isRuntimeMode(values.mode))
+    throw new Error(`--mode must be one of: ${RUNTIME_MODES.join(", ")}`);
+  const { settings } = loadSettings(configDir());
+  // Agents from agents.json are harnesses too.
+  registerConfiguredAgents(configDir());
+  const client = await connectClient(version, [], server);
+  await client.connect();
+  await serveAcp({
+    input: process.stdin,
+    output: process.stdout,
+    client,
+    defaults: {
+      harness: values.harness ?? settings.harness ?? loadLastHarness(stateDir()),
+      mode: values.mode ?? settings.mode ?? DEFAULT_RUNTIME_MODE,
+    },
+    version,
+  });
 }
 
 /**

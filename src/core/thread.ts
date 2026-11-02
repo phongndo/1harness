@@ -342,6 +342,18 @@ export class Thread {
     return this.#queue.map((entry) => entry.message);
   }
 
+  /**
+   * How many turns end before the one `messageId` starts: the running turn and
+   * the messages ahead of it, queued or still passing input handlers. None once
+   * it was sent to the harness, or joined the running turn.
+   */
+  turnsBefore(messageId: string): number {
+    const queued = this.#queue.findIndex((entry) => entry.message.id === messageId);
+    const pending = [...this.#pending].findIndex((message) => message.id === messageId);
+    const position = queued >= 0 ? queued : pending >= 0 ? this.#queue.length + pending : -1;
+    return position < 0 ? 0 : position + (this.#busy ? 1 : 0);
+  }
+
   get usage(): Usage | null {
     return this.#usage;
   }
