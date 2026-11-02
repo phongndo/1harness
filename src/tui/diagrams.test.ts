@@ -73,6 +73,16 @@ describe("diagrams", () => {
     assert.equal(cornerAlpha(Buffer.from(small.data, "base64")), 0);
     const narrow = diagrams.picture(FLOW, false, 200, CELL);
     assert.ok(narrow && narrow.pixelWidth <= 200, "never wider than the room for it");
+    assert.equal(
+      diagrams.picture(FLOW, false, 1800, CELL),
+      small,
+      "a wider screen alone draws none",
+    );
+    assert.notEqual(
+      diagrams.picture(FLOW, false, 192, CELL),
+      narrow,
+      "a narrower one draws it smaller",
+    );
   });
 
   it("cuts edge labels into their lines instead of painting a background behind them", () => {

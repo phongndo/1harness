@@ -95,6 +95,16 @@ export function fillVariables(svg: string, theme: Record<string, string>): strin
   return expand(svg, 0).replace(/--[\w-]+\s*:[^;"]*;?/g, "");
 }
 
+/** Diagrams, and pictures of them, kept: a long reply's worth at a few sizes. */
+const KEPT = 64;
+
+/** Keeps at most `KEPT` entries, forgetting the oldest. */
+function remember<T>(map: Map<string, T>, key: string, value: T): void {
+  map.delete(key);
+  map.set(key, value);
+  if (map.size > KEPT) map.delete(map.keys().next().value!);
+}
+
 /**
  * Renders and keeps diagrams. Drawing needs resvg's WASM, which loads once and
  * in the background: until it has, `picture` says so, and `onReady` is called
@@ -106,6 +116,8 @@ export class Diagrams implements FigureRenderer {
   #loaded = false;
   #broken = false;
   #pictures = new Map<string, Picture | null>();
+  /** Each diagram's layout, by theme and source, which no size changes; null when it has none. */
+  #layouts = new Map<string, { svg: string; width: number; height: number } | null>();
   #ascii = new Map<string, string[] | null>();
 
   constructor(onReady: () => void) {
@@ -124,8 +136,6 @@ export class Diagrams implements FigureRenderer {
     cell: CellSize,
     fill?: number,
   ): Picture | null | undefined {
-    const key = `${light ? "light" : "dark"}\0${width}\0${fill ?? ""}\0${cell.width}x${cell.height}\0${source}`;
-    if (this.#pictures.has(key)) return this.#pictures.get(key);
     if (!this.#loaded) {
       if (!this.#loading) {
         this.#loading = true;
@@ -139,25 +149,47 @@ export class Diagrams implements FigureRenderer {
       return undefined;
     }
     if (this.#broken) return null;
+    const layout = this.#layout(source, light);
+    if (!layout) return null;
+    // At the screen's density, as text is (16px cells being 1×), and never wider than the room for it.
+    const density = Math.min(3, Math.max(1, Math.round((cell.height / 16) * 4) / 4));
+    // Filling `width` by `fill` pixels instead, as on the whole screen, it grows to them.
+    const scale =
+      fill === undefined
+        ? Math.min(Math.max(cell.width, width), layout.width * density) / layout.width
+        : Math.min(width / layout.width, fill / layout.height);
+    const drawnWidth = layout.width * scale;
+    const drawnHeight = layout.height * scale;
+    // Drawn again only for a new size: a wider screen alone changes nothing.
+    const key = `${light ? "light" : "dark"}\0${drawnWidth}x${drawnHeight}\0${cell.width}x${cell.height}\0${source}`;
+    const known = this.#pictures.get(key);
+    if (known !== undefined) return known;
     let drawn: Picture | null = null;
+    try {
+      const canvas = onCells(layout.svg, drawnWidth, drawnHeight, cell);
+      drawn = picture(rasterize(canvas, figureFont()));
+    } catch {
+      // Text with no font to draw it in.
+    }
+    remember(this.#pictures, key, drawn);
+    return drawn;
+  }
+
+  /** A diagram laid out as an SVG in the theme's colors, and its size; null when Pele cannot read it. */
+  #layout(source: string, light: boolean): { svg: string; width: number; height: number } | null {
+    const key = `${light ? "light" : "dark"}\0${source}`;
+    const known = this.#layouts.get(key);
+    if (known !== undefined) return known;
+    let layout = null;
     try {
       const svg = renderMermaid(source).svg;
       const filled = fillVariables(floating(svg), THEMES[light ? "light" : "dark"]);
-      // At the screen's density, as text is (16px cells being 1×), and never wider than the room for it.
-      const density = Math.min(3, Math.max(1, Math.round((cell.height / 16) * 4) / 4));
-      const natural = svgSize(svg);
-      // Filling `width` by `fill` pixels instead, as on the whole screen, it grows to them.
-      const scale =
-        fill === undefined
-          ? Math.min(Math.max(cell.width, width), natural.width * density) / natural.width
-          : Math.min(width / natural.width, fill / natural.height);
-      const canvas = onCells(filled, natural.width * scale, natural.height * scale, cell);
-      drawn = picture(rasterize(canvas, figureFont()));
+      layout = { svg: filled, ...svgSize(svg) };
     } catch {
-      // A diagram Pele cannot read, or text with no font to draw it in.
+      // A diagram Pele cannot read.
     }
-    this.#pictures.set(key, drawn);
-    return drawn;
+    remember(this.#layouts, key, layout);
+    return layout;
   }
 
   /** The diagram in box-drawing characters, for a terminal without graphics; null if it cannot be. */
