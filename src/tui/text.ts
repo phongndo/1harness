@@ -94,6 +94,15 @@ function wideEnclosed(code: number): boolean {
   );
 }
 
+/** Whether text has only printable characters and line breaks, as `plainText` leaves it. */
+function isPlain(text: string): boolean {
+  for (let index = 0; index < text.length; index++) {
+    const code = text.charCodeAt(index);
+    if (code < 0x20 ? code !== 0x0a : code >= 0x7f && code < 0xa0) return false;
+  }
+  return true;
+}
+
 /**
  * Text from outside, such as a command's output or a tool's input, as plain
  * printable text: escape sequences and control characters would move the
@@ -102,6 +111,8 @@ function wideEnclosed(code: number): boolean {
  * ends as, for a command's output.
  */
 export function plainText(text: string, oneLine = false, overwrite = false): string {
+  // Most text is plain already, as a reply is; taking it apart to find so is slow.
+  if (!oneLine && isPlain(text)) return text;
   const unified = stripVTControlCharacters(text).replace(/\r\n/g, "\n");
   // Outside a terminal's output, a lone \r is a line break, as old Mac text has it.
   const lines = (overwrite ? unified : unified.replace(/\r/g, "\n")).split("\n").map((line) => {
@@ -128,6 +139,13 @@ export function visibleWidth(text: string): number {
   let width = 0;
   const plain = stripVTControlCharacters(text);
   for (let index = 0; index < plain.length;) {
+    // Most of what is measured is printable ASCII, a column each.
+    const unit = plain.charCodeAt(index);
+    if (unit >= 0x20 && unit < 0x7f) {
+      width++;
+      index++;
+      continue;
+    }
     const code = plain.codePointAt(index) ?? 0;
     const length = code > 0xffff ? 2 : 1;
     width += widthBefore(code, plain.codePointAt(index + length));
@@ -177,6 +195,10 @@ function scan(
   }
 }
 
+/** Styles in effect after a sequence, by the styles before it and the sequence. */
+const tracked = new Map<string, string>();
+const TRACKED = 1024;
+
 /**
  * The styles in effect after an SGR sequence, as the shortest sequence that
  * sets them again: one entry per kind, so a long styled line does not carry
@@ -184,11 +206,18 @@ function scan(
  */
 function trackStyle(active: string, sequence: string): string {
   if (!sequence.endsWith("m")) return active;
+  // The transcript's few styles meet in few ways, each met again on every row wrapped.
+  const key = `${active}\0${sequence}`;
+  const known = tracked.get(key);
+  if (known !== undefined) return known;
   const state = new Map<string, string>();
   // What is in effect is a run of SGR sequences, each `ESC [ params m`.
   for (const part of active.split("\x1b[").slice(1)) applySgr(state, part.slice(0, -1));
   applySgr(state, sequence.slice(2, -1));
-  return [...state.values()].map((codes) => `\x1b[${codes}m`).join("");
+  const after = [...state.values()].map((codes) => `\x1b[${codes}m`).join("");
+  if (tracked.size >= TRACKED) tracked.clear();
+  tracked.set(key, after);
+  return after;
 }
 
 /** Applies one SGR's parameters to the styles in effect, by kind. */

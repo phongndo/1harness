@@ -97,8 +97,10 @@ function punctuation(char: string | undefined): boolean {
  * beside space or punctuation, and `_` never opens or closes inside a word.
  */
 function emphasis(text: string, marker: string, paint: (body: string) => string): string {
+  // Most text has none of a marker; reading it a character at a time would find none.
+  if (!text.includes(marker)) return text;
   const size = marker.length;
-  const at = (index: number) => text.slice(index, index + size) === marker;
+  const at = (index: number) => text.startsWith(marker, index);
   // A marker that is part of a longer run of its character is not this marker.
   const lone = (index: number) =>
     at(index) && text[index - 1] !== marker[0] && text[index + size] !== marker[0];
@@ -370,6 +372,12 @@ export interface MarkdownOptions {
   image?: (src: string, alt: string, columns: number) => string[] | null;
   /** Told where each code block, figure, and image is, so a click on one can copy or enlarge it. */
   region?: (region: MarkdownRegion) => void;
+  /**
+   * Told of each blank line between blocks, by its index among the lines and
+   * the rows before what follows it: nothing after it changes what came
+   * before, so the text after it renders alone the same.
+   */
+  settled?: (line: number, rows: number) => void;
 }
 
 /** A display's delimiters: `$$…$$` and `\[…\]`. */
@@ -555,6 +563,7 @@ export function renderMarkdown(
     if (raw.trim() === "") {
       if (!blank) rows.push("");
       blank = true;
+      options.settled?.(index, rows.length);
       continue;
     }
     // Closing #s come after a space, so `C#` keeps its own.

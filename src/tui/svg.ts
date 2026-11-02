@@ -24,15 +24,27 @@ export function loadResvg(): Promise<boolean> {
   return engine;
 }
 
-/** An SVG as PNG bytes, its text in `font` where it has text; resvg must have loaded. */
-export function rasterize(svg: string, font: Uint8Array | null): Uint8Array {
-  return new Resvg(svg, {
+function fontOptions(font: Uint8Array | null) {
+  return {
     font: font
       ? { fontBuffers: [font], loadSystemFonts: false, defaultFontFamily: "sans-serif" }
       : { loadSystemFonts: false },
-  })
-    .render()
-    .asPng();
+  };
+}
+
+/** An SVG as PNG bytes, its text in `font` where it has text; resvg must have loaded. */
+export function rasterize(svg: string, font: Uint8Array | null): Uint8Array {
+  return new Resvg(svg, fontOptions(font)).render().asPng();
+}
+
+/** Whether resvg can read an SVG, without the cost of drawing it; resvg must have loaded. */
+export function readable(svg: string, font: Uint8Array | null): boolean {
+  try {
+    new Resvg(svg, fontOptions(font)).free();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** The size an SVG says it is, in its own pixels. */

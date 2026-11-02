@@ -69,10 +69,25 @@ describe("diagrams", () => {
     assert.equal(dense.pixelWidth % 17, 0);
     assert.equal(dense.pixelHeight % 33, 0);
     assert.ok(dense.pixelWidth > small.pixelWidth * 1.8, "drawn for the denser screen");
+    for (const one of [small, dense])
+      assert.deepEqual(pngSize(Buffer.from(one.data, "base64")), {
+        width: one.pixelWidth,
+        height: one.pixelHeight,
+      });
     // The corner is the terminal's own background showing through.
     assert.equal(cornerAlpha(Buffer.from(small.data, "base64")), 0);
     const narrow = diagrams.picture(FLOW, false, 200, CELL);
     assert.ok(narrow && narrow.pixelWidth <= 200, "never wider than the room for it");
+    assert.equal(
+      diagrams.picture(FLOW, false, 1800, CELL),
+      small,
+      "a wider screen alone draws none",
+    );
+    assert.notEqual(
+      diagrams.picture(FLOW, false, 192, CELL),
+      narrow,
+      "a narrower one draws it smaller",
+    );
   });
 
   it("cuts edge labels into their lines instead of painting a background behind them", () => {
