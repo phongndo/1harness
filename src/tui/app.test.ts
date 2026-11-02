@@ -255,3 +255,60 @@ describe("App commands", () => {
     await session.sees("Mode: full-access");
   });
 });
+
+describe("App threads and keys", () => {
+  it("opens another thread with /new, and switches back to the first from ctrl+t", async () => {
+    const session = await start({ prompt: "alpha" });
+    await session.sees("Done with alpha");
+    await session.type("/new\r");
+    await session.sees("New scripted thread");
+    await session.type("beta\r");
+    const second = await session.sees("Done with beta");
+    // A new thread starts with an empty transcript.
+    assert.doesNotMatch(second, /Done with alpha/);
+    await session.type("\x14");
+    const picker = await session.sees("enter resume");
+    assert.match(picker, /Resume\s+◉ This folder\s+○ All\s+○ Archived/);
+    // Most recent first: the thread on screen, then the one before it.
+    assert.match(picker, /› now\s+beta\s+scripted\n\s+now\s+alpha\s+scripted/);
+    await session.type("\x1b[B");
+    await session.type("\r");
+    await session.sees("Done with alpha");
+    assert.doesNotMatch(session.terminal.text(), /Done with beta/);
+  });
+
+  it("renames the thread with /rename", async () => {
+    const session = await start({ prompt: "alpha" });
+    await session.sees("Done with alpha");
+    await session.type("/rename Parser work\r");
+    await session.sees(/Renamed \w+: Parser work/);
+    const id = [...session.client.threads.keys()][0]!;
+    assert.equal(session.client.threads.get(id)?.title, "Parser work");
+  });
+
+  it("shows tool output whole with ctrl+x, and in brief again", async () => {
+    const session = await start({ prompt: "alpha" });
+    const brief = await session.sees("Done with alpha");
+    assert.match(brief, /Ran 1 command/);
+    assert.doesNotMatch(brief, /ok 1/);
+    await session.type("\x18");
+    const whole = await session.sees("details · ctrl+x");
+    assert.match(whole, /Ran pnpm test\n+\s+ok 1/);
+    await session.type("\x18");
+    await session.sees("Ran 1 command");
+    assert.doesNotMatch(session.terminal.text(), /details · ctrl\+x/);
+  });
+
+  it("clears the composer with ctrl+c, then exits on ctrl+c twice", async () => {
+    const session = await start();
+    await session.sees("supervised · scripted · big");
+    await session.type("half a thought");
+    await session.sees("┃ half a thought");
+    await session.type("\x03");
+    await session.sees("┃ Ask anything");
+    await session.type("\x03");
+    await session.sees("Press ctrl+c again to exit");
+    await session.type("\x03");
+    assert.equal(await session.done, undefined);
+  });
+});
