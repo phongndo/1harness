@@ -215,6 +215,12 @@ describe("HostServer", () => {
     await start();
     const client = await connect("a");
     await client.call("thread.open", { harness: "scripted", settings });
+    await host.call("raw", "client.hello", {
+      clientId: "raw",
+      cwd: root,
+      version: "test",
+      extensions: [],
+    });
     assert.deepEqual(await lines("/v1/events?after=-100", 200), ['{"type":"resync"}']);
     const fromNow = await lines(`/v1/events?after=${host.seq}`, 100);
     assert.deepEqual(fromNow, []);
@@ -315,4 +321,68 @@ describe("HostServer", () => {
     assert.equal(host.clients, 0);
     assert.deepEqual(await lines(`/v1/events?after=${host.seq}`, 100), ['{"type":"resync"}']);
   });
+
+  it("counts a client only once it says hello, and not after it dies before its stream opens", async () => {
+    await startQuick();
+    await post({ method: "harnesses.list", params: {} }, { [CLIENT_HEADER]: "passing" });
+    assert.equal(host.clients, 0);
+    await post(
+      {
+        method: "client.hello",
+        params: { clientId: "raw", cwd: root, version: "test", extensions: [] },
+      },
+      { [CLIENT_HEADER]: "raw" },
+    );
+    assert.equal(host.clients, 1);
+    await settle(60);
+    assert.equal(host.clients, 0);
+  });
+
+  it("lets go of a client gone for good, and of the empty thread it showed", async () => {
+    await startQuick();
+    const raw = { [CLIENT_HEADER]: "raw" };
+    await post(
+      {
+        method: "client.hello",
+        params: { clientId: "raw", cwd: root, version: "test", extensions: [] },
+      },
+      raw,
+    );
+    const opened = (await post(
+      { method: "thread.open", params: { harness: "scripted", settings } },
+      raw,
+    )) as {
+      result: { id: string };
+    };
+    const threadId = opened.result.id;
+    await post({ method: "client.show", params: { threadId } }, raw);
+    await lines(`/v1/events?after=${host.seq}`, 30);
+    // Gone past the grace, its thread waits for it a while.
+    await settle(40);
+    assert.equal(host.clients, 0);
+    assert.equal(host.manager.get(threadId)?.status, "idle");
+    // Gone for good, its empty thread is dropped, and so is the client.
+    await settle(150);
+    assert.equal(host.manager.get(threadId), undefined);
+    assert.deepEqual(await lines(`/v1/events?after=${host.seq}`, 100), ['{"type":"resync"}']);
+  });
 });
+
+/** A server that counts a client gone after 20 ms, and gone for good after 100 more. */
+async function startQuick(): Promise<void> {
+  socket = join(root, `s${++count}.sock`);
+  host = new Host({
+    version: "test",
+    cwd: root,
+    configDir: join(root, "config"),
+    stateDir: join(root, "state"),
+    idleCloseMs: 0,
+  });
+  server = new HostServer(host, {
+    version: "test",
+    autostarted: false,
+    leaveGraceMs: 20,
+    forgetAfterMs: 100,
+  });
+  await server.listen({ path: socket });
+}

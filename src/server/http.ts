@@ -21,6 +21,11 @@ const KEEPALIVE_MS = 15_000;
 const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 /** How long a client may be gone before it counts as having left, its picks dismissed. */
 const LEAVE_GRACE_MS = 10_000;
+/**
+ * How long after leaving a client is forgotten, with the empty thread it
+ * showed: long enough for a laptop to wake and pick up where it was.
+ */
+const FORGET_AFTER_MS = 30 * 60_000;
 /** How many answers to remember per client, for requests retried after a dropped connection. */
 const REMEMBERED = 100;
 /** How much of those answers to keep per client; pictures and pages would hold megabytes each. */
@@ -55,6 +60,8 @@ export interface ServerOptions {
   onActivity?: () => void;
   /** How long a client may be gone before it counts as having left. */
   leaveGraceMs?: number;
+  /** How long after leaving a client is forgotten. */
+  forgetAfterMs?: number;
 }
 
 interface Answer {
@@ -83,8 +90,8 @@ export class HostServer {
   #streams = new Map<string, Set<ServerResponse>>();
   /** Clients whose streams closed, and the timer that counts them gone. */
   #leaving = new Map<string, NodeJS.Timeout>();
-  /** Clients counted as gone, which say hello again if they come back. */
-  #departed = new Set<string>();
+  /** Clients that left, and the timer that forgets them. */
+  #departed = new Map<string, NodeJS.Timeout>();
   /** Answers by client and request ID. */
   #answers = new Map<string, Remembered>();
   #startedAt = Date.now();
@@ -130,8 +137,10 @@ export class HostServer {
   async close(): Promise<void> {
     for (const streams of this.#streams.values()) for (const stream of streams) stream.end();
     this.#streams.clear();
-    for (const timer of this.#leaving.values()) clearTimeout(timer);
+    for (const timer of [...this.#leaving.values(), ...this.#departed.values()])
+      clearTimeout(timer);
     this.#leaving.clear();
+    this.#departed.clear();
     await Promise.all(
       this.#servers.map(
         (server) =>
@@ -185,9 +194,10 @@ export class HostServer {
     }
     if (request.method === "GET" && url.pathname === "/v1/events") {
       const instance = url.searchParams.get("instance");
-      // Events from another run of the host, or a client counted as gone, start over.
+      // Events from another run of the host, or for a client it does not count as here, as
+      // one that left or never said hello, start over.
       const stale =
-        (instance !== null && instance !== this.#host.instance) || this.#departed.delete(client);
+        (instance !== null && instance !== this.#host.instance) || !this.#host.connected(client);
       this.#events(client, stale ? null : Number(url.searchParams.get("after") ?? "0"), response);
       return;
     }
@@ -253,7 +263,11 @@ export class HostServer {
     try {
       // The client says which method; the host refuses ones it has not.
       const result = await this.#host.call(client, method as Method, params as never);
-      if (method === "client.hello") this.#arrived(client);
+      if (method === "client.hello") {
+        this.#arrived(client);
+        // One that dies before its stream opens would otherwise count as here for good.
+        if (!this.#streams.has(client)) this.#left(client);
+      }
       if (method === "client.bye") this.#forget(client);
       return { status: 200, body: JSON.stringify({ result: result ?? null }) };
     } catch (error) {
@@ -307,11 +321,13 @@ export class HostServer {
     });
   }
 
-  /** A client is here: it is no longer counted as leaving. */
+  /** A client is here: it is no longer counted as leaving, or forgotten. */
   #arrived(client: string): void {
-    const timer = this.#leaving.get(client);
-    if (timer) clearTimeout(timer);
-    this.#leaving.delete(client);
+    for (const timers of [this.#leaving, this.#departed]) {
+      const timer = timers.get(client);
+      if (timer) clearTimeout(timer);
+      timers.delete(client);
+    }
   }
 
   /** A client's streams closed; unless it comes back soon, it has left. */
@@ -321,13 +337,25 @@ export class HostServer {
       this.#leaving.delete(client);
       if (this.#streams.has(client)) return;
       this.#forget(client);
-      this.#departed.add(client);
-      // It may be back: the thread it showed stays, though nothing is in it.
+      // It may be back: the thread it showed stays a while, though nothing is in it.
       void this.#host.disconnect(client, { discard: false });
+      this.#departing(client);
       this.#options.onActivity?.();
     }, this.#options.leaveGraceMs ?? LEAVE_GRACE_MS);
     timer.unref();
     this.#leaving.set(client, timer);
+  }
+
+  /** A client that left and does not come back is forgotten, with the empty thread it showed. */
+  #departing(client: string): void {
+    clearTimeout(this.#departed.get(client));
+    const timer = setTimeout(() => {
+      this.#departed.delete(client);
+      if (this.#streams.has(client) || this.#host.connected(client)) return;
+      void this.#host.disconnect(client);
+    }, this.#options.forgetAfterMs ?? FORGET_AFTER_MS);
+    timer.unref();
+    this.#departed.set(client, timer);
   }
 
   #forget(client: string): void {

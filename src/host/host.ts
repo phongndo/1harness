@@ -620,7 +620,8 @@ export class Host {
   /**
    * A client left: its picks resolve as dismissed. One that said goodbye is
    * forgotten, and a thread it opened that has nothing in it is dropped; one
-   * that only went quiet keeps them, in case it comes back.
+   * that only went quiet keeps them, in case it comes back, until it is
+   * disconnected again for good.
    */
   async disconnect(clientId: string, options: { discard?: boolean } = {}): Promise<void> {
     const client = this.#clients.get(clientId);
@@ -632,20 +633,27 @@ export class Host {
     client.pending.clear();
     const showing = client.showing;
     const left = client.left;
-    client.showing = null;
-    client.left = null;
     if (showing) {
       // What it showed up to the end was seen.
       this.#markSeen(showing);
       if (discard) await this.#discardIfEmpty(showing, client);
     }
     if (left && discard) await this.#discardIfEmpty(left, client);
-    if (discard) this.#clients.delete(clientId);
+    if (discard) {
+      client.showing = null;
+      client.left = null;
+      this.#clients.delete(clientId);
+    }
     // Its live pages ran for it alone.
     this.live.closeOwned(clientId);
   }
 
-  /** How many clients are connected. */
+  /** Whether a client said hello and has not left since, so it can pick up where it was. */
+  connected(clientId: string): boolean {
+    return this.#clients.get(clientId)?.connected === true;
+  }
+
+  /** How many clients are connected: said hello, and have not left. */
   get clients(): number {
     return [...this.#clients.values()].filter((client) => client.connected).length;
   }
@@ -1099,7 +1107,8 @@ export class Host {
         cwd: this.#options.cwd,
         showing: null,
         left: null,
-        connected: true,
+        // Not until it says hello: a request alone is no one staying.
+        connected: false,
         picks: new Map(),
         pending: new Map(),
         lookups: new Map(),
