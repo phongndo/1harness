@@ -1,8 +1,8 @@
 import { BoundedMap, FetchCache } from "./cache.ts";
 import type { FigureRenderer } from "./figures.ts";
-import { picture, type CellSize, type Picture } from "./images.ts";
+import type { CellSize, Picture } from "./images.ts";
 import { visibleWidth } from "./text.ts";
-import { figureFont, loadResvg, onCells, rasterize } from "./svg.ts";
+import { drawLater, loadResvg, onCells } from "./svg.ts";
 
 // LaTeX math, two ways. In a line of prose, `$…$` reads as Unicode text, as
 // it would be typed: Greek letters, operators, sub- and superscripts, `a/b`
@@ -895,11 +895,12 @@ function naturalSize(svg: string, em: number): { width: number; height: number }
 /**
  * Typesets and keeps equations. MathJax and resvg load in the background
  * when the first equation comes; each equation is typeset once, off the
- * frame, and drawn again only for a new size or theme. Until it is drawn,
+ * frame, and drawn again only for a new size or theme. Until it is typeset,
  * `picture` says so, and `onReady` is called once there is more to show.
  */
 export class Equations implements FigureRenderer {
   #onReady: () => void;
+  /** MathJax and resvg, loading or loaded: what typesets, or null when either cannot. */
   #engine: Promise<Typeset | null> | null = null;
   #broken = false;
   /** Each equation's SVG, by its TeX: null when it cannot be typeset. */
@@ -934,16 +935,16 @@ export class Equations implements FigureRenderer {
     const drawnWidth = Math.max(1, Math.round(natural.width * scale));
     const drawnHeight = Math.max(1, Math.round(natural.height * scale));
     // Drawn again only for a new size, cell, or theme: a wider screen alone changes nothing.
-    const key = `${light ? "l" : "d"}\0${drawnWidth}x${drawnHeight}\0${cell.width}x${cell.height}\0${tex}`;
+    const key = `${light ? "light" : "dark"}\0${drawnWidth}x${drawnHeight}\0${cell.width}x${cell.height}\0${tex}`;
     const known = this.#pictures.get(key);
     if (known !== undefined) return known;
-    let drawn: Picture | null = null;
-    try {
-      const inked = svg.replace(/currentColor/g, INK[light ? "light" : "dark"]);
-      drawn = picture(rasterize(onCells(inked, drawnWidth, drawnHeight, cell), figureFont()));
-    } catch {
-      // Drawn as text instead.
-    }
+    const inked = svg.replace(/currentColor/g, INK[light ? "light" : "dark"]);
+    // Rasterized once sent, as a diagram is.
+    const drawn = drawLater(onCells(inked, drawnWidth, drawnHeight, cell), () => {
+      // Drawn as text instead, once the views draw again.
+      this.#pictures.set(key, null);
+      this.#onReady();
+    });
     this.#pictures.set(key, drawn);
     return drawn;
   }

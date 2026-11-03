@@ -106,7 +106,9 @@ const KEPT = 64;
  */
 export class Diagrams implements FigureRenderer {
   #onReady: () => void;
-  #loading = false;
+  /** resvg, loading or loaded: whether it can draw. */
+  #engine: Promise<boolean> | null = null;
+  /** Whether the engine has loaded, which a layout needs, being drawn as it is asked for. */
   #loaded = false;
   #broken = false;
   #pictures = new BoundedMap<string, Picture | null>(KEPT);
@@ -131,15 +133,7 @@ export class Diagrams implements FigureRenderer {
     fill?: number,
   ): Picture | null | undefined {
     if (!this.#loaded) {
-      if (!this.#loading) {
-        this.#loading = true;
-        void loadResvg().then((ready) => {
-          this.#loaded = true;
-          // Without the engine, every diagram is drawn in characters.
-          this.#broken = !ready;
-          this.#onReady();
-        });
-      }
+      void this.#load();
       return undefined;
     }
     if (this.#broken) return null;
@@ -166,6 +160,17 @@ export class Diagrams implements FigureRenderer {
     });
     this.#pictures.set(key, drawn);
     return drawn;
+  }
+
+  #load(): Promise<boolean> {
+    this.#engine ??= loadResvg().then((ready) => {
+      this.#loaded = true;
+      // Without the engine, every diagram is drawn in characters.
+      this.#broken = !ready;
+      this.#onReady();
+      return ready;
+    });
+    return this.#engine;
   }
 
   /** A diagram laid out as an SVG in the theme's colors, and its size; null when Pele cannot read it. */
@@ -199,7 +204,6 @@ export class Diagrams implements FigureRenderer {
     return rows;
   }
 
-  /** Whether the engine could not load, so pictures are never drawn. */
   get available(): boolean {
     return !this.#broken;
   }
