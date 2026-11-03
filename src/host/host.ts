@@ -928,8 +928,8 @@ export class Host {
     this.#writer?.schedule();
   }
 
-  /** A live page's answer, or why it has none, as the client is told. */
-  async #page<T>(work: () => Promise<T>): Promise<T> {
+  /** What a page or picture drew, or why it could not, as the client is told. */
+  async #rendered<T>(work: () => Promise<T>): Promise<T> {
     try {
       return await work();
     } catch (error) {
@@ -1695,7 +1695,7 @@ export class Host {
       "files.image": async (_client, { path, width, height }) =>
         fileImage(this.media, path, width, height),
       "page.open": async (client, { html, width, height, scale, dark }) =>
-        this.#page(() =>
+        this.#rendered(() =>
           this.live.open(client.id, html, {
             width,
             ...(height ? { height } : {}),
@@ -1703,16 +1703,17 @@ export class Host {
             dark,
           }),
         ),
-      "page.frame": async (_client, { id }) => this.#page(() => this.live.frame(id)),
-      "page.input": async (_client, { id, event }) => this.#page(() => this.live.input(id, event)),
+      "page.frame": async (_client, { id }) => this.#rendered(() => this.live.frame(id)),
+      "page.input": async (_client, { id, event }) =>
+        this.#rendered(() => this.live.input(id, event)),
       "page.resize": async (_client, { id, width, height, scale }) =>
-        this.#page(() => this.live.resize(id, width, height, scale)),
+        this.#rendered(() => this.live.resize(id, width, height, scale)),
       "page.close": async (_client, { id }) => {
         await this.live.close(id);
         return null;
       },
-      "media.html": async (_client, { html, width, scale, dark, transparent }) => {
-        try {
+      "media.html": async (_client, { html, width, scale, dark, transparent }) =>
+        this.#rendered(async () => {
           const png = await this.media.html(html, {
             width,
             scale,
@@ -1720,10 +1721,7 @@ export class Host {
             transparent: transparent === true,
           });
           return { data: png.toString("base64") };
-        } catch (error) {
-          throw new RpcError("render_failed", errorMessage(error));
-        }
-      },
+        }),
       "files.search": async (_client, { cwd: asked, query, limit }) => {
         const cwd = resolvePath(expandHome(asked));
         let files = this.#files.get(cwd);
