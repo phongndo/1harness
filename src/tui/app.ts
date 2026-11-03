@@ -729,12 +729,6 @@ export class App {
       this.#notice(warning.startsWith("This folder has") ? "info" : "warning", warning);
     this.#registerHostCommands(hello.commands);
     for (const request of hello.pending) this.#ui(request);
-    const held = hello.threads.filter((thread) => thread.held).map((thread) => thread.id);
-    if (held.length > 0)
-      this.#notice(
-        "info",
-        `${held.join(", ")} ${held.length === 1 ? "has" : "have"} messages waiting from before 1harness stopped; /resume opens ${held.length === 1 ? "it" : "them"}.`,
-      );
     if (!this.#harness) {
       const chosen = await this.#chooseHarness();
       if (!chosen) {
