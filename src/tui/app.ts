@@ -39,7 +39,7 @@ import { FetchCache } from "./cache.ts";
 import { Suggestions, inMenuOrder } from "./completion.ts";
 import { Editor, applyEditingKey } from "./editor.ts";
 import { footerRows, statusLine, type Footer } from "./footer.ts";
-import { CLICK_MS, InputDecoder, WHEEL_ROWS, type InputEvent, type Key } from "./input.ts";
+import { InputDecoder, WHEEL_ROWS, type InputEvent, type Key } from "./input.ts";
 import { LivePages } from "./live.ts";
 import { codeBlocks } from "./markdown.ts";
 import { ThreadLogs } from "./logs.ts";
@@ -59,16 +59,8 @@ import {
   type ThreadStatusInput,
 } from "./program-status.ts";
 import { setLightTheme, style } from "./theme.ts";
-import { truncate, visibleWidth } from "./text.ts";
 import { IMAGE_INDENT, type Hit, type RenderContext, type Target } from "./transcript.ts";
-import {
-  ordered,
-  paintSelection,
-  selectedText,
-  wordAt,
-  type Point,
-  type Selection,
-} from "./pointer.ts";
+import { Mouse, paintSelection } from "./pointer.ts";
 import { CELL_QUERY, GRAPHICS_QUERY, PLACEHOLDER_LIMIT, fit } from "./images.ts";
 import { ThreadView, type ViewContext } from "./view.ts";
 
@@ -254,21 +246,15 @@ export class App {
   };
   /** Images, pages, and figures, drawn for the transcript where the terminal shows pictures. */
   #pictures: Pictures;
-  /** What the last frame's transcript rows do when clicked, by screen row; `#top` is the first one's place. */
+  /** What the last frame's transcript rows do when clicked, by screen row. */
   #targets: (Hit | null)[] = [];
   /** Whether the host runs pages live, scripts and all. */
   #liveHost = false;
   #livePages: LivePages;
-  #top = 0;
-  /** The last frame's transcript rows as rendered, for picking a word out of one. */
-  #shownRows: string[] = [];
   /** The list the last frame showed, and the screen row its rows start on, so a click can choose. */
   #listAt: { menu: Menu; row: number } | null = null;
-  /** Text selected, or being selected, with the mouse, in the transcript's rows. */
-  #selection: Selection | null = null;
-  /** Where the left button went down, to tell a click from a drag; the last clicks, for double ones. */
-  #press: { row: number; column: number; dragged: boolean; anchor: Point | null } | null = null;
-  #clicks = { at: 0, row: -1, column: -1, count: 0 };
+  /** Text selected with the mouse, and the clicks it makes. */
+  #pointer: Mouse;
   /** A word in the status line for a moment, such as what was copied. */
   #toast: { text: string; until: number } | null = null;
   /** A picture on the whole screen, opened by a click on it. */
@@ -410,6 +396,20 @@ export class App {
       cwd: () => this.#cwd(),
       submit: (text) => this.#submit(text),
       notice: (level, text) => this.#notice(level, text),
+      schedule: () => this.#schedule(),
+    });
+    this.#pointer = new Mouse({
+      column: () => this.#column(),
+      scrollBy: (rows) => this.#scrollBy(rows),
+      scrolled: () => this.#view.scroll,
+      rows: (from, to) =>
+        this.#view.transcript.view(
+          this.#renderContext(),
+          to - from + 1,
+          Math.max(0, this.#view.total - to - 1),
+        ).rows,
+      click: (row, column) => this.#click(row, column),
+      copy: (text, said) => this.#copy(text, said),
       schedule: () => this.#schedule(),
     });
     this.#requests = new Requests({
@@ -1855,7 +1855,7 @@ export class App {
       return;
     }
     // A key ends what the mouse selected.
-    this.#selection = null;
+    this.#pointer.clear();
     if (key.ctrl && key.name === "z") {
       this.#suspend();
       return;
@@ -2064,66 +2064,10 @@ export class App {
     applyEditingKey(this.#editor, key);
   }
 
-  /**
-   * The mouse: a drag over the transcript selects its text, copied when the
-   * button is let go; a double click takes a word, a third the row. A click
-   * chooses a list's entry, copies a code block, or opens a picture whole.
-   */
+  /** The mouse: the viewer's while it is open, else what it selects in the transcript, or clicks. */
   #mouse(event: Extract<InputEvent, { type: "mouse" }>): void {
-    if (this.#viewer) {
-      this.#viewer.mouse(event);
-      return;
-    }
-    if (event.button !== 0) return;
-    const { margin, width } = this.#column();
-    const column = Math.max(0, Math.min(width - 1, event.column - margin));
-    const rows = this.#targets.length;
-    if (event.action === "press") {
-      // A selection starts where the button went down, once it moves.
-      const anchor = event.row < rows ? { row: this.#top + event.row, column } : null;
-      this.#press = { row: event.row, column: event.column, dragged: false, anchor };
-      this.#selection = null;
-      this.#schedule();
-      return;
-    }
-    const press = this.#press;
-    if (event.action === "drag") {
-      if (!press?.anchor || rows === 0) return;
-      if (!press.dragged && event.row === press.row && event.column === press.column) return;
-      press.dragged = true;
-      this.#selection ??= { anchor: press.anchor, head: press.anchor };
-      // Held past the transcript's top or bottom, it scrolls to take in more.
-      if (event.row <= 0) this.#scrollBy(1);
-      else if (event.row >= rows && this.#view.scroll > 0) this.#scrollBy(-1);
-      const row = Math.max(0, Math.min(rows - 1, event.row));
-      this.#selection.head = { row: this.#top + row, column };
-      this.#schedule();
-      return;
-    }
-    this.#press = null;
-    if (press?.dragged && this.#selection) {
-      this.#copySelection();
-      return;
-    }
-    this.#selection = null;
-    if (!press) return;
-    const now = Date.now();
-    const last = this.#clicks;
-    const again =
-      now - last.at < CLICK_MS &&
-      last.row === event.row &&
-      Math.abs(last.column - event.column) <= 1;
-    this.#clicks = {
-      at: now,
-      row: event.row,
-      column: event.column,
-      count: again ? last.count + 1 : 1,
-    };
-    if (this.#clicks.count > 1 && event.row < rows) {
-      this.#selectAt(event.row, column, this.#clicks.count > 2);
-      return;
-    }
-    this.#click(event.row, column);
+    if (this.#viewer) this.#viewer.mouse(event);
+    else this.#pointer.event(event);
   }
 
   /** A click: on a list's entry it chooses it, on code it copies it, on a picture it shows it whole. */
@@ -2164,42 +2108,6 @@ export class App {
     } else this.#openViewer(target);
   }
 
-  /** Selects and copies the word under a double click, or a triple click's whole row. */
-  #selectAt(row: number, column: number, whole: boolean): void {
-    const text = this.#shownRows[row] ?? "";
-    const range = whole
-      ? { from: 0, to: Math.max(0, visibleWidth(text) - 1) }
-      : wordAt(text, column);
-    if (!range) return;
-    const at = this.#top + row;
-    this.#selection = {
-      anchor: { row: at, column: range.from },
-      head: { row: at, column: range.to },
-    };
-    this.#copySelection();
-  }
-
-  /** Copies the selected text; it stays shown selected until the next key or click. */
-  #copySelection(): void {
-    const selection = this.#selection;
-    if (!selection) return;
-    const [start, end] = ordered(selection);
-    const total = this.#view.total;
-    const lines = this.#view.transcript.view(
-      this.#renderContext(),
-      end.row - start.row + 1,
-      Math.max(0, total - end.row - 1),
-    ).rows;
-    const text = selectedText(lines, selection);
-    if (!text) {
-      this.#selection = null;
-      this.#schedule();
-      return;
-    }
-    const count = text.split("\n").length;
-    this.#copy(text, count > 1 ? `Copied ${count} lines` : `Copied “${truncate(text, 48)}”`);
-  }
-
   /** Puts text on the clipboard where the user sits, through the terminal, and says so for a moment. */
   #copy(text: string, said: string): void {
     // OSC 52: the terminal sets the clipboard, the one where you sit, over SSH or Rex too.
@@ -2211,7 +2119,7 @@ export class App {
 
   /** Opens a picture on the whole screen, drawn again for that size where it can be. */
   #openViewer(target: Extract<Target, { kind: "picture" }>): void {
-    this.#selection = null;
+    this.#pointer.clear();
     this.#viewer = new PictureViewer(target, {
       client: this.#client,
       live: this.#livePages,
@@ -2237,6 +2145,7 @@ export class App {
   #renderViewer(viewer: PictureViewer): void {
     const frame = viewer.render(this.#toastText());
     this.#targets = [];
+    this.#pointer.drawn([], 0);
     this.#listAt = null;
     this.#screen.render(frame.rows, null, [frame.shown]);
   }
@@ -2600,11 +2509,11 @@ export class App {
     }
     // What the mouse finds where: each row's target, and what it selected, shown so.
     this.#targets = view.targets;
-    this.#top = view.top;
-    this.#shownRows = view.rows;
+    this.#pointer.drawn(view.rows, view.top);
     this.#livePages.seen(view.pictures.map((one) => one.picture));
-    const transcript = this.#selection
-      ? paintSelection(view.rows, this.#selection, view.top, width)
+    const selection = this.#pointer.selection;
+    const transcript = selection
+      ? paintSelection(view.rows, selection, view.top, width)
       : view.rows;
     // The composer sits on the screen's last rows from the first frame to the
     // last; the transcript reads down from the top, and the rows between stay blank.

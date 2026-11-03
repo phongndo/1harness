@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { picture, placeholderRow } from "./images.ts";
 import { solidPng } from "./images.test.ts";
-import { pageKey, paintSelection, selectedText, viewerFrame, wordAt } from "./pointer.ts";
+import { Mouse, pageKey, paintSelection, selectedText, viewerFrame, wordAt } from "./pointer.ts";
 import { columnsText, selectColumns, visibleWidth } from "./text.ts";
 
 const media = { graphics: true, cell: { width: 8, height: 16 }, maxRows: 20 };
@@ -130,5 +130,53 @@ describe("the mouse", () => {
       modifiers: 2,
     });
     assert.equal(pageKey(key("f13")), null);
+  });
+});
+
+/** The left button, as the decoder reports it. */
+const button = (action: "press" | "drag" | "release", row: number, column: number) => ({
+  type: "mouse" as const,
+  action,
+  button: 0,
+  row,
+  column,
+});
+
+/** A Mouse over `rows`, with what it copies and the clicks it hands on. */
+function mouse(rows: string[]) {
+  const copied: string[] = [];
+  const clicks: [number, number][] = [];
+  const pointer = new Mouse({
+    column: () => ({ width: 40, margin: 2 }),
+    scrollBy: () => {},
+    scrolled: () => 0,
+    rows: (from, to) => rows.slice(from, to + 1),
+    click: (row, column) => clicks.push([row, column]),
+    copy: (text) => copied.push(text),
+    schedule: () => {},
+  });
+  pointer.drawn(rows, 0);
+  return { pointer, copied, clicks };
+}
+
+describe("Mouse", () => {
+  it("copies what a drag selects, and keeps it shown selected", () => {
+    const { pointer, copied, clicks } = mouse(["  first line", "  second line"]);
+    pointer.event(button("press", 0, 4));
+    pointer.event(button("drag", 1, 9));
+    pointer.event(button("release", 1, 9));
+    assert.deepEqual(copied, ["first line\nsecond"]);
+    assert.ok(pointer.selection);
+    assert.deepEqual(clicks, []);
+  });
+
+  it("hands a click on, and takes the word under a double click", () => {
+    const { pointer, copied, clicks } = mouse(["  hello world"]);
+    pointer.event(button("press", 0, 10));
+    pointer.event(button("release", 0, 10));
+    assert.deepEqual(clicks, [[0, 8]]);
+    pointer.event(button("press", 0, 10));
+    pointer.event(button("release", 0, 10));
+    assert.deepEqual(copied, ["world"]);
   });
 });

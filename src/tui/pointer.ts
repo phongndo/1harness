@@ -1,13 +1,13 @@
-// What the mouse does in the transcript, apart from the app's state: text
-// selected by dragging, shown in reverse video and copied as plain text, and
-// the whole-screen view a picture opens in when clicked.
+// What the mouse does in the transcript: text selected by dragging or by a
+// double or triple click, shown in reverse video and copied as plain text,
+// and the whole-screen view a picture opens in when clicked.
 
 import { PLACEHOLDER, PLACEHOLDER_LIMIT, fit, pictureRows, type MediaContext } from "./images.ts";
 import type { PageEvent } from "../protocol.ts";
 import type { Picture, Shown } from "./images.ts";
-import type { Key } from "./input.ts";
+import { CLICK_MS, type InputEvent, type Key } from "./input.ts";
 import { style } from "./theme.ts";
-import { charWidth, columnsText, selectColumns, spread, truncate } from "./text.ts";
+import { charWidth, columnsText, selectColumns, spread, truncate, visibleWidth } from "./text.ts";
 
 /** A place in the transcript: a row counted from its first, and a column of the reading column. */
 export interface Point {
@@ -105,6 +105,142 @@ export function wordAt(row: string, column: number): { from: number; to: number 
   while (from > 0 && !blank(from - 1)) from--;
   while (to < cells.length - 1 && !blank(to + 1)) to++;
   return { from, to };
+}
+
+/** What the mouse needs from the terminal around it. */
+export interface MouseHost {
+  /** The reading column: its width, and the margin left of it. */
+  column(): { width: number; margin: number };
+  /** Scrolls the transcript up by `rows`, or down for fewer than none. */
+  scrollBy(rows: number): void;
+  /** How many rows the transcript is scrolled up. */
+  scrolled(): number;
+  /** The transcript's rows from `from` through `to`, however far they are out of view. */
+  rows(from: number, to: number): string[];
+  /** A click on a screen row, at a column of the reading column. */
+  click(row: number, column: number): void;
+  copy(text: string, said: string): void;
+  schedule(): void;
+}
+
+/**
+ * The left button over the transcript: a drag selects its text, copied when
+ * the button is let go; a double click takes a word, a third the row. Any
+ * other click goes to the host.
+ */
+export class Mouse {
+  #host: MouseHost;
+  /** Text selected, or being selected, in the transcript's rows. */
+  #selection: Selection | null = null;
+  /** Where the button went down, to tell a click from a drag. */
+  #press: { row: number; column: number; dragged: boolean; anchor: Point | null } | null = null;
+  /** The last clicks, for double ones. */
+  #clicks = { at: 0, row: -1, column: -1, count: 0 };
+  /** The last frame's transcript rows, and the first one's place in the transcript. */
+  #rows: readonly string[] = [];
+  #top = 0;
+
+  constructor(host: MouseHost) {
+    this.#host = host;
+  }
+
+  /** The selection, shown selected until the next key or click. */
+  get selection(): Selection | null {
+    return this.#selection;
+  }
+
+  clear(): void {
+    this.#selection = null;
+  }
+
+  /** Takes the transcript rows a frame showed, from `top` on, which the mouse goes by. */
+  drawn(rows: readonly string[], top: number): void {
+    this.#rows = rows;
+    this.#top = top;
+  }
+
+  event(event: Extract<InputEvent, { type: "mouse" }>): void {
+    if (event.button !== 0) return;
+    const { margin, width } = this.#host.column();
+    const column = Math.max(0, Math.min(width - 1, event.column - margin));
+    const rows = this.#rows.length;
+    if (event.action === "press") {
+      // A selection starts where the button went down, once it moves.
+      const anchor = event.row < rows ? { row: this.#top + event.row, column } : null;
+      this.#press = { row: event.row, column: event.column, dragged: false, anchor };
+      this.#selection = null;
+      this.#host.schedule();
+      return;
+    }
+    const press = this.#press;
+    if (event.action === "drag") {
+      if (!press?.anchor || rows === 0) return;
+      if (!press.dragged && event.row === press.row && event.column === press.column) return;
+      press.dragged = true;
+      this.#selection ??= { anchor: press.anchor, head: press.anchor };
+      // Held past the transcript's top or bottom, it scrolls to take in more.
+      if (event.row <= 0) this.#host.scrollBy(1);
+      else if (event.row >= rows && this.#host.scrolled() > 0) this.#host.scrollBy(-1);
+      const row = Math.max(0, Math.min(rows - 1, event.row));
+      this.#selection.head = { row: this.#top + row, column };
+      this.#host.schedule();
+      return;
+    }
+    this.#press = null;
+    if (press?.dragged && this.#selection) {
+      this.#copySelection();
+      return;
+    }
+    this.#selection = null;
+    if (!press) return;
+    const now = Date.now();
+    const last = this.#clicks;
+    const again =
+      now - last.at < CLICK_MS &&
+      last.row === event.row &&
+      Math.abs(last.column - event.column) <= 1;
+    this.#clicks = {
+      at: now,
+      row: event.row,
+      column: event.column,
+      count: again ? last.count + 1 : 1,
+    };
+    if (this.#clicks.count > 1 && event.row < rows) {
+      this.#selectAt(event.row, column, this.#clicks.count > 2);
+      return;
+    }
+    this.#host.click(event.row, column);
+  }
+
+  /** Selects and copies the word under a double click, or a triple click's whole row. */
+  #selectAt(row: number, column: number, whole: boolean): void {
+    const text = this.#rows[row] ?? "";
+    const range = whole
+      ? { from: 0, to: Math.max(0, visibleWidth(text) - 1) }
+      : wordAt(text, column);
+    if (!range) return;
+    const at = this.#top + row;
+    this.#selection = {
+      anchor: { row: at, column: range.from },
+      head: { row: at, column: range.to },
+    };
+    this.#copySelection();
+  }
+
+  /** Copies the selected text; it stays shown selected until the next key or click. */
+  #copySelection(): void {
+    const selection = this.#selection;
+    if (!selection) return;
+    const [start, end] = ordered(selection);
+    const text = selectedText(this.#host.rows(start.row, end.row), selection);
+    if (!text) {
+      this.#selection = null;
+      this.#host.schedule();
+      return;
+    }
+    const count = text.split("\n").length;
+    this.#host.copy(text, count > 1 ? `Copied ${count} lines` : `Copied “${truncate(text, 48)}”`);
+  }
 }
 
 /** What the whole-screen view shows: its rows, the picture's placement, and how far it scrolls. */
