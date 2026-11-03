@@ -73,9 +73,11 @@ import { CELL_QUERY, GRAPHICS_QUERY, PLACEHOLDER_LIMIT, fit } from "./images.ts"
 import {
   PASTED_IMAGE_BYTES,
   clipboardImage,
+  collapsesPaste,
   imagePlaceholder,
   megabytes,
   pastedImagePaths,
+  pastedTextPlaceholder,
   readPastedImage,
   type PastedImage,
 } from "./attachments.ts";
@@ -140,6 +142,7 @@ const KEYS: [string, string][] = [
   ["$", "run one of the harness's skills"],
   ["@", "mention a file or folder"],
   ["ctrl+v", "paste the clipboard's image; a pasted or dropped image path attaches it too"],
+  ["backspace", "delete a pasted image or long text whole; paste the text again to show it all"],
   ["ctrl+j, ctrl+k", "move in any list, completions included"],
   ["j k, g G, ctrl+d ctrl+u", "move in lists that take no typing"],
   ["h l, q", "switch tabs and close in those lists"],
@@ -331,6 +334,12 @@ export class App {
   /** Images pasted into the composer, by the `[Image #N]` that stands for each until it is sent. */
   #images = new Map<string, PastedImage>();
   #imageCount = 0;
+  /**
+   * Long texts pasted into the composer, by the `[Pasted text #N +X lines]`
+   * that stands for each. Kept after sending, so a message recalled from
+   * history sends them again.
+   */
+  #pastes = new Map<string, string>();
   /** A ctrl+v reading the clipboard, which the composer's keys wait for. */
   #clipboardRead: Promise<void> | null = null;
   /** Counts ctrl+c, which drops the keys still waiting on a clipboard read. */
@@ -2213,7 +2222,7 @@ export class App {
     this.#suggestions.clear();
     this.#view.scroll = 0;
     if (message === null) {
-      void this.#command(text);
+      void this.#command(this.#expandPastes(text));
       return;
     }
     this.#send(message);
@@ -2235,7 +2244,7 @@ export class App {
     this.#client
       .call("thread.send", {
         threadId: thread.id,
-        text,
+        text: this.#expandPastes(text),
         steer: steer && thread.busy,
         ...(images.length > 0 ? { images } : {}),
         // A send retried after a dropped connection is sent once.
@@ -2245,6 +2254,14 @@ export class App {
         for (const placeholder of placeholders) this.#images.delete(placeholder);
       })
       .catch((error: unknown) => this.#notice("error", errorMessage(error)));
+  }
+
+  /** The text with each long paste's placeholder put back as what was pasted. */
+  #expandPastes(text: string): string {
+    let whole = text;
+    for (const [placeholder, pasted] of this.#pastes)
+      if (whole.includes(placeholder)) whole = whole.split(placeholder).join(pasted);
+    return whole;
   }
 
   /** Whether the thread on screen takes images; the host says so for one still to open. */
@@ -2272,9 +2289,25 @@ export class App {
   }
 
   /**
+   * Puts a long text in the composer as a placeholder, sent whole. The same
+   * text pasted again while its placeholder is there shows it in place, as in
+   * Claude Code, to read or edit before sending.
+   */
+  #pasteLongText(raw: string): void {
+    const text = raw.replace(/\r\n?/g, "\n");
+    for (const [placeholder, pasted] of this.#pastes)
+      if (pasted === text && this.#editor.expand(placeholder, text)) return;
+    const placeholder = pastedTextPlaceholder(this.#pastes.size + 1, text);
+    this.#pastes.set(placeholder, text);
+    this.#editor.atoms.add(placeholder);
+    this.#editor.insert(placeholder);
+  }
+
+  /**
    * A paste into the composer: image files' paths, as dropping screenshots in
-   * writes them, become images; anything else is text. An empty paste, which
-   * some terminals send for an image, takes the clipboard's image.
+   * writes them, become images; a long text, a placeholder; anything else is
+   * text. An empty paste, which some terminals send for an image, takes the
+   * clipboard's image.
    */
   #pasteIntoComposer(text: string): void {
     if (text === "") {
@@ -2283,7 +2316,8 @@ export class App {
     }
     const paths = this.#takesImages() ? pastedImagePaths(text) : null;
     if (!paths) {
-      this.#editor.insert(text);
+      if (collapsesPaste(text)) this.#pasteLongText(text);
+      else this.#editor.insert(text);
       return;
     }
     try {

@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { after, before, describe, it } from "node:test";
-import { pastedImagePaths, readPastedImage } from "./attachments.ts";
+import {
+  collapsesPaste,
+  pastedImagePaths,
+  pastedTextPlaceholder,
+  readPastedImage,
+} from "./attachments.ts";
 
 describe("pastedImagePaths", () => {
   let root: string;
@@ -43,4 +48,16 @@ describe("pastedImagePaths", () => {
       data: Buffer.from("jpg").toString("base64"),
     });
   });
+});
+
+describe("long pastes", () => {
+  it("stand as a placeholder past a thousand characters or ten lines", () => {
+    assert.equal(collapsesPaste("x".repeat(1000)), false);
+    assert.equal(collapsesPaste("x".repeat(1001)), true);
+    assert.equal(collapsesPaste("line\n".repeat(10)), false);
+    assert.equal(collapsesPaste("line\n".repeat(11)), true);
+    assert.equal(pastedTextPlaceholder(2, "line\r\n".repeat(12)), "[Pasted text #2 +12 lines]");
+    assert.equal(pastedTextPlaceholder(1, "x".repeat(1200)), "[Pasted text #1 1200 chars]");
+  });
+
 });

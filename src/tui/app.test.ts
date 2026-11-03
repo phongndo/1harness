@@ -534,6 +534,46 @@ describe("App threads and keys", () => {
     }
   });
 
+  it("shows a long paste as a placeholder, and sends it whole", async () => {
+    const received: UserInput[] = [];
+    const unregisterReading = registerDriver({
+      id: "reading",
+      label: "Reading",
+      unavailable: () => null,
+      create: (options) => {
+        const scripted = new ScriptedSession(options);
+        const startTurn = scripted.startTurn.bind(scripted);
+        return Object.assign(scripted, {
+          startTurn: async (input: UserInput) => {
+            received.push(input);
+            return startTurn(input);
+          },
+        });
+      },
+    });
+    try {
+      const log = Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n");
+      const session = await start({ harness: "reading" });
+      await session.sees("supervised · reading · big");
+      await session.type(`why \x1b[200~${log}\x1b[201~`);
+      await session.sees(/^why \[Pasted text #1 \+12 lines\]/m);
+      // Pasted again, it shows in place; backspace takes a placeholder whole.
+      await session.type(`\x1b[200~${log}\x1b[201~`);
+      await session.sees(/^line 12/m);
+      await session.type("\x15\x7f");
+      await session.type(` \x1b[200~${log}\x1b[201~\x7f`);
+      const gone = await session.sees(/^line 11 $/m);
+      assert.doesNotMatch(gone, /Pasted text/);
+      await session.type(`\x1b[200~${log}\x1b[201~`);
+      await session.sees(/^line 11 \[Pasted text #3 \+12 lines\]/m);
+      await session.type("\r");
+      await session.sees("Done with why line 1");
+      assert.equal(received.at(-1)?.text, `why ${log.split("\n").slice(0, 11).join("\n")} ${log}`);
+    } finally {
+      unregisterReading();
+    }
+  });
+
   it("opens another thread with /new, and switches back to the first from ctrl+t", async () => {
     const session = await start({ prompt: "alpha" });
     await session.sees("Done with alpha");

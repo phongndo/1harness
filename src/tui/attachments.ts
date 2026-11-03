@@ -5,11 +5,12 @@ import { extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { IMAGE_TYPES, type ImageType } from "../drivers/images.ts";
 
-// Images pasted into the composer, as Claude Code and Codex take them: a
-// path pasted or dropped in, or ctrl+v with an image on the clipboard. Each
-// shows as `[Image #N]` and is read where the terminal runs, at once, since
-// a screenshot's file may be gone by the time the message is sent, and the
-// host may run elsewhere.
+// What is pasted into the composer, as Claude Code and Codex take it: a
+// path pasted or dropped in, or ctrl+v with an image on the clipboard, shows
+// as `[Image #N]`; a long text as `[Pasted text #N +X lines]`, sent whole.
+// Images are read where the terminal runs, at once, since a screenshot's
+// file may be gone by the time the message is sent, and the host may run
+// elsewhere.
 
 /** An image read where the terminal runs, to send with a message. */
 export interface PastedImage {
@@ -146,4 +147,23 @@ export async function clipboardImage(
 /** How the composer shows the image numbered `n`. */
 export function imagePlaceholder(n: number): string {
   return `[Image #${n}]`;
+}
+
+/** A paste longer than this many characters, or lines, shows as a placeholder. */
+export const PASTE_COLLAPSE_CHARS = 1000;
+export const PASTE_COLLAPSE_LINES = 10;
+
+function lineCount(text: string): number {
+  return text.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n").length;
+}
+
+/** Whether a paste is long enough to stand in the composer as a placeholder. */
+export function collapsesPaste(text: string): boolean {
+  return text.length > PASTE_COLLAPSE_CHARS || lineCount(text) > PASTE_COLLAPSE_LINES;
+}
+
+/** How the composer shows the long text pasted `n`th. */
+export function pastedTextPlaceholder(n: number, text: string): string {
+  const lines = lineCount(text);
+  return `[Pasted text #${n} ${lines > 1 ? `+${lines} lines` : `${text.length} chars`}]`;
 }
