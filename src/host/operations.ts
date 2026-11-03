@@ -7,15 +7,19 @@ import {
   type RequestResponse,
   type RuntimeMode,
 } from "../core/events.ts";
-import { OperationError, type Caller, type Operation } from "../operations/operation.ts";
+import { MAX_WAIT_SECONDS, RUNTIME_MODE_SCHEMA, required, text } from "../operations/input.ts";
+import {
+  CALLER_KINDS,
+  OperationError,
+  type Caller,
+  type Operation,
+} from "../operations/operation.ts";
 import type { HostEvent, LogEntry, Method, Params, Result } from "../protocol.ts";
 import type { ThreadManager } from "./manager.ts";
 import { threadView } from "./orchestrator.ts";
 import type { Scope, ThreadSnapshot } from "./scope.ts";
 import { sendText } from "./send.ts";
 
-/** The longest an operation waits for news of a thread. */
-const MAX_WAIT_SECONDS = 3000;
 /** How many events one `thread_events` returns at most. */
 const EVENT_LIMIT = 200;
 /** How much of a message or output an event carries. */
@@ -39,22 +43,7 @@ export interface HostAccess {
   subscribe(listener: (event: HostEvent) => void): () => void;
 }
 
-const ALL = ["user", "agent", "external"] as const;
 const PEOPLE_AND_OUTSIDE = ["user", "external"] as const;
-
-function text(input: Record<string, unknown>, name: string): string | undefined {
-  const value = input[name];
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "string")
-    throw new OperationError("invalid_request", `${name} must be a string`);
-  return value.trim() || undefined;
-}
-
-function required(input: Record<string, unknown>, name: string): string {
-  const value = text(input, name);
-  if (!value) throw new OperationError("invalid_request", `${name} is required`);
-  return value;
-}
 
 const THREAD_ID = { type: "string", description: "A thread's ID." };
 
@@ -75,7 +64,7 @@ export function hostOperations(host: HostAccess): Operation[] {
         properties: { harness: { type: "string", description: "Check this harness again first." } },
       },
       effect: "read",
-      callers: ALL,
+      callers: CALLER_KINDS,
       run: async (input, { caller }) => {
         const id = text(input, "harness");
         return host.request(caller, "harnesses.list", id ? { id } : {});
@@ -91,7 +80,7 @@ export function hostOperations(host: HostAccess): Operation[] {
         required: ["query"],
       },
       effect: "read",
-      callers: ALL,
+      callers: CALLER_KINDS,
       run: async (input, { caller }) => {
         const limit = typeof input["limit"] === "number" ? input["limit"] : 20;
         const found = await host.request(caller, "threads.search", {
@@ -124,10 +113,7 @@ export function hostOperations(host: HostAccess): Operation[] {
           cwd: { type: "string", description: "The folder it works in." },
           model: { type: "string" },
           effort: { type: "string" },
-          runtimeMode: {
-            type: "string",
-            enum: ["supervised", "auto-edit", "auto", "full-access"],
-          },
+          runtimeMode: RUNTIME_MODE_SCHEMA,
           plan: { type: "boolean", description: "Start in plan mode." },
           title: { type: "string" },
         },
@@ -207,7 +193,7 @@ export function hostOperations(host: HostAccess): Operation[] {
         required: ["threadId", "harness"],
       },
       effect: "act",
-      callers: ALL,
+      callers: CALLER_KINDS,
       run: async (input, { caller }) => {
         const target = scope.actable(caller, required(input, "threadId"));
         return host.request(caller, "thread.switchHarness", {
@@ -227,7 +213,7 @@ export function hostOperations(host: HostAccess): Operation[] {
         required: ["threadId"],
       },
       effect: "act",
-      callers: ALL,
+      callers: CALLER_KINDS,
       run: async (input, { caller }) => {
         const target = scope.actable(caller, required(input, "threadId"));
         const model = text(input, "model");
@@ -254,7 +240,7 @@ export function hostOperations(host: HostAccess): Operation[] {
       description: "Lists the models a thread's harness offers, with their reasoning efforts.",
       inputSchema: { type: "object", properties: { threadId: THREAD_ID }, required: ["threadId"] },
       effect: "read",
-      callers: ALL,
+      callers: CALLER_KINDS,
       run: async (input, { caller }) =>
         host.request(caller, "thread.call", {
           threadId: scope.readable(caller, required(input, "threadId")).id,
@@ -267,7 +253,7 @@ export function hostOperations(host: HostAccess): Operation[] {
       description: "Lists the MCP servers a thread's session uses, and how each stands.",
       inputSchema: { type: "object", properties: { threadId: THREAD_ID }, required: ["threadId"] },
       effect: "read",
-      callers: ALL,
+      callers: CALLER_KINDS,
       run: async (input, { caller }) =>
         host.request(caller, "thread.call", {
           threadId: scope.readable(caller, required(input, "threadId")).id,
@@ -280,7 +266,7 @@ export function hostOperations(host: HostAccess): Operation[] {
       description: "Has a thread's harness compact its context.",
       inputSchema: { type: "object", properties: { threadId: THREAD_ID }, required: ["threadId"] },
       effect: "act",
-      callers: ALL,
+      callers: CALLER_KINDS,
       run: async (input, { caller }) => {
         const target = scope.actable(caller, required(input, "threadId"));
         await host.request(caller, "thread.call", {
@@ -320,7 +306,7 @@ export function hostOperations(host: HostAccess): Operation[] {
         required: ["threadId"],
       },
       effect: "read",
-      callers: ALL,
+      callers: CALLER_KINDS,
       run: async (input, { caller }) => {
         const thread = scope.readable(caller, required(input, "threadId"));
         const after = input["after"];
@@ -368,10 +354,7 @@ export function hostOperations(host: HostAccess): Operation[] {
         type: "object",
         properties: {
           threadId: THREAD_ID,
-          runtimeMode: {
-            type: "string",
-            enum: ["supervised", "auto-edit", "auto", "full-access"],
-          },
+          runtimeMode: RUNTIME_MODE_SCHEMA,
           plan: { type: "boolean" },
         },
         required: ["threadId"],

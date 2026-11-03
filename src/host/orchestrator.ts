@@ -1,4 +1,4 @@
-import { isRuntimeMode, modeRank } from "../core/events.ts";
+import { RUNTIME_MODES, isRuntimeMode, modeRank } from "../core/events.ts";
 import {
   checkHarness,
   drivers,
@@ -7,7 +7,13 @@ import {
   type DriverDefinition,
 } from "../drivers/index.ts";
 import type { ToolDefinition } from "../extensions/api.ts";
-import { OperationError, type Caller, type Operation } from "../operations/operation.ts";
+import { MAX_WAIT_SECONDS, required, text } from "../operations/input.ts";
+import {
+  CALLER_KINDS,
+  OperationError,
+  type Caller,
+  type Operation,
+} from "../operations/operation.ts";
 import { agentTool } from "../operations/tools.ts";
 import type { TaskRow } from "../store/store.ts";
 import type { HarnessInfo } from "../protocol.ts";
@@ -29,7 +35,6 @@ export const MAX_RUNNING_THREADS = 8;
 /** How many threads may have a harness running, idle ones included; parked ones have none. */
 export const MAX_OPEN_THREADS = 16;
 const DEFAULT_WAIT_SECONDS = 600;
-const MAX_WAIT_SECONDS = 3000;
 const RESULT_LIMIT = 8000;
 /** About how much one thread_read returns, so reading history cannot flood a context. */
 const READ_LIMIT = 40_000;
@@ -72,14 +77,6 @@ function runNumber(input: Record<string, unknown>, name: string): number | undef
   if (typeof value !== "number" || !Number.isInteger(value) || value < 1)
     throw new OperationError("invalid_request", `${name} must be a run number, from 1`);
   return value;
-}
-
-function text(input: Record<string, unknown>, name: string): string | undefined {
-  const value = input[name];
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "string")
-    throw new OperationError("invalid_request", `${name} must be a string`);
-  return value.trim() || undefined;
 }
 
 /** A thread in brief, with what it waits on the user for. */
@@ -237,7 +234,7 @@ export class Orchestrator {
             },
             runtimeMode: {
               type: "string",
-              enum: ["inherit", "supervised", "auto-edit", "auto", "full-access"],
+              enum: ["inherit", ...RUNTIME_MODES],
               description:
                 "Omit unless the user asks for a supervised child. Narrow modes pause for human approval, not read-only. Above yours is rejected.",
             },
@@ -301,7 +298,7 @@ export class Orchestrator {
           "Lists threads with their harness, status, and which thread started them. An agent in a 1harness thread sees its tree: the user's thread at its root and every thread started under it. Others see every thread 1harness has in memory; thread_search finds older ones.",
         inputSchema: { type: "object", properties: {} },
         effect: "read",
-        callers: ["user", "agent", "external"],
+        callers: CALLER_KINDS,
         run: (_input, { caller }) => ({
           you: caller.kind === "agent" ? agent(caller).id : null,
           threads: this.#scope.visible(caller).map((thread) => threadView(thread)),
@@ -325,9 +322,9 @@ export class Orchestrator {
           required: ["threadId"],
         },
         effect: "read",
-        callers: ["user", "agent", "external"],
+        callers: CALLER_KINDS,
         run: (input, { caller }) => {
-          const thread = this.#scope.readable(caller, text(input, "threadId") ?? "", true);
+          const thread = this.#scope.readable(caller, required(input, "threadId"), true);
           const from = runNumber(input, "fromRun");
           const to = runNumber(input, "toRun");
           const count = typeof input["runs"] === "number" ? Math.max(1, input["runs"]) : 5;
@@ -374,9 +371,9 @@ export class Orchestrator {
           required: ["threadId", "message"],
         },
         effect: "act",
-        callers: ["user", "agent", "external"],
+        callers: CALLER_KINDS,
         run: async (input, { caller }) => {
-          const target = this.#scope.actable(caller, text(input, "threadId") ?? "");
+          const target = this.#scope.actable(caller, required(input, "threadId"));
           const message = text(input, "message");
           if (!message) throw new OperationError("invalid_request", "message is empty");
           await sendText(target.thread, message, {
@@ -399,9 +396,9 @@ export class Orchestrator {
           required: ["threadId"],
         },
         effect: "read",
-        callers: ["user", "agent", "external"],
+        callers: CALLER_KINDS,
         run: async (input, { caller }) => {
-          const thread = this.#scope.readable(caller, text(input, "threadId") ?? "");
+          const thread = this.#scope.readable(caller, required(input, "threadId"));
           if (caller.kind === "agent" && thread.id === agent(caller).id)
             throw new OperationError("invalid_request", "a thread cannot wait on itself");
           // One only the store keeps is closed, with nothing to wait for.
@@ -428,9 +425,9 @@ export class Orchestrator {
           required: ["threadId"],
         },
         effect: "act",
-        callers: ["user", "agent", "external"],
+        callers: CALLER_KINDS,
         run: async (input, { caller }) => {
-          const target = this.#scope.actable(caller, text(input, "threadId") ?? "");
+          const target = this.#scope.actable(caller, required(input, "threadId"));
           await target.thread.interrupt();
           return { threadId: target.id, status: target.status };
         },
@@ -813,7 +810,7 @@ export class Orchestrator {
   }
 
   #task(caller: ManagedThread, input: Record<string, unknown>): Task {
-    const id = text(input, "taskId") ?? "";
+    const id = required(input, "taskId");
     const task = this.#tasks.get(id);
     if (!task || task.parentId !== caller.id)
       throw new OperationError("task_not_found", `no task ${id} delegated by this thread`);

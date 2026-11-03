@@ -1,3 +1,27 @@
+import { RUNTIME_MODES } from "../core/events.ts";
+import { OperationError } from "./operation.ts";
+
+/** The longest an operation waits for news of a thread. */
+export const MAX_WAIT_SECONDS = 3000;
+
+/** An input's runtime mode, as operations' schemas list them. */
+export const RUNTIME_MODE_SCHEMA = { type: "string", enum: [...RUNTIME_MODES] };
+
+/** A text input, trimmed; undefined when it is missing or blank. */
+export function text(input: Record<string, unknown>, name: string): string | undefined {
+  const value = input[name];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string")
+    throw new OperationError("invalid_request", `${name} must be a string`);
+  return value.trim() || undefined;
+}
+
+export function required(input: Record<string, unknown>, name: string): string {
+  const value = text(input, name);
+  if (!value) throw new OperationError("invalid_request", `${name} is required`);
+  return value;
+}
+
 /**
  * An operation's input from words such as `threadId=ab12 fresh=true`, or one
  * JSON object. Values parse as JSON where they can, else as text; a word with
