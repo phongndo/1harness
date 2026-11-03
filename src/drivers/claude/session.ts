@@ -358,6 +358,8 @@ export class ClaudeSession implements HarnessSession {
       canUseTool: (tool, input, context) => this.#canUseTool(tool, input, context),
       // Running agents get a one-line summary of what they are doing.
       agentProgressSummaries: true,
+      // An API key would otherwise cache for 5 minutes, which a pause to read a reply outlasts.
+      settings: { promptCacheTtl: "1h" },
       stderr: (data) => this.#stderr.append(data),
       ...(this.#bypassAllowed ? { allowDangerouslySkipPermissions: true } : {}),
       ...(this.info.model ? { model: this.info.model } : {}),
