@@ -158,7 +158,7 @@ export interface RestoredThread {
 export const UNKNOWN_OUTCOME = "1harness stopped while this turn ran, so how it ended is unknown";
 
 /** Long enough for a pause in the work, short enough that idle harnesses do not pile up. */
-export const IDLE_CLOSE_MS = 30 * 60 * 1000;
+const IDLE_CLOSE_MS = 30 * 60 * 1000;
 
 /** How a thread moved to another harness, for clients to describe. */
 export interface SwitchResult {

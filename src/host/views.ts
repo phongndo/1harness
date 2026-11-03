@@ -11,7 +11,7 @@ import type { ManagedThread, RunRecord } from "./manager.ts";
 const RUN_TEXT = 4_000;
 
 /** Pinned and archived, as the store keeps them. */
-export interface Flags {
+interface Flags {
   pinned: boolean;
   archived: boolean;
 }
@@ -36,7 +36,7 @@ function clipText(text: string | null): string | null {
 }
 
 /** A thread's last run as its state carries it, its message and reply clipped. */
-export function lastRunView(runs: readonly RunRecord[]): RunRecord | null {
+function lastRunView(runs: readonly RunRecord[]): RunRecord | null {
   const last = runs.at(-1);
   return last
     ? { ...last, input: clipText(last.input) ?? "", result: clipText(last.result) }

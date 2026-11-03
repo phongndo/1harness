@@ -172,7 +172,7 @@ function idleFor(ms: number): string {
  * say it: a warning when the thread it resumed is large or long idle, since its
  * first message pays for all of that context again.
  */
-export function describeSwitch(result: SwitchResult): { level: "info" | "warning"; text: string } {
+function describeSwitch(result: SwitchResult): { level: "info" | "warning"; text: string } {
   const to = label(result.to);
   const lines: string[] = [];
   if (result.resumeError)
