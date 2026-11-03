@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { BUILTIN_COMMANDS, harnessEntry } from "../commands/builtins.ts";
 import {
@@ -47,6 +47,7 @@ import { Menu, entry, type MenuConfig, type MenuEntry } from "./menu.ts";
 import { listedEntry, ResumeView, type ResumeEntry } from "./resume.ts";
 import { ancestry, family, lastActive, threadEntries } from "./threads.ts";
 import { PictureViewer } from "./viewer.ts";
+import { Pictures } from "./pictures.ts";
 import { Requests } from "./requests.ts";
 import { goodbye } from "./goodbye.ts";
 import { Screen } from "./screen.ts";
@@ -57,8 +58,8 @@ import {
   threadStatusInput,
   type ThreadStatusInput,
 } from "./program-status.ts";
-import { isLightTheme, setLightTheme, style } from "./theme.ts";
-import { truncate, visibleWidth, wrap } from "./text.ts";
+import { setLightTheme, style } from "./theme.ts";
+import { truncate, visibleWidth } from "./text.ts";
 import { IMAGE_INDENT, type Hit, type RenderContext, type Target } from "./transcript.ts";
 import {
   ordered,
@@ -68,23 +69,7 @@ import {
   type Point,
   type Selection,
 } from "./pointer.ts";
-import { runsScripts } from "../host/media.ts";
-import { FIGURE_NAMES, Figures, type Figure } from "./figures.ts";
-import {
-  CELL_QUERY,
-  DEFAULT_CELL,
-  GRAPHICS_QUERY,
-  PLACEHOLDER_LIMIT,
-  fit,
-  maxImageRows,
-  picture,
-  pictureRows,
-  screenDensity,
-  type CellSize,
-  type MediaContext,
-  type Picture,
-  type Shown,
-} from "./images.ts";
+import { CELL_QUERY, GRAPHICS_QUERY, PLACEHOLDER_LIMIT, fit } from "./images.ts";
 import { ThreadView, type ViewContext } from "./view.ts";
 
 export interface AppOptions {
@@ -174,13 +159,6 @@ const SEQUENCE_TIMEOUT_MS = 40;
 // The SDK warns that full access skips canUseTool, which 1harness keeps for later mode changes.
 const IGNORED_STDERR = [/CLAUDE_SDK_CAN_USE_TOOL_SHADOWED/, /^\(Use `node --trace-warnings/];
 
-/**
- * Pictures of image files and of pages kept: more than one transcript shows,
- * since one forgotten while its transcript still shows it is fetched again,
- * and the transcript drawn again when it comes.
- */
-const PICTURES_KEPT = 256;
-
 /** The host's errors for a thread it does not have open. */
 const NO_THREAD = new Set(["thread_not_found", "thread_closed"]);
 
@@ -265,8 +243,6 @@ export class App {
   #next: string | undefined = undefined;
   /** Whether tool calls show whole, with their output and diffs. */
   #details = false;
-  /** Whether the terminal shows images, which it says when asked. */
-  #graphics = false;
   /**
    * ONEHARNESS_IMAGES and ONEHARNESS_PROGRAM_STATUS, read once: `1` or `0`
    * says whether the terminal shows pictures or takes status reports, over
@@ -276,15 +252,8 @@ export class App {
     images: process.env["ONEHARNESS_IMAGES"],
     status: process.env["ONEHARNESS_PROGRAM_STATUS"],
   };
-  /** A character cell's size in pixels, which images are sized by. */
-  #cell: CellSize = DEFAULT_CELL;
-  /** Pictures of image files, by cells and path, as the host sent them. */
-  #images = new FetchCache<string, Picture | null>({
-    limit: PICTURES_KEPT,
-    arrived: (shown) => {
-      if (shown) this.#redrawViews();
-    },
-  });
+  /** Images, pages, and figures, drawn for the transcript where the terminal shows pictures. */
+  #pictures: Pictures;
   /** What the last frame's transcript rows do when clicked, by screen row; `#top` is the first one's place. */
   #targets: (Hit | null)[] = [];
   /** Whether the host runs pages live, scripts and all. */
@@ -304,13 +273,6 @@ export class App {
   #toast: { text: string; until: number } | null = null;
   /** A picture on the whole screen, opened by a click on it. */
   #viewer: PictureViewer | null = null;
-  /** Pages drawn as pictures, by theme, width, cell size, and content. */
-  #pages = new FetchCache<string, Picture | null>({
-    limit: PICTURES_KEPT,
-    arrived: () => this.#redrawViews(),
-  });
-  /** Diagrams and equations drawn as pictures; as more can be shown, the views draw again. */
-  #figures = new Figures(() => this.#redrawViews());
   /** The default model's ID by thread, for a harness that names it only once a turn runs. */
   #defaultModels = new FetchCache<string, string | null>({
     arrived: (id) => {
@@ -416,6 +378,14 @@ export class App {
       schedule: () => this.#schedule(),
       warn: (text) => this.#notice("warning", text),
       focused: () => this.#focused,
+    });
+    this.#pictures = new Pictures({
+      client: this.#client,
+      live: this.#livePages,
+      liveHost: () => this.#liveHost,
+      columnWidth: () => this.#column().width,
+      screenRows: () => this.#screen.rows,
+      redraw: () => this.#redrawViews(),
     });
     this.#logs = new ThreadLogs({
       client: this.#client,
@@ -798,7 +768,7 @@ export class App {
     const { status, images } = this.#setting;
     if (status === "1") this.#enableStatus();
     // Images: whether the terminal speaks the Kitty graphics protocol, and its cell size.
-    if (images === "1") this.#graphics = true;
+    if (images === "1") this.#pictures.graphics = true;
     const query = `${themeSet ? "" : "\x1b]11;?\x1b\\"}${status === "0" || status === "1" ? "" : STATUS_QUERY}${images === "0" ? "" : `${images === "1" ? "" : GRAPHICS_QUERY}${CELL_QUERY}`}`;
     if (query === "") return;
     await new Promise<void>((resolve) => {
@@ -818,7 +788,7 @@ export class App {
    * into view, as a pane first drawn hidden gets its real cells only then.
    */
   #measureCells(): void {
-    if (this.#graphics && this.#setting.images !== "0" && !this.#exiting)
+    if (this.#pictures.graphics && this.#setting.images !== "0" && !this.#exiting)
       process.stdout.write(CELL_QUERY);
   }
 
@@ -1366,20 +1336,11 @@ export class App {
       blink: this.#blinkOn,
       now: Date.now(),
       details: this.#details,
-      media: this.#media(),
-      figure: (figure: Figure, columns: number) => this.#figure(figure, columns),
-      image: (path: string) => this.#image(path),
-      html: (html: string, columns: number) => this.#page(html, columns),
+      media: this.#pictures.media(),
+      figure: (figure, columns) => this.#pictures.figure(figure, columns),
+      image: (path) => this.#pictures.image(path),
+      html: (html, columns) => this.#pictures.page(html, columns),
       threadTitle: (threadId: string) => this.#client.threads.get(threadId)?.title || null,
-    };
-  }
-
-  /** The most pixels an image takes on screen, which the host shrinks one to. */
-  #imageBox(): { width: number; height: number } {
-    const media = this.#media();
-    return {
-      width: Math.max(1, this.#column().width - 4) * media.cell.width,
-      height: media.maxRows * media.cell.height,
     };
   }
 
@@ -1392,116 +1353,6 @@ export class App {
   #redrawViews(): void {
     for (const view of this.#allViews()) view.transcript.invalidate();
     this.#schedule();
-  }
-
-  /**
-   * A page's rows, drawn by the host as a picture as wide as `columns`, at
-   * the screen's density and in its theme; null for its text, where the
-   * terminal shows no pictures or the page cannot be drawn.
-   */
-  #page(html: string, columns: number): { rows: string[]; picture?: Shown; live?: boolean } | null {
-    const media = this.#media();
-    if (!media.graphics) return null;
-    const light = isLightTheme();
-    const digest = createHash("sha1").update(html).digest("hex");
-    const key = `${light ? "light" : "dark"}:${columns}:${media.cell.width}x${media.cell.height}:${digest}`;
-    // A page is as tall as its content; it scrolls with the transcript, so it may run past the screen.
-    const rows = (shown: Picture) => {
-      const size = fit(shown, columns, { ...media, maxRows: PLACEHOLDER_LIMIT });
-      return { rows: pictureRows(shown, size), picture: { picture: shown, ...size } };
-    };
-    // A page with scripts runs live where the host can; one that cannot is drawn once.
-    if (this.#liveHost && runsScripts(html)) {
-      const live = this.#livePages.open(key, html, this.#pageSize(columns), !light);
-      if (!live.failed || live.picture) {
-        if (!live.picture) return { rows: [style.muted("Starting the page…")], live: true };
-        return { ...rows(live.picture), live: true };
-      }
-    }
-    const { width, scale } = this.#pageSize(columns);
-    const known = this.#pages.get(key, () =>
-      this.#client
-        .call("media.html", { html, width, scale, dark: !light, transparent: true })
-        .then((drawn) => picture(Buffer.from(drawn.data, "base64")))
-        .catch(() => null),
-    );
-    if (known === undefined) return { rows: [style.muted("Drawing the page…")] };
-    return known && rows(known);
-  }
-
-  /**
-   * The CSS width a page is drawn at to fill `columns`, and the device pixels
-   * per CSS pixel: small cells mean a dense screen, which the page is drawn
-   * at, so its text stays legible.
-   */
-  #pageSize(columns: number): { width: number; scale: number } {
-    const { cell } = this.#media();
-    const scale = screenDensity(cell);
-    return { width: Math.round((columns * cell.width) / scale), scale };
-  }
-
-  /**
-   * An image file's picture, from the host, where the file is: asked for the
-   * first time, and the views drawn again once it comes.
-   */
-  #image(path: string): Picture | null | undefined {
-    // Fetched again for other cells, as a new font size makes, so it stays sharp.
-    return this.#images.get(`${this.#cell.width}x${this.#cell.height}\0${path}`, () =>
-      this.#client
-        .call("files.image", { path, ...this.#imageBox() })
-        .then((found) => (found ? picture(Buffer.from(found.data, "base64")) : null))
-        .catch(() => null),
-    );
-  }
-
-  #media(): MediaContext {
-    return { graphics: this.#graphics, cell: this.#cell, maxRows: maxImageRows(this.#screen.rows) };
-  }
-
-  /**
-   * A figure's rows, centered in the column as a figure is: a picture where
-   * the terminal shows images, else text that fits (a diagram in box-drawing
-   * characters, an equation in Unicode), else null for its source.
-   */
-  #figure(figure: Figure, columns: number): { rows: string[]; picture?: Shown } | null {
-    const media = this.#media();
-    const renderer = this.#figures.renderer(figure.kind);
-    if (media.graphics && renderer.available) {
-      const drawn = renderer.picture(
-        figure.source,
-        isLightTheme(),
-        columns * media.cell.width,
-        media.cell,
-      );
-      if (drawn === undefined) {
-        // Until it is drawn, its text holds its place, or a line saying it is coming.
-        const text = figure.kind === "math" ? renderer.text(figure.source) : null;
-        if (text) return { rows: this.#centered(text.map(style.soft), columns) };
-        return { rows: [style.muted(FIGURE_NAMES[figure.kind].drawing)] };
-      }
-      if (drawn) {
-        const size = fit(drawn, columns, media);
-        const indent = " ".repeat(Math.max(0, Math.floor((columns - size.columns) / 2)));
-        return {
-          rows: pictureRows(drawn, size, indent),
-          picture: { picture: drawn, ...size },
-        };
-      }
-    }
-    const text = renderer.text(figure.source);
-    if (!text) return null;
-    const paint = figure.kind === "math" ? style.text : style.soft;
-    // A diagram too wide for characters shows its source; an equation's text wraps.
-    if (figure.kind === "mermaid" && text.some((line) => visibleWidth(line) > columns)) return null;
-    return { rows: this.#centered(text.map(paint), columns) };
-  }
-
-  /** Lines set in the middle of `columns` together, keeping their alignment; wrapped where too wide. */
-  #centered(lines: string[], columns: number): string[] {
-    const widest = Math.max(0, ...lines.map((line) => visibleWidth(line)));
-    if (widest > columns) return lines.flatMap((line) => wrap(line, columns, "  "));
-    const indent = " ".repeat(Math.max(0, Math.floor((columns - widest) / 2)));
-    return lines.map((line) => indent + line);
   }
 
   /**
@@ -1955,12 +1806,13 @@ export class App {
         this.#statusChanged();
         return;
       case "graphics":
-        if (this.#setting.images !== "0") this.#graphics = event.ok;
+        if (this.#setting.images !== "0") this.#pictures.graphics = event.ok;
         return;
       case "cellSize":
-        if (event.width === this.#cell.width && event.height === this.#cell.height) return;
+        const { cell } = this.#pictures;
+        if (event.width === cell.width && event.height === cell.height) return;
         // Pictures are drawn for the cells they fill: each is drawn again for the new ones.
-        this.#cell = { width: event.width, height: event.height };
+        this.#pictures.cell = { width: event.width, height: event.height };
         this.#redrawViews();
         return;
       case "background":
@@ -2289,7 +2141,10 @@ export class App {
     const live = target.kind === "picture" ? this.#livePages.showing(target.picture) : undefined;
     if (live && target.kind === "picture") {
       const columns = this.#column().width - IMAGE_INDENT * 2;
-      const size = fit(target.picture, columns, { ...this.#media(), maxRows: PLACEHOLDER_LIMIT });
+      const size = fit(target.picture, columns, {
+        ...this.#pictures.media(),
+        maxRows: PLACEHOLDER_LIMIT,
+      });
       const across = column - IMAGE_INDENT;
       if (hit.row < size.rows && across >= 0 && across < size.columns) {
         this.#livePages.input(live, {
@@ -2360,10 +2215,10 @@ export class App {
     this.#viewer = new PictureViewer(target, {
       client: this.#client,
       live: this.#livePages,
-      figures: this.#figures,
+      figures: this.#pictures.figures,
       screen: () => ({ columns: this.#screen.columns, rows: this.#screen.rows }),
-      media: () => this.#media(),
-      pageSize: () => this.#pageSize(this.#column().width - IMAGE_INDENT * 2),
+      media: () => this.#pictures.media(),
+      pageSize: () => this.#pictures.pageSize(this.#column().width - IMAGE_INDENT * 2),
       copy: (text, said) => this.#copy(text, said),
       schedule: () => this.#schedule(),
       closed: () => {
