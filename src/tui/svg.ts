@@ -33,7 +33,7 @@ function fontOptions(font: Uint8Array | null) {
 }
 
 /** An SVG as PNG bytes, its text in `font` where it has text; resvg must have loaded. */
-export function rasterize(svg: string, font: Uint8Array | null): Uint8Array {
+function rasterize(svg: string, font: Uint8Array | null): Uint8Array {
   return new Resvg(svg, fontOptions(font)).render().asPng();
 }
 

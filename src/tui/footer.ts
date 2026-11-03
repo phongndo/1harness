@@ -80,7 +80,7 @@ export function activityLine(
 }
 
 /** The context and cost a thread has used, for the status line. */
-export function usageSummary(usage: Usage): string {
+function usageSummary(usage: Usage): string {
   const parts: string[] = [];
   const context = contextUsed(usage);
   if (context) parts.push(`ctx ${context.used}/${context.window} (${context.percent}%)`);

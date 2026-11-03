@@ -21,7 +21,7 @@ export function ancestry<T>(thread: T, parent: (thread: T) => T | undefined): T[
 }
 
 /** An open thread's entry, as it stands now. */
-export function liveEntry(thread: ThreadState): ResumeEntry {
+function liveEntry(thread: ThreadState): ResumeEntry {
   const status = agentStatus(thread);
   return {
     id: thread.id,
@@ -36,7 +36,7 @@ export function liveEntry(thread: ThreadState): ResumeEntry {
 }
 
 /** A thread in a tree of them, under the one that started it. */
-export interface TreeNode {
+interface TreeNode {
   entry: ResumeEntry;
   parentId: string | null;
   createdAt: number;
@@ -55,7 +55,7 @@ function liveNode(thread: ThreadState): TreeNode {
  * deeper, oldest first. A thread whose parent is not among `nodes` shows
  * only where it is in `top`.
  */
-export function flattenTree(
+function flattenTree(
   nodes: Iterable<TreeNode>,
   top: readonly TreeNode[],
   depth = 0,
