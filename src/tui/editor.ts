@@ -9,6 +9,11 @@ export class Editor {
   #history: string[] = [];
   #historyIndex = 0;
   #draft = "";
+  /**
+   * Text that stands for something pasted, such as `[Image #1]`, which
+   * backspace, delete, and the arrows take whole, as Claude Code and Codex do.
+   */
+  readonly atoms = new Set<string>();
 
   get text(): string {
     return this.#chars.join("");
@@ -47,30 +52,84 @@ export class Editor {
 
   backspace(): void {
     if (this.#cursor === 0) return;
-    this.#chars.splice(--this.#cursor, 1);
+    const start = this.#cursor - this.#atomBefore();
+    this.#chars.splice(start, this.#cursor - start);
+    this.#cursor = start;
   }
 
   delete(): void {
-    this.#chars.splice(this.#cursor, 1);
+    this.#chars.splice(this.#cursor, this.#atomAfter());
   }
 
   left(): void {
-    this.#cursor = Math.max(0, this.#cursor - 1);
+    this.#cursor = Math.max(0, this.#cursor - this.#atomBefore());
   }
 
   right(): void {
-    this.#cursor = Math.min(this.#chars.length, this.#cursor + 1);
+    this.#cursor = Math.min(this.#chars.length, this.#cursor + this.#atomAfter());
+  }
+
+  /**
+   * Replaces the first `atom` with `text`, leaving the cursor after it;
+   * returns false when the atom is not there.
+   */
+  expand(atom: string, text: string): boolean {
+    const atomChars = Array.from(atom);
+    for (let index = 0; index + atomChars.length <= this.#chars.length; index++) {
+      if (!this.#startsAt(index, atomChars)) continue;
+      const chars = Array.from(text.replace(/\r\n?/g, "\n"));
+      this.#splice(index, atomChars.length, chars);
+      this.#cursor = index + chars.length;
+      return true;
+    }
+    return false;
+  }
+
+  /** How many characters before the cursor go together: an atom's, or 1. */
+  #atomBefore(): number {
+    for (const atom of this.atoms) {
+      const chars = Array.from(atom);
+      if (this.#cursor >= chars.length && this.#startsAt(this.#cursor - chars.length, chars))
+        return chars.length;
+    }
+    return 1;
+  }
+
+  /** How many characters after the cursor go together: an atom's, or 1. */
+  #atomAfter(): number {
+    for (const atom of this.atoms) {
+      const chars = Array.from(atom);
+      if (this.#startsAt(this.#cursor, chars)) return chars.length;
+    }
+    return 1;
+  }
+
+  /**
+   * `index`, or the start or end of an atom it falls inside, since moving by
+   * words or lines would split one: an atom holds a space.
+   */
+  #outOfAtom(index: number, toEnd: boolean): number {
+    for (const atom of this.atoms) {
+      const chars = Array.from(atom);
+      for (let start = Math.max(0, index - chars.length + 1); start < index; start++)
+        if (this.#startsAt(start, chars)) return toEnd ? start + chars.length : start;
+    }
+    return index;
+  }
+
+  #startsAt(index: number, chars: string[]): boolean {
+    return chars.every((char, offset) => this.#chars[index + offset] === char);
   }
 
   wordLeft(): void {
-    this.#cursor = this.#wordStart();
+    this.#cursor = this.#outOfAtom(this.#wordStart(), false);
   }
 
   wordRight(): void {
     let end = this.#cursor;
     while (end < this.#chars.length && /\s/.test(this.#chars[end] ?? "")) end++;
     while (end < this.#chars.length && !/\s/.test(this.#chars[end] ?? "")) end++;
-    this.#cursor = end;
+    this.#cursor = this.#outOfAtom(end, true);
   }
 
   home(): void {
@@ -88,7 +147,7 @@ export class Editor {
     if (start === 0) return false;
     const column = this.#cursor - start;
     const previousStart = this.#lineStart(start - 1);
-    this.#cursor = Math.min(previousStart + column, start - 1);
+    this.#cursor = this.#outOfAtom(Math.min(previousStart + column, start - 1), false);
     return true;
   }
 
@@ -98,7 +157,10 @@ export class Editor {
     if (next === -1) return false;
     const column = this.#cursor - this.#lineStart();
     const after = this.#chars.indexOf("\n", next + 1);
-    this.#cursor = Math.min(next + 1 + column, after === -1 ? this.#chars.length : after);
+    this.#cursor = this.#outOfAtom(
+      Math.min(next + 1 + column, after === -1 ? this.#chars.length : after),
+      false,
+    );
     return true;
   }
 
@@ -115,7 +177,7 @@ export class Editor {
   }
 
   deleteWordBack(): void {
-    const start = this.#wordStart();
+    const start = this.#outOfAtom(this.#wordStart(), false);
     this.#chars.splice(start, this.#cursor - start);
     this.#cursor = start;
   }

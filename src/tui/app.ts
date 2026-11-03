@@ -2266,6 +2266,7 @@ export class App {
     }
     const placeholder = imagePlaceholder(++this.#imageCount);
     this.#images.set(placeholder, image);
+    this.#editor.atoms.add(placeholder);
     this.#editor.insert(`${placeholder} `);
     return true;
   }

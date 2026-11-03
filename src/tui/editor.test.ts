@@ -39,6 +39,39 @@ describe("Editor", () => {
     assert.equal(editor.token("@"), null, "the cursor sits inside the word");
   });
 
+  it("takes a pasted placeholder whole, and shows what it stands for in its place", () => {
+    const editor = new Editor();
+    editor.atoms.add("[Image #1]");
+    editor.insert("see [Image #1] now");
+    for (let index = 0; index < 4; index++) editor.left();
+    editor.left();
+    editor.insert("|");
+    assert.equal(editor.text, "see |[Image #1] now");
+    editor.backspace();
+    editor.delete();
+    assert.equal(editor.text, "see  now");
+    editor.set("a [Image #1]");
+    editor.backspace();
+    assert.equal(editor.text, "a ");
+    editor.set("a [Image #1] ");
+    editor.deleteWordBack();
+    assert.equal(editor.text, "a ");
+    editor.set("[Image #1] b");
+    editor.wordLeft();
+    editor.wordLeft();
+    editor.backspace();
+    assert.equal(editor.text, "[Image #1] b", "a word move does not stop inside it");
+    editor.wordRight();
+    editor.insert("|");
+    assert.equal(editor.text, "[Image #1]| b");
+    editor.set("a [Image #1] b");
+    assert.equal(editor.expand("[Image #1]", "one\r\ntwo"), true);
+    assert.equal(editor.text, "a one\ntwo b");
+    editor.insert("!");
+    assert.equal(editor.text, "a one\ntwo! b");
+    assert.equal(editor.expand("[Image #1]", "x"), false);
+  });
+
   it("restores the draft after browsing history", () => {
     const editor = new Editor();
     editor.insert("sent");
