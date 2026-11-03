@@ -443,7 +443,7 @@ export class AcpSession implements HarnessSession {
           contextTokens: update.used,
           contextWindow: update.size,
           costUsd: null,
-          limits: [],
+          cachedTokens: null,
         },
       });
       return;

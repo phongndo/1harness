@@ -85,7 +85,7 @@ describe("Store", () => {
       contextTokens: 30_000,
       contextWindow: 1_000_000,
       costUsd: 0.16,
-      limits: [],
+      cachedTokens: null,
     };
     store.saveThread(row("t1", { usage }));
     assert.deepEqual(store.thread("t1")?.usage, usage);

@@ -8,12 +8,10 @@ import {
   type McpServer,
   type McpServerConfig,
   type McpServerState,
-  type RateLimit,
   type RuntimeMode,
   type TurnStatus,
   type Usage,
 } from "../../core/events.ts";
-import { limitNotice } from "../../core/wording.ts";
 import { truncate } from "../../core/wording.ts";
 import { noticeEvent } from "../session-events.ts";
 import { contentText, todoStatus } from "../text.ts";
@@ -128,12 +126,6 @@ export interface CodexRuntimePolicy {
   approvalsReviewer: "user" | "auto_review";
   sandbox: "read-only" | "workspace-write" | "danger-full-access";
   sandboxPolicy: CodexSandboxPolicy;
-}
-
-interface RateLimitWindow {
-  usedPercent: number;
-  windowDurationMins: number | null;
-  resetsAt: number | null;
 }
 
 /**
@@ -485,14 +477,6 @@ function turnStatus(status: CodexTurn["status"]): TurnStatus {
   return status === "interrupted" ? "interrupted" : status === "failed" ? "failed" : "completed";
 }
 
-function windowLabel(minutes: number | null, fallback: string): string {
-  if (minutes === null) return fallback;
-  if (minutes % 10_080 === 0) return minutes === 10_080 ? "weekly" : `${minutes / 10_080}-week`;
-  if (minutes % 1440 === 0) return `${minutes / 1440}-day`;
-  if (minutes % 60 === 0) return `${minutes / 60}h`;
-  return `${minutes}m`;
-}
-
 /** Describes a turn error, preferring Codex's detailed explanation. */
 function errorText(error: CodexTurnError | null): string | null {
   if (!error) return null;
@@ -507,9 +491,7 @@ function errorText(error: CodexTurnError | null): string | null {
  */
 export class CodexTranslator {
   threadId: string | null = null;
-  #limits = new Map<string, RateLimit>();
-  #warned = new Set<string>();
-  #usage: Omit<Usage, "limits"> | null = null;
+  #usage: Usage | null = null;
   #retries = new Map<string, number>();
   /** The last fatal error per turn, reported once the turn completes. */
   #errors = new Map<string, string>();
@@ -540,10 +522,6 @@ export class CodexTranslator {
     return false;
   }
 
-  get limits(): RateLimit[] {
-    return [...this.#limits.values()];
-  }
-
   translate(method: string, params: Record<string, unknown>): HarnessEvent[] {
     const threadId = params["threadId"];
     // Requests from agent threads are answered here too, so their resolutions pass.
@@ -570,7 +548,7 @@ export class CodexTranslator {
             type: "turn.ended",
             turnId: turn.id,
             status: turnStatus(turn.status),
-            error: turnStatus(turn.status) === "failed" ? this.#withReset(error, turn.error) : null,
+            error: turnStatus(turn.status) === "failed" ? error : null,
           },
         ];
       }
@@ -617,7 +595,7 @@ export class CodexTranslator {
       }
       case "thread/tokenUsage/updated": {
         const usage = params["tokenUsage"] as {
-          total: { inputTokens: number; outputTokens: number };
+          total: { inputTokens: number; cachedInputTokens?: number; outputTokens: number };
           last: { totalTokens: number };
           modelContextWindow: number | null;
         };
@@ -627,11 +605,11 @@ export class CodexTranslator {
           contextTokens: usage.last.totalTokens,
           contextWindow: usage.modelContextWindow,
           costUsd: null,
+          // Codex counts cached input among its input tokens.
+          cachedTokens: usage.total.cachedInputTokens ?? null,
         };
         return [this.#usageEvent()];
       }
-      case "account/rateLimits/updated":
-        return this.#rateLimits(params["rateLimits"] as Record<string, unknown>);
       case "error": {
         const error = params["error"] as CodexTurnError;
         const turnId = String(params["turnId"] ?? "");
@@ -716,51 +694,9 @@ export class CodexTranslator {
       contextTokens: null,
       contextWindow: null,
       costUsd: null,
+      cachedTokens: null,
     };
-    return { type: "usage.updated", usage: { ...usage, limits: this.limits } };
-  }
-
-  #rateLimits(snapshot: Record<string, unknown>): HarnessEvent[] {
-    const events: HarnessEvent[] = [];
-    const reached = snapshot["rateLimitReachedType"] != null;
-    for (const [key, fallback] of [
-      ["primary", "short-term"],
-      ["secondary", "weekly"],
-    ] as const) {
-      const window = snapshot[key] as RateLimitWindow | null | undefined;
-      if (!window) continue;
-      const label = windowLabel(window.windowDurationMins, fallback);
-      const exceeded = window.usedPercent >= 100;
-      const limit: RateLimit = {
-        label,
-        usedPercent: window.usedPercent,
-        resetsAt: window.resetsAt === null ? null : window.resetsAt * 1000,
-        status: exceeded ? "exceeded" : window.usedPercent >= 90 ? "warning" : "ok",
-      };
-      this.#limits.set(key, limit);
-      // One warning per window as it nears its limit; it rearms after a reset.
-      if (limit.status === "ok") this.#warned.delete(key);
-      else if (!this.#warned.has(key)) {
-        this.#warned.add(key);
-        events.push(noticeEvent("codex", "warning", limitNotice(limit)));
-      }
-    }
-    if (reached && !this.#warned.has("reached")) {
-      this.#warned.add("reached");
-      events.push(noticeEvent("codex", "warning", "Usage limit reached"));
-    } else if (!reached) this.#warned.delete("reached");
-    events.push(this.#usageEvent());
-    return events;
-  }
-
-  /** Adds when usage resets to a usage-limit failure. */
-  #withReset(error: string | null, turnError: CodexTurnError | null): string | null {
-    if (!error || turnError?.codexErrorInfo !== "usageLimitExceeded") return error;
-    const resets = this.limits
-      .filter((limit) => limit.status === "exceeded" && limit.resetsAt !== null)
-      .map((limit) => limit.resetsAt ?? 0);
-    if (resets.length === 0) return error;
-    return `${error}\nResets ${new Date(Math.max(...resets)).toLocaleString()}`;
+    return { type: "usage.updated", usage };
   }
 }
 

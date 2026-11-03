@@ -1,5 +1,4 @@
 import { truncate } from "../core/wording.ts";
-import type { Usage } from "../core/events.ts";
 import type { ThreadListing, ThreadState } from "../protocol.ts";
 import type { ThreadRow, ThreadSummaryRow } from "../store/store.ts";
 import type { ManagedThread, RunRecord } from "./manager.ts";
@@ -41,14 +40,6 @@ function lastRunView(runs: readonly RunRecord[]): RunRecord | null {
   return last
     ? { ...last, input: clipText(last.input) ?? "", result: clipText(last.result) }
     : null;
-}
-
-/**
- * Usage saved before a restart: its context and cost still hold, but its
- * subscription limits are old news, and the harness says them again.
- */
-export function restoredUsage(usage: Usage | null): Usage | null {
-  return usage ? { ...usage, limits: [] } : null;
 }
 
 /** Whether a thread finished runs no client has shown. */
@@ -138,7 +129,7 @@ export function storedState(row: ThreadRow, runs: readonly RunRecord[]): ThreadS
     queue: [],
     held: false,
     requests: [],
-    usage: restoredUsage(row.usage),
+    usage: row.usage,
     runCount: runs.length,
     lastRun: lastRunView(runs),
     background: [],

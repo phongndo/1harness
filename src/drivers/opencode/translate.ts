@@ -569,7 +569,7 @@ export class OpenCodeTranslator {
     contextTokens: null,
     contextWindow: null,
     costUsd: null,
-    limits: [],
+    cachedTokens: null,
   };
 
   constructor(cwd: string) {
@@ -680,6 +680,7 @@ export class OpenCodeTranslator {
         this.#usage = {
           ...this.#usage,
           inputTokens: tokens.input + tokens.cache.read + tokens.cache.write,
+          cachedTokens: tokens.cache.read,
           outputTokens: tokens.output + tokens.reasoning,
           contextWindow: this.contextWindow,
           costUsd: typeof cost === "number" ? cost : this.#usage.costUsd,

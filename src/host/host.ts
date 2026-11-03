@@ -81,7 +81,6 @@ import { StoreWriter } from "./store-writer.ts";
 import {
   NO_FLAGS,
   isEmpty,
-  restoredUsage,
   rowListing,
   storedState,
   threadListing,
@@ -472,7 +471,7 @@ export class Host {
         generation: row.generation,
         allowances: store.allowances(row.id),
         queue: store.queuedMessages(row.id).map(({ message, sent }) => ({ message, input: sent })),
-        usage: restoredUsage(row.usage),
+        usage: row.usage,
       },
     };
   }

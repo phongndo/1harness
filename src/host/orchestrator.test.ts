@@ -115,7 +115,7 @@ class FakeSession {
           contextTokens: 150_000 * this.#turns,
           contextWindow: 1_000_000,
           costUsd: null,
-          limits: [],
+          cachedTokens: null,
         },
       });
       this.events.push({

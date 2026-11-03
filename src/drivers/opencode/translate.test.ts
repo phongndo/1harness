@@ -255,7 +255,7 @@ describe("OpenCodeTranslator", () => {
             contextTokens: 10_393,
             contextWindow: 200_000,
             costUsd: 0.5,
-            limits: [],
+            cachedTokens: 11136,
           },
         },
       ],

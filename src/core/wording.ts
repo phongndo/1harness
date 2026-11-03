@@ -4,7 +4,6 @@ import {
   type ApprovalAction,
   type ApprovalOption,
   type FileChange,
-  type RateLimit,
   type RuntimeMode,
 } from "./events.ts";
 
@@ -137,38 +136,6 @@ export function planOptions(
   ];
 }
 
-/** `42% used`, or null where the harness says only the limit's status. */
-function limitUsed(limit: RateLimit): string | null {
-  return limit.usedPercent === null ? null : `${Math.round(limit.usedPercent)}% used`;
-}
-
-function limitResets(limit: RateLimit): string | null {
-  return limit.resetsAt === null ? null : `resets ${new Date(limit.resetsAt).toLocaleString()}`;
-}
-
-/** The notice for a usage limit that is near or reached. */
-export function limitNotice(limit: RateLimit): string {
-  const percent = limitUsed(limit);
-  const when = limitResets(limit);
-  const used = percent === null ? "" : ` ${percent}`;
-  const resets = when === null ? "" : `, ${when}`;
-  return limit.status === "exceeded"
-    ? `${limit.label} usage limit reached${resets}`
-    : `${limit.label} usage limit:${used}${resets}`;
-}
-
-/** A usage limit in full, as a list of them says it: `5h: 42% used · resets …`. */
-export function limitDetail(limit: RateLimit): string {
-  const resets = limitResets(limit);
-  return `${limit.label}: ${limitUsed(limit) ?? limit.status}${resets ? ` · ${resets}` : ""}`;
-}
-
-/** A usage limit that needs attention, in a few words: `5h limit reached`, `5h 85%`. */
-export function limitBrief(limit: RateLimit): string {
-  if (limit.status === "exceeded") return `${limit.label} limit reached`;
-  return `${limit.label} ${limit.usedPercent === null ? "near limit" : `${Math.round(limit.usedPercent)}%`}`;
-}
-
 /**
  * How much of the context window is used, its counts as `formatTokens` says
  * them; null where the harness does not say.
@@ -184,6 +151,16 @@ export function contextUsed(usage: {
     window: formatTokens(window),
     percent: Math.round((used / window) * 100),
   };
+}
+
+/** The share of input tokens read from the prompt cache, 0–100; null where the harness does not say. */
+export function cacheHit(usage: {
+  inputTokens: number;
+  cachedTokens: number | null;
+}): number | null {
+  // Usage saved before harnesses said it has none.
+  if (usage.cachedTokens == null || usage.inputTokens <= 0) return null;
+  return Math.round((usage.cachedTokens / usage.inputTokens) * 100);
 }
 
 /** `$0.16`, or `<$0.01` for less. */

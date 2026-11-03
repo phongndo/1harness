@@ -190,24 +190,14 @@ export interface SessionInfo {
   title?: string | null;
 }
 
-/** One subscription usage window, such as a five-hour or weekly limit. */
-export interface RateLimit {
-  label: string;
-  /** 0–100, or null when the harness only reports the status. */
-  usedPercent: number | null;
-  /** Epoch milliseconds. */
-  resetsAt: number | null;
-  status: "ok" | "warning" | "exceeded";
-}
-
 export interface Usage {
   inputTokens: number;
   outputTokens: number;
   contextTokens: number | null;
   contextWindow: number | null;
   costUsd: number | null;
-  /** Subscription limits, newest snapshot. */
-  limits: RateLimit[];
+  /** Of `inputTokens`, those read from the prompt cache; null where the harness does not say. */
+  cachedTokens: number | null;
 }
 
 export type TurnStatus = "completed" | "interrupted" | "failed";

@@ -145,7 +145,7 @@ describe("ClaudeTranslator", () => {
           contextTokens: 100,
           contextWindow: 1000,
           costUsd: 0.25,
-          limits: [],
+          cachedTokens: 90,
         },
       },
     ]);
@@ -306,23 +306,20 @@ describe("ClaudeTranslator", () => {
     ]);
   });
 
-  it("warns when a subscription limit is near or reached", () => {
+  it("says once that a usage limit holds the turn, and nothing of nearing one", () => {
     const translator = new ClaudeTranslator();
     const limit = (status: string) =>
       translator.translate(
         message({
           type: "rate_limit_event",
-          rate_limit_info: { status, rateLimitType: "five_hour", utilization: 0.95 },
+          rate_limit_info: { status, rateLimitType: "seven_day", utilization: 0.95 },
         }),
       );
-    const warning = limit("allowed_warning");
-    assert.equal(warning[0]?.type === "item.completed" && warning[0].item.kind, "notice");
-    const usage = warning.at(-1);
-    assert.deepEqual(usage?.type === "usage.updated" && usage.usage.limits, [
-      { label: "5h", usedPercent: 95, resetsAt: null, status: "warning" },
-    ]);
-    // The same status again adds no second warning.
-    assert.equal(limit("allowed_warning").length, 1);
+    assert.deepEqual(limit("allowed_warning"), []);
+    const reached = limit("rejected");
+    assert.equal(reached.length, 1);
+    assert.equal(reached[0]?.type === "item.completed" && reached[0].item.kind, "notice");
+    assert.deepEqual(limit("rejected"), []);
   });
 
   it("keeps retries and compaction on one updating line each", () => {

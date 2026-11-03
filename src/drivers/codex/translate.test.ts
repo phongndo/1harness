@@ -244,7 +244,7 @@ describe("CodexTranslator", () => {
         threadId: "t",
         turnId: "u1",
         tokenUsage: {
-          total: { inputTokens: 10, outputTokens: 2 },
+          total: { inputTokens: 10, cachedInputTokens: 6, outputTokens: 2 },
           last: { totalTokens: 7 },
           modelContextWindow: 100,
         },
@@ -258,7 +258,7 @@ describe("CodexTranslator", () => {
             contextTokens: 7,
             contextWindow: 100,
             costUsd: null,
-            limits: [],
+            cachedTokens: 6,
           },
         },
       ],
@@ -323,26 +323,6 @@ describe("CodexTranslator", () => {
     });
     assert.equal(translator.takePlan("u"), true);
     assert.equal(translator.takePlan("u"), false);
-  });
-
-  it("warns once as a usage window nears its limit", () => {
-    const translator = new CodexTranslator();
-    const update = (usedPercent: number) =>
-      translator.translate("account/rateLimits/updated", {
-        rateLimits: {
-          primary: { usedPercent, windowDurationMins: 300, resetsAt: null },
-          secondary: null,
-          rateLimitReachedType: null,
-        },
-      });
-    assert.equal(update(50).length, 1);
-    const warned = update(92);
-    assert.equal(warned[0]?.type === "item.completed" && warned[0].item.kind, "notice");
-    assert.equal(update(95).length, 1);
-    const last = update(95).at(-1);
-    assert.deepEqual(last?.type === "usage.updated" && last.usage.limits, [
-      { label: "5h", usedPercent: 95, resetsAt: null, status: "warning" },
-    ]);
   });
 });
 

@@ -22,7 +22,14 @@ import type {
 } from "../core/events.ts";
 import { looksLikeThreadId, shortThreadId } from "../core/thread-id.ts";
 import { errorMessage } from "../core/errors.ts";
-import { HARNESS_STATES, contextUsed, formatCost, limitDetail, plural } from "../core/wording.ts";
+import {
+  HARNESS_STATES,
+  cacheHit,
+  contextUsed,
+  formatCost,
+  formatTokens,
+  plural,
+} from "../core/wording.ts";
 import type { ClientEvent, HostClient } from "../client/client.ts";
 import {
   RpcError,
@@ -2395,9 +2402,13 @@ export class App {
     const context = usage ? contextUsed(usage) : null;
     if (context)
       rows.push(["Context", `${context.used} of ${context.window} (${context.percent}%)`]);
+    const cached = usage ? cacheHit(usage) : null;
+    if (usage && cached !== null)
+      rows.push([
+        "Cache",
+        `${cached}% of input read from cache (${formatTokens(usage.cachedTokens ?? 0)} of ${formatTokens(usage.inputTokens)})`,
+      ]);
     if (usage?.costUsd) rows.push(["Cost", formatCost(usage.costUsd)]);
-    const limits = usage?.limits ?? [];
-    if (limits.length > 0) rows.push(["Limits", limits.map(limitDetail).join("\n")]);
     rows.push(["Server", this.#serverLine()]);
     this.#panel = { kind: "info", title: "Status", rows };
   }
@@ -2568,12 +2579,10 @@ export class App {
         exitArmed: this.#exitArmed,
         toast: this.#toastText(),
         harness: this.#harness,
-        currentId: this.#currentId,
         current,
         // Until the harness names its model, its default's ID, once its list says it.
         model: current ? (current.info.model ?? this.#defaultModel()) : null,
         runtimeMode: this.#settings.runtimeMode,
-        threads: this.#client.threads.values(),
         server: this.#server.local ? null : this.#server.label,
         scroll: this.#view.scroll,
         details: this.#details,

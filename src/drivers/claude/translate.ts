@@ -15,7 +15,6 @@ import {
   type Item,
   type McpServer,
   type McpServerState,
-  type RateLimit,
   type RuntimeMode,
   type TodoStep,
   type ToolCategory,
@@ -23,7 +22,6 @@ import {
   type NoticeLevel,
 } from "../../core/events.ts";
 import { unifiedDiff } from "../../core/diff.ts";
-import { limitNotice } from "../../core/wording.ts";
 import { truncate } from "../../core/wording.ts";
 import { noticeEvent } from "../session-events.ts";
 import { record, text } from "../../core/values.ts";
@@ -38,14 +36,6 @@ const OUTPUT_LIMIT = 65_536;
 const TASK_TOOLS = new Set(["TaskCreate", "TaskUpdate", "TaskList", "TaskGet"]);
 // Tools that only load other tools' definitions.
 const HIDDEN_TOOLS = new Set(["ToolSearch"]);
-const LIMIT_LABELS: Record<string, string> = {
-  five_hour: "5h",
-  seven_day: "weekly",
-  seven_day_opus: "weekly Opus",
-  seven_day_sonnet: "weekly Sonnet",
-  seven_day_overage_included: "weekly",
-  overage: "extra usage",
-};
 
 /**
  * The runtime modes Claude Code's settings leave on. Any settings file can
@@ -283,8 +273,9 @@ export class ClaudeTranslator {
   #ids = 0;
   #contextTokens: number | null = null;
   #contextWindow: number | null = null;
-  #usage: Omit<Usage, "limits" | "contextTokens" | "contextWindow"> | null = null;
-  #limits = new Map<string, RateLimit>();
+  #usage: Omit<Usage, "contextTokens" | "contextWindow"> | null = null;
+  /** Whether Claude last said a usage limit holds the turn back. */
+  #limited = false;
   #compaction: string | null = null;
   #retry: string | null = null;
   #sawText = false;
@@ -346,7 +337,7 @@ export class ClaudeTranslator {
       case "system":
         return this.#system(message);
       case "rate_limit_event":
-        return this.#rateLimit(message.rate_limit_info);
+        return this.#rateLimit(message.rate_limit_info.status);
       default:
         return [];
     }
@@ -563,50 +554,44 @@ export class ClaudeTranslator {
         (message.usage.cache_creation_input_tokens ?? 0),
       outputTokens: message.usage.output_tokens,
       costUsd: message.total_cost_usd,
+      cachedTokens: message.usage.cache_read_input_tokens ?? 0,
     };
     return [this.#usageEvent()];
   }
 
   #usageEvent(): HarnessEvent {
-    const usage = this.#usage ?? { inputTokens: 0, outputTokens: 0, costUsd: null };
+    const usage = this.#usage ?? {
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: null,
+      cachedTokens: null,
+    };
     return {
       type: "usage.updated",
       usage: {
         ...usage,
         contextTokens: this.#contextTokens,
         contextWindow: this.#contextWindow,
-        limits: [...this.#limits.values()],
       },
     };
   }
 
   #rateLimit(
-    info: Extract<SDKMessage, { type: "rate_limit_event" }>["rate_limit_info"],
+    status: Extract<SDKMessage, { type: "rate_limit_event" }>["rate_limit_info"]["status"],
   ): HarnessEvent[] {
-    const key = info.rateLimitType ?? "subscription";
-    const label = LIMIT_LABELS[key] ?? key.replaceAll("_", " ");
-    const status =
-      info.status === "rejected"
-        ? "exceeded"
-        : info.status === "allowed_warning"
-          ? "warning"
-          : "ok";
-    const previous = this.#limits.get(key);
-    const limit: RateLimit = {
-      label,
-      usedPercent: info.utilization === undefined ? null : info.utilization * 100,
-      resetsAt: info.resetsAt === undefined ? null : info.resetsAt * 1000,
-      status,
-    };
-    this.#limits.set(key, limit);
-    const events: HarnessEvent[] = [];
-    if (status !== "ok" && previous?.status !== status) {
-      // Claude Code holds the turn until the limit resets rather than failing it.
-      const waits = status === "exceeded" ? ". The turn waits for it to reset; esc stops it." : "";
-      events.push(noticeEvent("claude", "warning", `${limitNotice(limit)}${waits}`));
-    }
-    events.push(this.#usageEvent());
-    return events;
+    const limited = status === "rejected";
+    const reached = limited && !this.#limited;
+    this.#limited = limited;
+    // Claude Code holds the turn until the limit resets rather than failing it.
+    return reached
+      ? [
+          noticeEvent(
+            "claude",
+            "warning",
+            "Usage limit reached. The turn waits for it to reset; esc stops it.",
+          ),
+        ]
+      : [];
   }
 
   /** Applies a task list tool's result and emits the updated list. */

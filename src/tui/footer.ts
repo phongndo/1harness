@@ -1,6 +1,6 @@
-import type { RuntimeMode, Usage } from "../core/events.ts";
+import type { RuntimeMode } from "../core/events.ts";
 import type { Message } from "../core/thread.ts";
-import { contextUsed, formatCost, limitBrief, plural } from "../core/wording.ts";
+import { cacheHit, contextUsed, formatCost } from "../core/wording.ts";
 import type { ThreadState } from "../protocol.ts";
 import type { Editor } from "./editor.ts";
 import { infoPanel, type Menu } from "./menu.ts";
@@ -84,16 +84,6 @@ function activityLine(
   return spread(left, style.muted(hint), width);
 }
 
-/** The context and cost a thread has used, for the status line. */
-function usageSummary(usage: Usage): string {
-  const parts: string[] = [];
-  const context = contextUsed(usage);
-  if (context) parts.push(`ctx ${context.used}/${context.window} (${context.percent}%)`);
-  // Nothing spent yet, or a subscription that does not count it, shows no cost.
-  if (usage.costUsd) parts.push(formatCost(usage.costUsd));
-  return parts.join(" · ");
-}
-
 /** What the status line shows, as the terminal has it when it draws. */
 export interface StatusLineState {
   /** A ctrl+c that one more exits after. */
@@ -101,14 +91,12 @@ export interface StatusLineState {
   /** A word for a moment, such as what was copied. */
   toast: string | null;
   harness: string;
-  /** The thread on screen, by ID, and as the host last said, once it has. */
-  currentId: string | null;
+  /** The thread on screen, as the host last said, once it has. */
   current: ThreadState | undefined;
   /** The model it uses, its harness's default where none was chosen and the default is known. */
   model: string | null;
   /** The runtime mode the next thread starts in, for when none is on screen. */
   runtimeMode: RuntimeMode;
-  threads: Iterable<ThreadState>;
   /** The server the terminal works through, where not this machine's. */
   server: string | null;
   /** Rows the view is scrolled up. */
@@ -117,6 +105,7 @@ export interface StatusLineState {
   details: boolean;
 }
 
+/** `full-access · claude · opus · high · ctx 12% · cache 87% · $0.42`; /status says the rest. */
 export function statusLine(state: StatusLineState, width: number): string {
   if (state.exitArmed) return style.muted("Press ctrl+c again to exit");
   if (state.toast) return truncate(`${style.added("✓")} ${style.text(state.toast)}`, width);
@@ -128,31 +117,14 @@ export function statusLine(state: StatusLineState, width: number): string {
     if (state.model) parts.push(state.model);
     if (info.effort) parts.push(info.effort);
   }
-  const usage = current?.usage ? usageSummary(current.usage) : "";
-  if (usage) parts.push(usage);
-  // With more than one thread, what the others are doing.
-  const threads = [...state.threads].filter((thread) => thread.status !== "closed");
-  const elsewhere = (thread: ThreadState) => thread.id !== state.currentId;
-  const others = threads.filter(
-    (thread) => elsewhere(thread) && thread.status !== "idle" && thread.status !== "parked",
-  ).length;
-  if (others > 0) parts.push(`${plural(others, "other thread")} working`);
-  else {
-    // Threads of your own still open, not the agents they started, which ctrl+t lists
-    // under them, nor parked ones, which are earlier threads to resume.
-    const open = threads.filter(
-      (thread) =>
-        elsewhere(thread) &&
-        thread.parentId === null &&
-        !thread.archived &&
-        thread.status !== "parked",
-    ).length;
-    if (open > 0) parts.push(`${open} other open · ctrl+t`);
-  }
+  const usage = current?.usage;
+  const context = usage ? contextUsed(usage) : null;
+  if (context) parts.push(`ctx ${context.percent}%`);
+  const cached = usage ? cacheHit(usage) : null;
+  if (cached !== null) parts.push(`cache ${cached}%`);
+  // Nothing spent yet, or a subscription that does not count it, shows no cost.
+  if (usage?.costUsd) parts.push(formatCost(usage.costUsd));
   if (state.server) parts.push(`on ${state.server}`);
-  // Subscription limits appear once they need attention.
-  for (const limit of current?.usage?.limits ?? [])
-    if (limit.status !== "ok") parts.push(limitBrief(limit));
   // A closed thread on screen says so first, since it takes no messages.
   const mode = info?.runtimeMode ?? state.runtimeMode;
   const shown = current?.status === "closed" ? `closed · ${mode}` : mode;
