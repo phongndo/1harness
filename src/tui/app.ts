@@ -189,6 +189,9 @@ const IGNORED_STDERR = [/CLAUDE_SDK_CAN_USE_TOOL_SHADOWED/, /^\(Use `node --trac
  */
 const PICTURES_KEPT = 256;
 
+/** The host's errors for a thread it does not have open. */
+const NO_THREAD = new Set(["thread_not_found", "thread_closed"]);
+
 interface OpenRequest {
   threadId: string;
   request: HarnessRequest;
@@ -1032,7 +1035,9 @@ export class App {
       await this.#client.call("thread.switchHarness", { threadId: current.id, harness, fresh });
     } catch (error) {
       // The host notes in the thread why a switch failed, unless there was no thread to note it in.
-      if (error instanceof RpcError) this.#notice("error", errorMessage(error));
+      // A server sends every error as an RpcError, so the code tells which.
+      if (error instanceof RpcError && NO_THREAD.has(error.code))
+        this.#notice("error", errorMessage(error));
     }
   }
 

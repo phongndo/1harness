@@ -6,6 +6,8 @@ import { PassThrough, Writable } from "node:stream";
 import { after, afterEach, before, describe, it } from "node:test";
 import { HostClient } from "../client/client.ts";
 import { LocalConnection } from "../client/connection.ts";
+import { errorMessage } from "../core/errors.ts";
+import { RpcError } from "../protocol.ts";
 import { Host } from "../host/host.ts";
 import { Store } from "../store/store.ts";
 import { registerDriver } from "../drivers/index.ts";
@@ -464,6 +466,33 @@ describe("App threads and keys", () => {
     await session.type("\x14");
     const screen = await session.sees("the store is locked");
     assert.doesNotMatch(screen, /No threads yet/);
+  });
+
+  it("says once why a move to another harness failed, through a server too", async () => {
+    const unregisterBroken = registerDriver({
+      id: "broken",
+      label: "Broken",
+      unavailable: () => null,
+      create: (options) =>
+        Object.assign(new ScriptedSession(options), {
+          start: () => Promise.reject(new Error("the broken harness is broken")),
+        }),
+    });
+    try {
+      const session = await start({ prompt: "alpha" });
+      await session.sees("Done with alpha");
+      // A server sends back every error as an RpcError.
+      const call = session.client.call.bind(session.client);
+      session.client.call = ((method: string, params: unknown) =>
+        call(method as never, params as never).catch((error: unknown) => {
+          throw error instanceof RpcError ? error : new RpcError("error", errorMessage(error));
+        })) as typeof session.client.call;
+      await session.type("/harness broken\r");
+      const screen = await session.sees("Could not move to Broken");
+      assert.equal(screen.match(/the broken harness is broken/g)?.length, 1, screen);
+    } finally {
+      unregisterBroken();
+    }
   });
 
   it("renames the thread with /rename", async () => {
