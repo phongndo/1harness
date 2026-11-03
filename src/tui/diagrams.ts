@@ -2,8 +2,8 @@ import { renderMermaidASCII } from "beautiful-mermaid";
 import { render as renderMermaid } from "pele";
 import type { FigureRenderer } from "./figures.ts";
 import { BoundedMap } from "./cache.ts";
-import { pictureLater, screenDensity, type CellSize, type Picture } from "./images.ts";
-import { figureFont, loadResvg, onCells, rasterize, readable, svgSize } from "./svg.ts";
+import { screenDensity, type CellSize, type Picture } from "./images.ts";
+import { drawLater, figureFont, loadResvg, onCells, readable, svgSize } from "./svg.ts";
 
 // Mermaid diagrams as pictures: Pele lays a diagram out as SVG, resvg turns
 // it into a PNG, and the transcript shows it as an image. A terminal without
@@ -158,15 +158,11 @@ export class Diagrams implements FigureRenderer {
     const key = `${light ? "light" : "dark"}\0${drawnWidth}x${drawnHeight}\0${cell.width}x${cell.height}\0${source}`;
     const known = this.#pictures.get(key);
     if (known !== undefined) return known;
-    const canvas = onCells(layout.svg, drawnWidth, drawnHeight, cell);
-    const size = svgSize(canvas);
     // Rasterized once sent, so a resize does not draw every diagram off screen again.
-    const drawn = pictureLater(size.width, size.height, () => {
-      try {
-        return rasterize(canvas, figureFont());
-      } catch {
-        return new Uint8Array();
-      }
+    const drawn = drawLater(onCells(layout.svg, drawnWidth, drawnHeight, cell), () => {
+      // Drawn in characters instead, once the views draw again.
+      this.#pictures.set(key, null);
+      this.#onReady();
     });
     this.#pictures.set(key, drawn);
     return drawn;

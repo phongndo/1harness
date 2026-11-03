@@ -90,6 +90,24 @@ describe("diagrams", () => {
     );
   });
 
+  it("shows a diagram resvg cannot draw in characters, rather than as blank cells", async () => {
+    let redraws = 0;
+    let ready!: () => void;
+    const loaded = new Promise<void>((resolve) => (ready = resolve));
+    const diagrams = new Diagrams(() => {
+      redraws++;
+      ready();
+    });
+    diagrams.picture(FLOW, false, 800, CELL);
+    await loaded;
+    // Far more pixels than resvg can draw.
+    const huge = diagrams.picture(FLOW, false, 200_000, CELL, 200_000);
+    assert.ok(huge, "laid out before it is drawn");
+    assert.equal(huge.data, "", "drawing it, as sending it does, fails");
+    assert.equal(redraws, 2, "the views draw again");
+    assert.equal(diagrams.picture(FLOW, false, 200_000, CELL, 200_000), null);
+  });
+
   it("cuts edge labels into their lines instead of painting a background behind them", () => {
     const svg = floating(render("flowchart LR\n  A -->|yes| B").svg);
     assert.doesNotMatch(svg, /fill="var\(--_bg\)"/);

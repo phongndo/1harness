@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { initWasm, Resvg } from "@resvg/resvg-wasm";
-import type { CellSize } from "./images.ts";
+import { pictureLater, type CellSize, type Picture } from "./images.ts";
 
 // SVG to PNG for the pictures the transcript draws itself, diagrams and
 // equations: resvg (Rust, as WASM, so nothing native to build) loads once, in
@@ -113,4 +113,21 @@ export function figureFont(): Uint8Array | null {
       }
     }
   return font;
+}
+
+/**
+ * A picture of an SVG drawn on cells, rasterized once sent, so one laid out
+ * but never shown costs nothing. Should resvg fail then, `failed` is told, so
+ * the figure shows another way, rather than as cells left blank.
+ */
+export function drawLater(canvas: string, failed: () => void): Picture {
+  const size = svgSize(canvas);
+  return pictureLater(size.width, size.height, () => {
+    try {
+      return rasterize(canvas, figureFont());
+    } catch {
+      failed();
+      return new Uint8Array();
+    }
+  });
 }
