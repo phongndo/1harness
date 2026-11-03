@@ -121,7 +121,6 @@ export class ThreadLogs {
   }
 
   async #loadNow(id: string): Promise<void> {
-    if (this.#loading.has(id)) return;
     this.#loading.set(id, []);
     const generation = this.#generation;
     const { client, views } = this.#host;
