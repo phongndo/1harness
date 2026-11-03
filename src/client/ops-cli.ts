@@ -2,7 +2,7 @@ import { parseInput } from "../operations/input.ts";
 import type { OperationInfo } from "../operations/operation.ts";
 import type { HostClient } from "./client.ts";
 
-export const OP_HELP = `Usage: 1harness op [--json]
+const OP_HELP = `Usage: 1harness op [--json]
        1harness op <operation> [key=value ... | '{json}']
 
 Lists the operations you can call, or calls one and prints what it returns.
@@ -12,7 +12,7 @@ thread_open, thread_send, thread_events, thread_switch_harness, and more.
 `;
 
 /** The operations, one a line: name, whether it changes anything, and what it does. */
-export function operationLines(operations: readonly OperationInfo[]): string {
+function operationLines(operations: readonly OperationInfo[]): string {
   const width = Math.max(0, ...operations.map((operation) => operation.name.length));
   return operations
     .toSorted((a, b) => a.name.localeCompare(b.name))

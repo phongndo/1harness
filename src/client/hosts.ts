@@ -5,7 +5,7 @@ import { errorMessage } from "../core/errors.ts";
 import type { ServerTarget } from "./socket.ts";
 
 /** Servers known by a short name, such as `z`, kept in `hosts.json` in the config folder. */
-export type Hosts = Record<string, string>;
+type Hosts = Record<string, string>;
 
 function file(env: NodeJS.ProcessEnv): string {
   return join(configDir(env), "hosts.json");

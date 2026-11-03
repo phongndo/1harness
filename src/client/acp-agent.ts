@@ -171,7 +171,7 @@ interface Session {
  * `1harness acp`: an ACP agent whose sessions are 1harness threads. It is a
  * person's client, through their editor, so it may do whatever they may.
  */
-export class AcpAgent {
+class AcpAgent {
   #peer: JsonRpcPeer;
   #client: HostClient;
   #defaults: Defaults;
