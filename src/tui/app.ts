@@ -40,12 +40,12 @@ import { agentRowOf } from "./agents.ts";
 import { FetchCache } from "./cache.ts";
 import { Suggestions, inMenuOrder } from "./completion.ts";
 import { Editor, applyEditingKey } from "./editor.ts";
-import { activityLine, attentionLine, queueRows, statusLine } from "./footer.ts";
+import { footerRows, statusLine, type Footer } from "./footer.ts";
 import { CLICK_MS, InputDecoder, WHEEL_ROWS, type InputEvent, type Key } from "./input.ts";
 import { LivePages } from "./live.ts";
 import { codeBlocks } from "./markdown.ts";
 import { ThreadLogs } from "./logs.ts";
-import { Menu, entry, infoPanel, type MenuConfig, type MenuEntry } from "./menu.ts";
+import { Menu, entry, type MenuConfig, type MenuEntry } from "./menu.ts";
 import { listedEntry, ResumeView, type ResumeEntry } from "./resume.ts";
 import { ancestry, family, lastActive, threadEntries } from "./threads.ts";
 import { PictureViewer } from "./viewer.ts";
@@ -57,7 +57,7 @@ import {
   type ChoiceResult,
   type QuestionsResult,
 } from "./prompt.ts";
-import { Screen, type CursorPosition } from "./screen.ts";
+import { Screen } from "./screen.ts";
 import {
   STATUS_QUERY,
   StatusReporter,
@@ -2946,99 +2946,29 @@ export class App {
     }
   }
 
-  /** The rows below the transcript: activity, queue, and the composer or a panel. */
-  #footer(
-    width: number,
-    height: number,
-  ): {
-    rows: string[];
-    cursor: CursorPosition | null;
-    /** The list shown, and the footer row its rows start on. */
-    list?: { menu: Menu; row: number };
-  } {
-    const rows: string[] = [""];
-    const { turn } = this.#view;
-    if (turn && !this.#prompt) {
-      const state = {
+  /** The rows below the transcript, as the footer lays them out for what is on screen. */
+  #footer(width: number, height: number): Footer {
+    const current = this.#current;
+    return footerRows(
+      {
+        turn: this.#view.turn,
         running: this.#view.transcript.running,
         blink: this.#blinkOn,
-        steer: this.#current?.capabilities.steer === true,
-      };
-      rows.push(activityLine(turn, state, width), "");
-    }
-    const queue = this.#current?.queue ?? [];
-    // A queue held after a restart waits for the user's next message.
-    rows.push(...queueRows(queue, this.#current?.held === true, width));
-    if (queue.length > 0) rows.push("");
-    const waiting = this.#requests.filter((open) => open.threadId !== this.#currentId);
-    const attention = attentionLine(waiting, this.#client.threads, width);
-    if (attention) rows.push(attention, "");
-
-    let cursor: CursorPosition | null = null;
-    let list: { menu: Menu; row: number } | undefined;
-    if (this.#prompt && !this.#panel) {
-      // The rows the footer has left, under the queue and the attention line,
-      // less the status line, which keeps the bottom row under a prompt too.
-      const rendered = this.#prompt.prompt.render(width, height - rows.length - 2);
-      if (rendered.cursor)
-        cursor = { row: rows.length + rendered.cursor.row, column: rendered.cursor.column };
-      rows.push(...rendered.rows, "", this.#statusLine(width));
-    } else {
-      const limit = Math.max(1, Math.min(10, Math.floor(height / 3)));
-      const layout = this.#editor.layout(`${style.strong("┃")} `, width);
-      // An empty composer says what it takes.
-      if (this.#editor.empty && !this.#panel) {
-        const hint = this.#live?.busy
-          ? "Add to the turn, or tab to queue a message"
-          : "Ask anything · @ files · / commands";
-        layout.rows[0] = truncate(`${style.strong("┃")} ${style.faint(hint)}`, width);
-      }
-      const start = Math.max(
-        0,
-        Math.min(layout.cursor.row - limit + 1, layout.rows.length - limit),
-      );
-      const composer = layout.rows.slice(start, start + limit);
-      // Room for a list: the screen less the rows above it, the composer and
-      // status line under it, the list's chrome, and a little transcript.
-      const listRows = Math.max(3, Math.min(14, height - rows.length - composer.length - 11));
-      const listed =
-        this.#panel?.kind === "menu"
-          ? this.#panel.menu
-          : this.#panel
-            ? null
-            : this.#suggestions.menu;
-      // Lists and panels open above the composer, which keeps its place at the
-      // bottom; the thread list takes the screen above it.
-      const panel =
-        this.#panel?.kind === "info"
-          ? infoPanel(this.#panel.title, this.#panel.rows, width)
-          : this.#panel?.kind === "resume"
-            ? this.#panel.view.render(
-                width,
-                Math.max(8, height - rows.length - composer.length - 3),
-              )
-            : this.#panel?.kind === "lineage"
-              ? // Short enough to watch the thread on screen above it.
-                this.#panel.view.render(width, Math.max(10, Math.floor(height * 0.45)))
-              : listed
-                ? listed.render(width, listRows)
-                : [];
-      if (listed) list = { menu: listed, row: rows.length };
-      if (panel.length > 0) rows.push(...panel, "");
-      if (!this.#panel)
-        cursor = { row: rows.length + layout.cursor.row - start, column: layout.cursor.column };
-      rows.push(...composer, "", this.#statusLine(width));
-    }
-    if (rows.length > height) {
-      const cut = rows.length - height;
-      if (cursor) cursor = { ...cursor, row: Math.max(0, cursor.row - cut) };
-      return {
-        rows: rows.slice(cut),
-        cursor,
-        ...(list && list.row >= cut ? { list: { ...list, row: list.row - cut } } : {}),
-      };
-    }
-    return { rows, cursor, ...(list ? { list } : {}) };
+        steer: current?.capabilities.steer === true,
+        queue: current?.queue ?? [],
+        held: current?.held === true,
+        waiting: this.#requests.filter((open) => open.threadId !== this.#currentId),
+        threads: this.#client.threads,
+        prompt: this.#prompt?.prompt ?? null,
+        panel: this.#panel,
+        editor: this.#editor,
+        busy: this.#live?.busy === true,
+        suggestions: this.#suggestions.menu,
+        status: this.#statusLine(width),
+      },
+      width,
+      height,
+    );
   }
 
   #statusLine(width: number): string {

@@ -2,16 +2,21 @@ import type { RuntimeMode, Usage } from "../core/events.ts";
 import type { Message } from "../core/thread.ts";
 import { contextUsed, formatCost, limitBrief, plural } from "../core/wording.ts";
 import type { ThreadState } from "../protocol.ts";
+import type { Editor } from "./editor.ts";
+import { infoPanel, type Menu } from "./menu.ts";
+import type { ResumeView } from "./resume.ts";
+import type { CursorPosition } from "./screen.ts";
 import { style } from "./theme.ts";
 import { oneLineText, spread, truncate, visibleWidth, wrap } from "./text.ts";
 import { queuedText, tokenCounts, type TurnState } from "./view.ts";
 
 // The lines under the transcript, from what the terminal shows when it draws
 // them: what the turn is doing, what waits to run, who else needs the user,
-// and the status line at the bottom.
+// the composer or a prompt, the panel over it, and the status line at the
+// bottom.
 
 /** The queue of the thread on screen, a line a message; `held` after a restart. */
-export function queueRows(queue: readonly Message[], held: boolean, width: number): string[] {
+function queueRows(queue: readonly Message[], held: boolean, width: number): string[] {
   const rows = queue.map((queued) =>
     truncate(
       style.muted(`  ↳ ${held ? "held" : "queued"}: ${oneLineText(queuedText(queued))}`),
@@ -35,7 +40,7 @@ export function queueRows(queue: readonly Message[], held: boolean, width: numbe
  * The line that says other threads need the user, such as an agent's
  * approval: the oldest one, with how many more are waiting.
  */
-export function attentionLine(
+function attentionLine(
   waiting: readonly { threadId: string; request: { kind: "approval" | "question" } }[],
   threads: ReadonlyMap<string, ThreadState>,
   width: number,
@@ -55,7 +60,7 @@ export function attentionLine(
  * token estimate. `running` is whether a tool runs; `steer` whether a
  * message joins the turn.
  */
-export function activityLine(
+function activityLine(
   turn: TurnState,
   state: { running: boolean; blink: boolean; steer: boolean },
   width: number,
@@ -161,4 +166,110 @@ export function statusLine(state: StatusLineState, width: number): string {
         ? style.muted("details · ctrl+x")
         : "";
   return spread(left, right, width);
+}
+
+/** A panel over the composer, as the footer shows it. */
+type FooterPanel =
+  | { kind: "info"; title: string; rows: [string, string][] }
+  | { kind: "menu"; menu: Menu }
+  | { kind: "resume" | "lineage"; view: ResumeView };
+
+/** What the footer shows, as the terminal has it when it draws. */
+export interface FooterState {
+  turn: TurnState | null;
+  /** Whether a tool runs, the activity dot's blink, and whether a message joins the turn. */
+  running: boolean;
+  blink: boolean;
+  steer: boolean;
+  /** The queue of the thread on screen; `held` after a restart. */
+  queue: readonly Message[];
+  held: boolean;
+  /** Other threads' open requests, oldest first. */
+  waiting: Parameters<typeof attentionLine>[0];
+  threads: ReadonlyMap<string, ThreadState>;
+  /** A request's prompt, in the composer's place. */
+  prompt: {
+    render(width: number, height: number): { rows: string[]; cursor: CursorPosition | null };
+  } | null;
+  panel: FooterPanel | null;
+  editor: Pick<Editor, "layout" | "empty">;
+  /** Whether the thread on screen is working, which the empty composer's hint says. */
+  busy: boolean;
+  /** The list open under the composer, such as commands or files. */
+  suggestions: Menu | null;
+  status: string;
+}
+
+export interface Footer {
+  rows: string[];
+  cursor: CursorPosition | null;
+  /** The list shown, and the footer row its rows start on. */
+  list?: { menu: Menu; row: number };
+}
+
+/** The rows below the transcript: activity, queue, and the composer or a panel, in `height` rows at most. */
+export function footerRows(state: FooterState, width: number, height: number): Footer {
+  const rows: string[] = [""];
+  const { turn, prompt, panel } = state;
+  if (turn && !prompt) rows.push(activityLine(turn, state, width), "");
+  // A queue held after a restart waits for the user's next message.
+  rows.push(...queueRows(state.queue, state.held, width));
+  if (state.queue.length > 0) rows.push("");
+  const attention = attentionLine(state.waiting, state.threads, width);
+  if (attention) rows.push(attention, "");
+
+  let cursor: CursorPosition | null = null;
+  let list: { menu: Menu; row: number } | undefined;
+  if (prompt && !panel) {
+    // The rows the footer has left, under the queue and the attention line,
+    // less the status line, which keeps the bottom row under a prompt too.
+    const rendered = prompt.render(width, height - rows.length - 2);
+    if (rendered.cursor)
+      cursor = { row: rows.length + rendered.cursor.row, column: rendered.cursor.column };
+    rows.push(...rendered.rows, "", state.status);
+  } else {
+    const limit = Math.max(1, Math.min(10, Math.floor(height / 3)));
+    const layout = state.editor.layout(`${style.strong("┃")} `, width);
+    // An empty composer says what it takes.
+    if (state.editor.empty && !panel) {
+      const hint = state.busy
+        ? "Add to the turn, or tab to queue a message"
+        : "Ask anything · @ files · / commands";
+      layout.rows[0] = truncate(`${style.strong("┃")} ${style.faint(hint)}`, width);
+    }
+    const start = Math.max(0, Math.min(layout.cursor.row - limit + 1, layout.rows.length - limit));
+    const composer = layout.rows.slice(start, start + limit);
+    // Room for a list: the screen less the rows above it, the composer and
+    // status line under it, the list's chrome, and a little transcript.
+    const listRows = Math.max(3, Math.min(14, height - rows.length - composer.length - 11));
+    const listed = panel?.kind === "menu" ? panel.menu : panel ? null : state.suggestions;
+    // Lists and panels open above the composer, which keeps its place at the
+    // bottom; the thread list takes the screen above it.
+    const shown =
+      panel?.kind === "info"
+        ? infoPanel(panel.title, panel.rows, width)
+        : panel?.kind === "resume"
+          ? panel.view.render(width, Math.max(8, height - rows.length - composer.length - 3))
+          : panel?.kind === "lineage"
+            ? // Short enough to watch the thread on screen above it.
+              panel.view.render(width, Math.max(10, Math.floor(height * 0.45)))
+            : listed
+              ? listed.render(width, listRows)
+              : [];
+    if (listed) list = { menu: listed, row: rows.length };
+    if (shown.length > 0) rows.push(...shown, "");
+    if (!panel)
+      cursor = { row: rows.length + layout.cursor.row - start, column: layout.cursor.column };
+    rows.push(...composer, "", state.status);
+  }
+  if (rows.length > height) {
+    const cut = rows.length - height;
+    if (cursor) cursor = { ...cursor, row: Math.max(0, cursor.row - cut) };
+    return {
+      rows: rows.slice(cut),
+      cursor,
+      ...(list && list.row >= cut ? { list: { ...list, row: list.row - cut } } : {}),
+    };
+  }
+  return { rows, cursor, ...(list ? { list } : {}) };
 }
