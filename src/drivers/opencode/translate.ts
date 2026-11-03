@@ -15,10 +15,9 @@ import type {
 } from "../../core/events.ts";
 import { unifiedDiff } from "../../core/diff.ts";
 import { ANSWER, askFor, askForChanges } from "../../core/wording.ts";
-import { truncate } from "../../core/wording.ts";
 import { noticeEvent } from "../session-events.ts";
 import { record, text } from "../../core/values.ts";
-import { summarizeInput } from "../text.ts";
+import { agentDescription, contentText, summarizeInput } from "../text.ts";
 
 // OpenCode 2's server API in the parts 1harness reads. Events arrive on
 // `/api/event` as `{ type, data }`; tools are named by `session.tool.input.started`
@@ -294,13 +293,6 @@ export function findModel(models: readonly OcModel[], name: string): OcModel | u
 
 const SUMMARY_KEYS = ["path", "url", "pattern", "query", "name", "description"];
 
-function contentText(content: unknown): string {
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part: OcContent) => (part.type === "text" ? (part.text ?? "") : `[${part.type}]`))
-    .join("\n");
-}
-
 /** OpenCode's patch without its header lines, starting at the first hunk. */
 function hunks(patch: string): string {
   const start = patch.indexOf("@@");
@@ -359,7 +351,7 @@ export function toolItem(
       return {
         kind: "agent",
         id,
-        description: text(input["description"]) || truncate(text(input["prompt"]), 120),
+        description: agentDescription(input),
         summary: "",
         status: "running",
       };

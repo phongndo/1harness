@@ -15,7 +15,7 @@ import {
 import { limitNotice } from "../../core/wording.ts";
 import { truncate } from "../../core/wording.ts";
 import { noticeEvent } from "../session-events.ts";
-import { todoStatus } from "../text.ts";
+import { contentText, todoStatus } from "../text.ts";
 import { INIT_PROMPT } from "./prompts.ts";
 
 // The subset of the app-server protocol this driver reads. Generate the full
@@ -224,17 +224,6 @@ function itemStatus(status: string): ItemStatus {
 
 function compact(value: JsonValue): string {
   return truncate(typeof value === "string" ? value : (JSON.stringify(value) ?? ""), 120);
-}
-
-function contentText(content: JsonValue[]): string {
-  return content
-    .map((part) => {
-      if (typeof part === "object" && part !== null && "text" in part) {
-        return String((part as { text: unknown }).text);
-      }
-      return compact(part);
-    })
-    .join("\n");
 }
 
 /** Codex's file changes as 1harness's, moves included. */

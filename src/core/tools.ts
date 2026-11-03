@@ -1,5 +1,5 @@
 import type { ApprovalAction, ToolPolicy } from "./events.ts";
-import { record } from "./values.ts";
+import { record, text } from "./values.ts";
 
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
 
@@ -15,8 +15,14 @@ export function toolAction(tool: string, input: unknown): ApprovalAction {
   const path = fields["file_path"] ?? fields["notebook_path"];
   if (EDIT_TOOLS.has(tool) && typeof path === "string")
     return { type: "file_change", paths: [path] };
-  const mcp = /^mcp__(.+?)__(.+)$/.exec(tool);
-  return { type: "tool", tool: mcp?.[2] ?? tool, server: mcp?.[1] ?? null, input };
+  const mcp = mcpTool(tool);
+  return { type: "tool", tool: mcp?.tool ?? tool, server: mcp?.server ?? null, input };
+}
+
+/** The server and tool an MCP tool's name joins, as in `mcp__docs__search`. */
+export function mcpTool(name: string): { server: string; tool: string } | null {
+  const [, server, tool] = /^mcp__(.+?)__(.+)$/.exec(name) ?? [];
+  return server && tool ? { server, tool } : null;
 }
 
 /** A PreToolUse hook's output, as Claude Code and Codex read it. */
@@ -39,12 +45,15 @@ export function denyHookOutput(reason: string): HookOutput {
   };
 }
 
-/** A PreToolUse hook's output for a call, as a tool policy decides it. */
-export async function policyHookOutput(
-  policy: ToolPolicy,
-  tool: string,
-  input: unknown,
+/** The output for a PreToolUse hook's input, as Claude Code and Codex send it, as a tool policy decides. */
+export async function checkToolHook(
+  policy: ToolPolicy | undefined,
+  hook: unknown,
 ): Promise<HookOutput> {
+  const fields = record(hook);
+  if (!policy || fields["hook_event_name"] !== "PreToolUse") return {};
+  const tool = text(fields["tool_name"]);
+  const input = fields["tool_input"];
   const reason = await policy({ tool, input, action: toolAction(tool, input) });
   return reason ? denyHookOutput(reason) : {};
 }

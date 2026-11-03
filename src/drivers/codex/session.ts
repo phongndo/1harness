@@ -28,12 +28,13 @@ import {
 } from "../../core/events.ts";
 import { errorMessage } from "../../core/errors.ts";
 import { record, text } from "../../core/values.ts";
-import { policyHookOutput } from "../../core/tools.ts";
+import { checkToolHook } from "../../core/tools.ts";
 import { ANSWER, ASK, PLAN_TITLE, askForChanges, planOptions } from "../../core/wording.ts";
 import { HOOK_TIMEOUT_SEC, HookServer } from "./hook-server.ts";
 import { INIT_PROMPT } from "./prompts.ts";
 import { JsonRpcProcess, RpcError, type RequestId } from "../jsonrpc.ts";
 import { SessionEvents, started } from "../session-events.ts";
+import { slashCommand } from "../text.ts";
 import {
   CodexTranslator,
   codexRequestId,
@@ -186,7 +187,7 @@ export class CodexSession implements HarnessSession {
 
   async start(): Promise<void> {
     const hooks = this.#config.toolPolicy
-      ? await HookServer.start((input) => this.#checkTool(input))
+      ? await HookServer.start((input) => checkToolHook(this.#config.toolPolicy, input))
       : null;
     this.#hooks = hooks;
     const rpc = new JsonRpcProcess(this.#config.command, ["app-server"], {
@@ -300,9 +301,8 @@ export class CodexSession implements HarnessSession {
   }
 
   async startTurn(input: UserInput): Promise<void> {
-    const [, name = "", args = ""] = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(input.text.trim()) ?? [];
+    const { name, args: instructions } = slashCommand(input.text) ?? { name: "", args: "" };
     if (name === "review") {
-      const instructions = args.trim();
       return this.#begin("review/start", () => ({
         target: instructions ? { type: "custom", instructions } : { type: "uncommittedChanges" },
       }));
@@ -579,13 +579,6 @@ export class CodexSession implements HarnessSession {
     await this.#hooks?.close();
     // A session whose start failed before Codex ran has no process to report the end.
     this.#closed("closed");
-  }
-
-  /** Codex's PreToolUse hook input, checked against the session's tool policy. */
-  async #checkTool(input: Record<string, unknown>): Promise<unknown> {
-    const policy = this.#config.toolPolicy;
-    if (!policy || input["hook_event_name"] !== "PreToolUse") return {};
-    return policyHookOutput(policy, String(input["tool_name"] ?? ""), input["tool_input"]);
   }
 
   /**

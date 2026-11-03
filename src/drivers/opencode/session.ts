@@ -22,6 +22,7 @@ import {
 import { errorMessage } from "../../core/errors.ts";
 import { readImage } from "../images.ts";
 import { SessionEvents, started } from "../session-events.ts";
+import { slashCommand } from "../text.ts";
 import { OpenCodeServer } from "./server.ts";
 import {
   OpenCodeTranslator,
@@ -350,9 +351,9 @@ export class OpenCodeSession implements HarnessSession {
   /** Sends a message, or the command or skill it names, and notes it to match its echo. */
   async #send(input: UserInput, delivery: "queue" | "steer"): Promise<void> {
     const sessionId = started(this.info);
-    const named = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(input.text);
-    const command = named ? this.#commands.find((entry) => entry.name === named[1]) : undefined;
-    const args = named?.[2]?.trim() ?? "";
+    const named = slashCommand(input.text);
+    const command = named ? this.#commands.find((entry) => entry.name === named.name) : undefined;
+    const args = named?.args ?? "";
     const prompt = command?.skill ? args : input.text;
     const sent: Sent = { input, text: command && !command.skill ? null : prompt, inboxId: null };
     this.#sent.push(sent);

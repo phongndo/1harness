@@ -27,7 +27,8 @@ import { limitNotice } from "../../core/wording.ts";
 import { truncate } from "../../core/wording.ts";
 import { noticeEvent } from "../session-events.ts";
 import { record, text } from "../../core/values.ts";
-import { summarizeInput, todoStatus } from "../text.ts";
+import { mcpTool } from "../../core/tools.ts";
+import { agentDescription, contentText, summarizeInput, todoStatus } from "../text.ts";
 
 type ContentBlock = SDKAssistantMessage["message"]["content"][number];
 type StreamEvent = SDKPartialAssistantMessage["event"];
@@ -180,7 +181,7 @@ export function toolItem(id: string, name: string, rawInput: unknown): Item | nu
       return {
         kind: "agent",
         id,
-        description: text(input["description"]) || truncate(text(input["prompt"]), 120),
+        description: agentDescription(input),
         summary: "",
         status: "running",
       };
@@ -193,12 +194,12 @@ export function toolItem(id: string, name: string, rawInput: unknown): Item | nu
       return null;
     default: {
       if (TASK_TOOLS.has(name) || HIDDEN_TOOLS.has(name)) return null;
-      const mcp = /^mcp__(.+?)__(.+)$/.exec(name);
+      const mcp = mcpTool(name);
       return {
         kind: "tool_call",
         id,
-        tool: mcp?.[2] ?? name,
-        server: mcp?.[1] ?? null,
+        tool: mcp?.tool ?? name,
+        server: mcp?.server ?? null,
         category: mcp ? "other" : (TOOL_CATEGORIES[name] ?? "other"),
         summary: summarizeInput(input, SUMMARY_KEYS),
         output: "",
@@ -206,17 +207,6 @@ export function toolItem(id: string, name: string, rawInput: unknown): Item | nu
       };
     }
   }
-}
-
-function resultText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part) => {
-      const block = record(part);
-      return block["type"] === "text" ? text(block["text"]) : `[${text(block["type"])}]`;
-    })
-    .join("\n");
 }
 
 /**
@@ -518,7 +508,7 @@ export class ClaudeTranslator {
       const result = content.length === 1 ? message.tool_use_result : undefined;
       events.push({
         type: "item.completed",
-        item: complete(item, resultText(part.content), part.is_error === true, result),
+        item: complete(item, contentText(part.content), part.is_error === true, result),
       });
     }
     if (this.replay && !message.isSynthetic && prompt.length > 0 && events.length === 0) {

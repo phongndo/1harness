@@ -49,7 +49,7 @@ import {
 } from "../../core/events.ts";
 import { errorMessage } from "../../core/errors.ts";
 import { text } from "../../core/values.ts";
-import { policyHookOutput, toolAction } from "../../core/tools.ts";
+import { checkToolHook, mcpTool, toolAction } from "../../core/tools.ts";
 import { ANSWER, ASK, PLAN_TITLE, fileName, planOptions } from "../../core/wording.ts";
 import { StderrTail } from "../child.ts";
 import { readImage } from "../images.ts";
@@ -580,11 +580,7 @@ export class ClaudeSession implements HarnessSession {
     });
   }
 
-  #checkTool: HookCallback = async (hook) => {
-    const policy = this.#config.toolPolicy;
-    if (!policy || hook.hook_event_name !== "PreToolUse") return {};
-    return policyHookOutput(policy, hook.tool_name, hook.tool_input);
-  };
+  #checkTool: HookCallback = (hook) => checkToolHook(this.#config.toolPolicy, hook);
 
   #canUseTool: CanUseTool = async (tool, input, context) => {
     const id = `claude-request-${context.toolUseID}`;
@@ -789,8 +785,8 @@ function approvalPrompt(
     case "WebFetch":
       return { title: ASK.fetch, detail: [String(input["url"] ?? "")] };
     default: {
-      const mcp = /^mcp__(.+?)__(.+)$/.exec(tool);
-      const name = mcp ? `${mcp[1]} · ${mcp[2]}` : tool;
+      const mcp = mcpTool(tool);
+      const name = mcp ? `${mcp.server} · ${mcp.tool}` : tool;
       return { title: ASK.tool(name), detail: [summarizeInput(input, SUMMARY_KEYS)] };
     }
   }
