@@ -14,10 +14,8 @@ import {
 } from "../commands/registry.ts";
 import type {
   HarnessId,
-  HarnessRequest,
   ModelOption,
   NativeCommand,
-  RequestResponse,
   SessionInfo,
   SessionOptions,
   NoticeLevel,
@@ -49,14 +47,8 @@ import { Menu, entry, type MenuConfig, type MenuEntry } from "./menu.ts";
 import { listedEntry, ResumeView, type ResumeEntry } from "./resume.ts";
 import { ancestry, family, lastActive, threadEntries } from "./threads.ts";
 import { PictureViewer } from "./viewer.ts";
+import { Requests } from "./requests.ts";
 import { goodbye } from "./goodbye.ts";
-import {
-  ChoicePrompt,
-  QuestionPrompt,
-  type ChoiceConfig,
-  type ChoiceResult,
-  type QuestionsResult,
-} from "./prompt.ts";
 import { Screen } from "./screen.ts";
 import {
   STATUS_QUERY,
@@ -173,8 +165,6 @@ const KEYS: [string, string][] = [
 const FRAME_MS = 16;
 /** How long a word in the status line, such as what was copied, stays. */
 const TOAST_MS = 2500;
-/** How long a new prompt ignores keys, which were likely typed for what it covered. */
-const PROMPT_GRACE_MS = 400;
 const BLINK_MS = 500;
 const THEME_TIMEOUT_MS = 150;
 // Program status reports go out at most this often, coalescing bursts of events.
@@ -193,15 +183,6 @@ const PICTURES_KEPT = 256;
 
 /** The host's errors for a thread it does not have open. */
 const NO_THREAD = new Set(["thread_not_found", "thread_closed"]);
-
-interface OpenRequest {
-  threadId: string;
-  request: HarnessRequest;
-}
-
-function sameRequest(a: OpenRequest, threadId: string, requestId: string): boolean {
-  return a.threadId === threadId && a.request.id === requestId;
-}
 
 /** A command's pick entry as a menu row. */
 function pickEntry(item: PickEntry): MenuEntry {
@@ -337,10 +318,8 @@ export class App {
     },
   });
 
-  /** The prompt on screen, and the request it answers; request IDs are only unique per thread. */
-  #prompt: { prompt: ChoicePrompt | QuestionPrompt; asking: OpenRequest } | null = null;
-  /** Open requests from every thread, oldest first; background ones say whose they are. */
-  #requests: OpenRequest[] = [];
+  /** What the harnesses ask, from every thread, and the prompt for the thread on screen's. */
+  #requests: Requests;
   #panel:
     | {
         kind: "menu";
@@ -368,8 +347,6 @@ export class App {
   #unlisten: (() => void)[] = [];
   /** When the terminal last took a key, of any kind. */
   #typedAt = 0;
-  /** Whether typing was going on when the prompt on screen appeared, and goes on still. */
-  #strayTyping = false;
   /** The state of the thread last shown, as whatever showed it had it. */
   #shownState: ThreadState | null = null;
   /** Whether the composer's text came from history, so ↑↓ keep walking it. */
@@ -462,6 +439,16 @@ export class App {
       skills: () => this.#nativeCommands,
       cwd: () => this.#cwd(),
       submit: (text) => this.#submit(text),
+      notice: (level, text) => this.#notice(level, text),
+      schedule: () => this.#schedule(),
+    });
+    this.#requests = new Requests({
+      client: this.#client,
+      currentId: () => this.#currentId,
+      typedAt: () => this.#typedAt,
+      prompted: () => {
+        this.#view.scroll = 0;
+      },
       notice: (level, text) => this.#notice(level, text),
       schedule: () => this.#schedule(),
     });
@@ -1310,9 +1297,7 @@ export class App {
     if (!this.#views.has(thread.id)) void this.#logs.load(thread.id);
     // Opening a thread shows what it finished.
     this.#statusChanged();
-    // A prompt belongs to the thread it asks for; it comes back with that thread.
-    if (this.#prompt && this.#prompt.asking.threadId !== thread.id) this.#prompt = null;
-    this.#nextRequest();
+    this.#requests.shown(thread.id);
     // /new and /harness start from the thread on screen.
     const info = thread.info;
     this.#harness = thread.harness;
@@ -1643,8 +1628,7 @@ export class App {
     if (this.#exiting) return;
     this.#exiting = true;
     const current = this.#current;
-    this.#prompt = null;
-    this.#requests = [];
+    this.#requests.clear();
     // What was still working, before a host in this process stops it on the way out.
     const working = this.#ownThreads().filter(
       (thread) => thread.busy && thread.status !== "closed",
@@ -1700,7 +1684,7 @@ export class App {
       case "removed": {
         this.#views.delete(event.threadId);
         this.#logs.forget(event.threadId);
-        this.#dropRequests(event.threadId);
+        this.#requests.drop(event.threadId);
         this.#own.delete(event.threadId);
         if (this.#shownState?.id === event.threadId) this.#shownState = null;
         if (this.#currentId === event.threadId) {
@@ -1812,8 +1796,7 @@ export class App {
     this.#views.clear();
     this.#unloaded.clear();
     this.#homeTaken = true;
-    this.#requests = [];
-    this.#prompt = null;
+    this.#requests.clear();
     for (const thread of this.#client.threads.values()) {
       this.#known.add(thread.id);
       this.#syncRequests(thread);
@@ -1835,33 +1818,14 @@ export class App {
     // The host it caught up with may be a new one, which has to be told what is on screen.
     void this.#client.call("client.show", { threadId: this.#currentId }).catch(() => {});
     for (const request of hello.pending) this.#ui(request);
-    this.#nextRequest();
+    this.#requests.next();
   }
 
-  /** Keeps the list of open requests in step with a thread's. */
+  /** Keeps the open requests in step with a thread's. */
   #syncRequests(thread: ThreadState): void {
-    const open = new Set(thread.requests.map((request) => request.id));
-    this.#requests = this.#requests.filter(
-      (request) => request.threadId !== thread.id || open.has(request.request.id),
-    );
-    for (const request of thread.requests)
-      if (!this.#requests.some((other) => sameRequest(other, thread.id, request.id)))
-        this.#requests.push({ threadId: thread.id, request });
-    const asking = this.#prompt?.asking;
-    if (asking && asking.threadId === thread.id && !open.has(asking.request.id))
-      this.#prompt = null;
+    this.#requests.sync(thread);
     // Calls waiting for an answer say so, rather than seem to run.
     this.#views.get(thread.id)?.awaiting(thread.requests);
-    this.#nextRequest();
-  }
-
-  /** Forgets a thread's requests, closing its prompt if one is open. */
-  #dropRequests(threadId: string): void {
-    this.#requests = this.#requests.filter((open) => open.threadId !== threadId);
-    if (this.#prompt?.asking.threadId === threadId) {
-      this.#prompt = null;
-      this.#nextRequest();
-    }
   }
 
   /** Updates the row in a parent's transcript for a thread it started. */
@@ -1916,128 +1880,6 @@ export class App {
   }
 
   // Requests and pickers
-
-  /**
-   * Shows the current thread's oldest request. Other threads' requests wait
-   * for the user to open them, announced by the attention line, so a prompt
-   * never takes over the composer for a thread not on screen.
-   */
-  #nextRequest(): void {
-    if (this.#prompt) return;
-    const next = this.#requests.find((open) => open.threadId === this.#currentId);
-    if (!next) return;
-    const request = next.request;
-    const respond = (response: RequestResponse) => this.#respond(next, response);
-    if (request.kind === "approval") {
-      const initial = Math.max(
-        0,
-        request.options.findIndex((option) => option.id === request.defaultOptionId),
-      );
-      const command = /^\$ /m.test(request.detail);
-      const config: ChoiceConfig = {
-        header: "Permission needed",
-        tag: command ? "Command" : "",
-        title: request.title,
-        detail: request.detail ? [request.detail] : [],
-        options: request.options.map((option) => ({ label: option.label, description: "" })),
-        multiSelect: false,
-        allowOther: false,
-        secret: false,
-        initial,
-        // A refusal can say why, which the agent hears and goes on with.
-        commentable: (index) => request.options[index]?.effect === "deny",
-      };
-      this.#showPrompt(
-        next,
-        (done: (result: ChoiceResult) => void) => new ChoicePrompt(config, done),
-        (result) => {
-          const option =
-            result.kind === "options" ? request.options[result.indexes[0] ?? 0] : undefined;
-          const reason = result.kind === "options" ? result.comment?.text : undefined;
-          respond(
-            !option
-              ? { kind: "cancel" }
-              : option.effect === "deny" && reason
-                ? { kind: "decline", reason }
-                : { kind: "approval", optionId: option.id },
-          );
-        },
-      );
-      return;
-    }
-    // All of a request's questions in one prompt, to move between and annotate.
-    const configs: ChoiceConfig[] = request.questions.map((question) => ({
-      header: "Question",
-      tag: question.header,
-      title: question.question,
-      detail: [],
-      options: question.options,
-      multiSelect: question.multiSelect,
-      allowOther: question.allowOther,
-      secret: question.secret,
-      initial: 0,
-      commentable: () => true,
-    }));
-    this.#showPrompt(
-      next,
-      (done: (result: QuestionsResult) => void) => new QuestionPrompt(configs, done),
-      (result) => {
-        if (result.kind === "cancel") {
-          respond({ kind: "cancel" });
-          return;
-        }
-        const answers: Record<string, string[]> = {};
-        request.questions.forEach((question, index) => {
-          const answer = result.answers[index];
-          if (!answer) return;
-          // A comment goes beside the answer, as one more of its values, saying
-          // which option it is on where there could be more than one.
-          const { comment } = answer;
-          const on = question.options[comment?.index ?? -1]?.label;
-          answers[question.id] = [
-            ...answer.indexes.map((choice) => question.options[choice]?.label ?? ""),
-            ...(answer.text !== null ? [answer.text] : []),
-            ...(comment
-              ? [
-                  question.multiSelect && on
-                    ? `comment on ${on}: ${comment.text}`
-                    : `comment: ${comment.text}`,
-                ]
-              : []),
-          ];
-        });
-        respond({ kind: "question", answers });
-      },
-    );
-  }
-
-  /** Shows the prompt `make` builds, which calls `onDone` with its answer. */
-  #showPrompt<R>(
-    asking: OpenRequest,
-    make: (done: (result: R) => void) => ChoicePrompt | QuestionPrompt,
-    onDone: (result: R) => void,
-  ): void {
-    const prompt = make((result) => {
-      if (this.#prompt?.prompt === prompt) this.#prompt = null;
-      onDone(result);
-      // The prompt that follows an answer, such as the next request's, takes keys at once.
-      this.#strayTyping = false;
-      this.#schedule();
-    });
-    this.#prompt = { prompt, asking };
-    this.#strayTyping = Date.now() - this.#typedAt < PROMPT_GRACE_MS;
-    this.#view.scroll = 0;
-    this.#schedule();
-  }
-
-  #respond(asked: OpenRequest, response: RequestResponse): void {
-    const { threadId, request } = asked;
-    this.#requests = this.#requests.filter((open) => !sameRequest(open, threadId, request.id));
-    this.#client
-      .call("thread.respond", { threadId, requestId: request.id, response })
-      .catch((error: unknown) => this.#notice("error", errorMessage(error)));
-    this.#nextRequest();
-  }
 
   /** Shows a list to choose from; `pick` is the host's request it answers, when the host asked. */
   #pick(
@@ -2136,8 +1978,8 @@ export class App {
         if (this.#viewer?.paste(event.text)) return;
         if (this.#panel?.kind === "resume" || this.#panel?.kind === "lineage") {
           this.#panel.view.paste(event.text);
-        } else if (this.#prompt) {
-          if (this.#prompt.prompt.typing) this.#prompt.prompt.paste(event.text);
+        } else if (this.#requests.prompt) {
+          if (this.#requests.prompt.typing) this.#requests.prompt.paste(event.text);
         } else if (this.#panel?.kind === "menu") {
           this.#panel.menu.paste(event.text);
         } else {
@@ -2179,13 +2021,14 @@ export class App {
     }
     // Moving between threads works under a prompt, which comes back with its thread.
     if (key.ctrl && key.name === "o" && !this.#panel) {
-      const asking = this.#requests.find((open) => open.threadId !== this.#currentId);
+      const [asking] = this.#requests.elsewhere();
       const thread = asking ? this.#client.threads.get(asking.threadId) : undefined;
       if (thread) this.#show(thread);
       return;
     }
     // A prompt shows its own request whole; elsewhere, tool calls show whole.
-    if (key.ctrl && key.name === "x" && !this.#prompt && !this.#panel) {
+    const prompt = this.#requests.prompt;
+    if (key.ctrl && key.name === "x" && !prompt && !this.#panel) {
       this.#details = !this.#details;
       return;
     }
@@ -2196,8 +2039,8 @@ export class App {
       return;
     }
     // Page keys scroll a request shown whole that runs past the screen.
-    if ((key.name === "pageup" || key.name === "pagedown") && this.#prompt?.prompt.scrolls) {
-      this.#prompt.prompt.key(key);
+    if ((key.name === "pageup" || key.name === "pagedown") && prompt?.scrolls) {
+      prompt.key(key);
       return;
     }
     if (key.name === "pageup" || key.name === "pagedown") {
@@ -2208,14 +2051,9 @@ export class App {
       }
     }
     // A list opened over a prompt, such as the thread list, shows and takes keys first.
-    if (this.#prompt && this.#panel && this.#panelKey(key)) return;
-    if (this.#prompt) {
-      // Typing that was going on when a prompt appeared was meant for something else:
-      // its keys are dropped until it pauses. Keys after a pause, or after an answer
-      // for the next question, are the prompt's.
-      if (this.#strayTyping && sinceLast < PROMPT_GRACE_MS) return;
-      this.#strayTyping = false;
-      this.#prompt.prompt.key(key);
+    if (prompt && this.#panel && this.#panelKey(key)) return;
+    if (prompt) {
+      this.#requests.key(key, sinceLast);
       return;
     }
     if (this.#panel && this.#panelKey(key)) return;
@@ -2957,9 +2795,9 @@ export class App {
         steer: current?.capabilities.steer === true,
         queue: current?.queue ?? [],
         held: current?.held === true,
-        waiting: this.#requests.filter((open) => open.threadId !== this.#currentId),
+        waiting: this.#requests.elsewhere(),
         threads: this.#client.threads,
-        prompt: this.#prompt?.prompt ?? null,
+        prompt: this.#requests.prompt,
         panel: this.#panel,
         editor: this.#editor,
         busy: this.#live?.busy === true,

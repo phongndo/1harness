@@ -495,6 +495,20 @@ describe("App threads and keys", () => {
     }
   });
 
+  it("asks for an approval in the composer's place, and goes on once it is given", async () => {
+    const session = await start();
+    await session.sees("supervised · scripted · big");
+    await session.type("look ASK\r");
+    const asked = await session.sees("Permission needed");
+    assert.match(asked, /Run\?/);
+    assert.doesNotMatch(asked, /Ask anything/);
+    // Keys typed as the prompt came were meant for what it covered; after a pause they count.
+    await settle(450);
+    await session.type("\r");
+    const screen = await session.sees("Done with look ASK");
+    assert.doesNotMatch(screen, /Permission needed/);
+  });
+
   it("renames the thread with /rename", async () => {
     const session = await start({ prompt: "alpha" });
     await session.sees("Done with alpha");
