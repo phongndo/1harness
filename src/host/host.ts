@@ -49,6 +49,7 @@ import {
   type CommandInfo,
   type HarnessInfo,
   type HostEvent,
+  type LogEntry,
   type Method,
   type Params,
   type Result,
@@ -343,10 +344,7 @@ export class Host {
       live: this.live,
       cwd: (thread) => toolThread(thread).thread.info.cwd,
       show: (thread, title, html) => {
-        const managed = toolThread(thread);
-        const entry = this.#log(managed.id).html(this.#feed.next, title, html, Date.now());
-        this.#feed.emit({ type: "entry", threadId: managed.id, entry });
-        this.#writer?.schedule();
+        this.#append(toolThread(thread).id, (log, seq) => log.html(seq, title, html, Date.now()));
       },
     });
     this.operations = [
@@ -447,7 +445,6 @@ export class Host {
         const run = managed.runs.at(-1);
         if (run) store.saveRun(managed.id, run);
         // Its transcript ends the turn and the session, as a client showing it saw neither.
-        const log = this.#log(managed.id);
         for (const event of [
           {
             type: "turn.ended" as const,
@@ -457,8 +454,7 @@ export class Host {
           },
           { type: "session.closed" as const, error: null },
         ]) {
-          const entry = log.apply(event, this.#feed.next, () => undefined);
-          if (entry) this.#feed.emit({ type: "entry", threadId: managed.id, entry });
+          this.#append(managed.id, (log, seq) => log.apply(event, seq, () => undefined));
         }
         this.#notice(
           managed.id,
@@ -758,11 +754,8 @@ export class Host {
         this.#announce(thread);
         if (event.restored) return;
         this.#store?.saveThread(this.#row(thread));
-        if (thread.parentId && this.manager.get(thread.parentId)) {
-          const entry = this.#log(thread.parentId).agent(this.#feed.next, thread.id);
-          this.#feed.emit({ type: "entry", threadId: thread.parentId, entry });
-          this.#writer?.schedule();
-        }
+        if (thread.parentId && this.manager.get(thread.parentId))
+          this.#append(thread.parentId, (log, seq) => log.agent(seq, thread.id));
         return;
       }
       case "thread.updated":
@@ -925,14 +918,18 @@ export class Host {
   #notice(threadId: string, level: NoticeLevel, text: string, id?: string): string {
     const noticeId = id ?? `notice-${this.#feed.next}`;
     if (!this.manager.get(threadId)) return noticeId;
-    const entry = this.#log(threadId).item(
-      this.#feed.next,
-      { kind: "notice", id: noticeId, level, text },
-      true,
+    this.#append(threadId, (log, seq) =>
+      log.item(seq, { kind: "notice", id: noticeId, level, text }, true),
     );
+    return noticeId;
+  }
+
+  /** Adds to a thread's transcript, which clients hear of and the store saves. */
+  #append(threadId: string, add: (log: ThreadLog, seq: number) => LogEntry | null): void {
+    const entry = add(this.#log(threadId), this.#feed.next);
+    if (!entry) return;
     this.#feed.emit({ type: "entry", threadId, entry });
     this.#writer?.schedule();
-    return noticeId;
   }
 
   /** A live page's answer, or why it has none, as the client is told. */
@@ -1537,10 +1534,8 @@ export class Host {
         }
         // The transcript keeps what was asked and the answer, for whoever reads it later.
         if (request && first)
-          for (const decision of decisions(request, response)) {
-            const entry = this.#log(managed.id).decision(this.#feed.next, decision);
-            this.#feed.emit({ type: "entry", threadId: managed.id, entry });
-          }
+          for (const decision of decisions(request, response))
+            this.#append(managed.id, (log, seq) => log.decision(seq, decision));
         this.#writer?.schedule();
         return null;
       },
