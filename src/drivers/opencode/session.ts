@@ -4,6 +4,7 @@ import {
   fitRuntimeMode,
   type Capabilities,
   type HarnessEvent,
+  type HarnessRequest,
   type HarnessSession,
   type InteractionMode,
   type McpServer,
@@ -35,7 +36,6 @@ import {
   sessionRules,
   type OcAgent,
   type OcEvent,
-  type OcForm,
   type OcMessage,
   type OcModel,
   type OcModelRef,
@@ -62,10 +62,6 @@ interface Sent {
   text: string | null;
   inboxId: string | null;
 }
-
-type Pending =
-  | { kind: "permission"; sessionId: string }
-  | { kind: "form"; sessionId: string; form: OcForm };
 
 const PLAN_AGENT = "plan";
 const LABEL = "OpenCode";
@@ -108,7 +104,8 @@ export class OpenCodeSession implements HarnessSession {
   #sent: Sent[] = [];
   /** What each inbox entry holds, until it is delivered. */
   #inbox = new Map<string, string>();
-  #pending = new Map<string, Pending>();
+  /** Requests the session itself opened, which its turn's end withdraws. */
+  #ownRequests = new Set<string>();
   #turnId: string | null = null;
   /** Esc came before the turn's execution started, so it stops once it does. */
   #interruptWanted = false;
@@ -242,29 +239,7 @@ export class OpenCodeSession implements HarnessSession {
   }
 
   async respond(requestId: string, response: RequestResponse): Promise<void> {
-    const pending = this.#pending.get(requestId);
-    if (!pending) return;
-    // It stays open until OpenCode has the answer, so a failed reply can be tried again.
-    const path = `/api/session/${pending.sessionId}`;
-    if (pending.kind === "permission") {
-      // Rejecting stops the turn; a reason lets the agent carry on without the action.
-      const body =
-        response.kind === "approval"
-          ? { decision: response.optionId }
-          : response.kind === "decline"
-            ? { decision: "reject", message: response.reason }
-            : { decision: "reject" };
-      await this.#post(`${path}/permission/${requestId}/reply`, body);
-    } else if (response.kind === "question") {
-      await this.#post(`${path}/form/${requestId}/reply`, {
-        answer: formAnswer(pending.form, response.answers),
-      });
-    } else {
-      const reason =
-        response.kind === "decline" ? `?message=${encodeURIComponent(response.reason)}` : "";
-      await this.#request("DELETE", `${path}/form/${requestId}${reason}`);
-    }
-    this.#resolve(requestId);
+    await this.#events.answer(requestId, response);
   }
 
   async setRuntimeMode(mode: RuntimeMode): Promise<void> {
@@ -413,8 +388,14 @@ export class OpenCodeSession implements HarnessSession {
     if (event.type === "form.created") {
       const form = event.data.form;
       if (!this.#family.has(form.sessionID)) return;
-      this.#pending.set(form.id, { kind: "form", sessionId: form.sessionID, form });
-      this.#events.emit({ type: "request.opened", request: formRequest(form) });
+      const path = `/api/session/${form.sessionID}/form/${form.id}`;
+      this.#ask(form.sessionID, formRequest(form), (response) => {
+        if (response.kind === "question")
+          return this.#post(`${path}/reply`, { answer: formAnswer(form, response.answers) });
+        const reason =
+          response.kind === "decline" ? `?message=${encodeURIComponent(response.reason)}` : "";
+        return this.#request("DELETE", `${path}${reason}`);
+      });
       return;
     }
     const sessionId = event.data.sessionID ?? "";
@@ -430,19 +411,26 @@ export class OpenCodeSession implements HarnessSession {
         if (own) this.#events.emit(...this.#translator.translate(event));
         const call =
           own && permission.source ? this.#translator.tool(permission.source.id) : undefined;
-        this.#pending.set(permission.id, { kind: "permission", sessionId });
-        this.#events.emit({
-          type: "request.opened",
-          request: permissionRequest(permission, call, this.info.cwd),
-        });
+        const path = `/api/session/${sessionId}/permission/${permission.id}/reply`;
+        this.#ask(sessionId, permissionRequest(permission, call, this.info.cwd), (response) =>
+          // Rejecting stops the turn; a reason lets the agent carry on without the action.
+          this.#post(
+            path,
+            response.kind === "approval"
+              ? { decision: response.optionId }
+              : response.kind === "decline"
+                ? { decision: "reject", message: response.reason }
+                : { decision: "reject" },
+          ),
+        );
         return;
       }
       case "permission.replied":
-        this.#resolve(event.data.requestID);
+        this.#events.withdraw(event.data.requestID);
         return;
       case "form.replied":
       case "form.cancelled":
-        this.#resolve(event.data.id);
+        this.#events.withdraw(event.data.id);
         return;
     }
     // A subagent's own work shows in the call that started it.
@@ -542,20 +530,25 @@ export class OpenCodeSession implements HarnessSession {
     this.#events.emit(...this.#translator.flush());
     // A request of the session's own still open will not be answered; a
     // subagent's may be, since subagents can work on in the background.
-    for (const [id, pending] of this.#pending)
-      if (pending.sessionId === this.info.threadId) this.#resolve(id);
+    for (const id of this.#ownRequests) this.#events.withdraw(id);
+    this.#ownRequests.clear();
     // A command whose entry never came adds nothing to the inbox, so it waits for nothing.
     this.#sent = this.#sent.filter((entry) => entry.text !== null || entry.inboxId !== null);
     this.#events.emit({ type: "turn.ended", turnId, status, error });
   }
 
-  #resolve(requestId: string): void {
-    if (this.#pending.delete(requestId)) this.#events.emit({ type: "request.resolved", requestId });
+  /** Opens a request; one of the session's own ends with its turn. */
+  #ask(
+    sessionId: string,
+    request: HarnessRequest,
+    answer: (response: RequestResponse) => Promise<unknown>,
+  ): void {
+    if (sessionId === this.info.threadId) this.#ownRequests.add(request.id);
+    this.#events.ask(request, answer);
   }
 
   #finish(reason: string): void {
     if (this.#events.closed) return;
-    this.#pending.clear();
     this.#events.close(this.#turnId, reason, this.#closing);
     this.#turnId = null;
     void this.#server?.close();

@@ -143,8 +143,6 @@ export class CodexSession implements HarnessSession {
   #rpc: JsonRpcProcess | null = null;
   #events = new SessionEvents("codex");
   #translator = new CodexTranslator();
-  /** Requests waiting on the user, each with what acts on the answer. */
-  #pending = new Map<string, (response: RequestResponse) => void>();
   #fileChanges = new Map<string, FileChange[]>();
   /** Shell processes by command item, for stopping them with the turn. */
   #processes = new Map<string, string>();
@@ -385,11 +383,7 @@ export class CodexSession implements HarnessSession {
   }
 
   async respond(requestId: string, response: RequestResponse): Promise<void> {
-    const answer = this.#pending.get(requestId);
-    if (!answer) return;
-    this.#pending.delete(requestId);
-    answer(response);
-    this.#events.emit({ type: "request.resolved", requestId });
+    await this.#events.answer(requestId, response);
   }
 
   async setModel(model: string | null): Promise<void> {
@@ -579,7 +573,7 @@ export class CodexSession implements HarnessSession {
 
   async close(): Promise<void> {
     this.#closing = true;
-    this.#cancelPending();
+    this.#events.cancelAll();
     await this.#rpc?.close();
     await this.#hooks?.close();
     // A session whose start failed before Codex ran has no process to report the end.
@@ -613,28 +607,23 @@ export class CodexSession implements HarnessSession {
       .flatMap((entry) => entry.hooks)
       .find((entry) => entry.source === "sessionFlags" && entry.command === HOOK_COMMAND);
     if (!hook || hook.trustStatus === "trusted" || hook.trustStatus === "managed") return;
-    const id = `codex-hook-trust-${Date.now()}`;
-    this.#pending.set(id, (response) => {
+    const request = approval(
+      `codex-hook-trust-${Date.now()}`,
+      "Let 1harness check tool calls in this thread?",
+      { type: "other" },
+      [
+        "An extension checks tool calls before they run. This harness runs such checks only through a hook you trust, so 1harness records that trust in its config, ~/.codex/config.toml. You are asked again if the hook changes.",
+      ],
+      [
+        { id: "trust", label: "Yes, trust 1harness's hook", effect: "allow-always" },
+        { id: "skip", label: "Not now", effect: "deny" },
+      ],
+    );
+    this.#events.ask(request, (response) => {
       if (response.kind !== "approval" || response.optionId !== "trust") return;
       void this.#writeHookTrust(hook, fresh).catch((error: unknown) =>
         this.#events.notice("error", `Could not trust the hook: ${errorMessage(error)}`),
       );
-    });
-    this.#events.emit({
-      type: "request.opened",
-      request: {
-        kind: "approval",
-        id,
-        title: "Let 1harness check tool calls in this thread?",
-        detail:
-          "An extension checks tool calls before they run. This harness runs such checks only through a hook you trust, so 1harness records that trust in its config, ~/.codex/config.toml. You are asked again if the hook changes.",
-        action: { type: "other" },
-        options: [
-          { id: "trust", label: "Yes, trust 1harness's hook", effect: "allow-always" },
-          { id: "skip", label: "Not now", effect: "deny" },
-        ],
-        defaultOptionId: "trust",
-      },
     });
   }
 
@@ -762,7 +751,8 @@ export class CodexSession implements HarnessSession {
         event = { ...event, turnId: this.#turnId };
       }
       if (event.type === "request.resolved") {
-        if (!this.#pending.delete(event.requestId)) continue;
+        this.#events.withdraw(event.requestId);
+        continue;
       }
       this.#events.emit(event);
       if (event.type === "turn.ended") this.#turnEnded(event.turnId, event.status);
@@ -797,26 +787,20 @@ export class CodexSession implements HarnessSession {
 
   /** Codex's own UI asks to implement a finished plan; accepting leaves plan mode. */
   #offerImplementation(): void {
-    const id = `codex-plan-${Date.now()}`;
     const options = planOptions(this.info.runtimeMode, CAPABILITIES.runtimeModes);
-    this.#pending.set(id, (response) => {
+    const request = approval(
+      `codex-plan-${Date.now()}`,
+      PLAN_TITLE,
+      { type: "other" },
+      [],
+      options,
+    );
+    this.#events.ask(request, (response) => {
       const mode = response.kind === "approval" ? response.optionId : undefined;
       if (!isRuntimeMode(mode)) return;
       void this.#implementPlan(mode).catch((error: unknown) =>
         this.#events.notice("error", errorMessage(error)),
       );
-    });
-    this.#events.emit({
-      type: "request.opened",
-      request: {
-        kind: "approval",
-        id,
-        title: PLAN_TITLE,
-        detail: "",
-        action: { type: "other" },
-        options,
-        defaultOptionId: options[0]?.id ?? "",
-      },
     });
   }
 
@@ -846,12 +830,11 @@ export class CodexSession implements HarnessSession {
         if (!request) {
           return Promise.resolve({ action: "decline", content: null, _meta: null });
         }
-        return new Promise((resolve) => {
-          this.#pending.set(id, (response) =>
+        return new Promise((resolve) =>
+          this.#events.ask(request, (response) =>
             resolve(codexResponse({ method, params, decisions }, response)),
-          );
-          this.#events.emit({ type: "request.opened", request });
-        });
+          ),
+        );
       }
       case "item/tool/call":
         return Promise.resolve({
@@ -950,16 +933,8 @@ export class CodexSession implements HarnessSession {
 
   #closed(reason: string): void {
     if (this.#events.closed) return;
-    this.#cancelPending();
     this.#events.close(this.#turnId, reason, this.#closing);
     this.#turnId = null;
-  }
-
-  /** Answers every waiting request as cancelled, for a session that is ending. */
-  #cancelPending(): void {
-    const answers = [...this.#pending.values()];
-    this.#pending.clear();
-    for (const answer of answers) answer({ kind: "cancel" });
   }
 }
 

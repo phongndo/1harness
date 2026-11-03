@@ -60,6 +60,32 @@ describe("SessionEvents", () => {
     ]);
   });
 
+  it("answers a request once, and keeps one whose answer failed open", async () => {
+    const events = new SessionEvents("test");
+    const answered: string[] = [];
+    events.ask({ kind: "question", id: "q1", questions: [] }, (response) => {
+      answered.push(`q1 ${response.kind}`);
+    });
+    let fail = true;
+    events.ask({ kind: "question", id: "q2", questions: [] }, async (response) => {
+      if (fail) throw new Error("not taken");
+      answered.push(`q2 ${response.kind}`);
+    });
+    await events.answer("q1", { kind: "decline", reason: "" });
+    await events.answer("q1", { kind: "cancel" });
+    await assert.rejects(events.answer("q2", { kind: "cancel" }), /not taken/);
+    fail = false;
+    events.cancelAll();
+    await new Promise((resolve) => setImmediate(resolve));
+    events.close(null, "closed", true);
+    assert.deepEqual(answered, ["q1 decline", "q2 cancel"]);
+    const resolved = (await drain(events)).filter((event) => event.type === "request.resolved");
+    assert.deepEqual(resolved, [
+      { type: "request.resolved", requestId: "q1" },
+      { type: "request.resolved", requestId: "q2" },
+    ]);
+  });
+
   it("ends the turn as interrupted when closed on purpose", async () => {
     const events = new SessionEvents("test");
     events.close("t1", "closed", true);

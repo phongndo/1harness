@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { AsyncQueue } from "../core/async-queue.ts";
-import type { HarnessEvent, Item, SessionInfo, NoticeLevel } from "../core/events.ts";
+import { errorMessage } from "../core/errors.ts";
+import type {
+  HarnessEvent,
+  HarnessRequest,
+  Item,
+  NoticeLevel,
+  RequestResponse,
+  SessionInfo,
+} from "../core/events.ts";
 import { appendDelta } from "../core/thread.ts";
 
 /** The harness's ID for the session, which its requests name; it has none until it starts. */
@@ -30,6 +38,8 @@ export class SessionEvents {
   #prefix: string;
   #items = new Map<string, Item>();
   #requests = new Set<string>();
+  /** What sends the harness the user's answer, for each request still open. */
+  #answers = new Map<string, (response: RequestResponse) => unknown>();
   #closed = false;
 
   /** `prefix` starts the IDs of the session's notices, such as `codex`. */
@@ -56,6 +66,44 @@ export class SessionEvents {
     this.emit(noticeEvent(this.#prefix, level, text));
   }
 
+  /** Opens a request; `answer` sends the harness the user's response, or a cancel. */
+  ask(request: HarnessRequest, answer: (response: RequestResponse) => unknown): void {
+    this.#answers.set(request.id, answer);
+    this.emit({ type: "request.opened", request });
+  }
+
+  /**
+   * Answers an open request and resolves it. One whose answer the harness did
+   * not take stays open, to be answered again.
+   */
+  async answer(requestId: string, response: RequestResponse): Promise<void> {
+    const answer = this.#answers.get(requestId);
+    if (!answer) return;
+    this.#answers.delete(requestId);
+    try {
+      await answer(response);
+    } catch (error) {
+      if (this.#requests.has(requestId)) this.#answers.set(requestId, answer);
+      throw error;
+    }
+    this.withdraw(requestId);
+  }
+
+  /** Resolves a request the harness settled itself, without answering it. */
+  withdraw(requestId: string): void {
+    this.#answers.delete(requestId);
+    if (this.#requests.has(requestId)) this.emit({ type: "request.resolved", requestId });
+  }
+
+  /** Answers every open request as cancelled, as for a turn or session that stops. */
+  cancelAll(): void {
+    for (const requestId of this.#answers.keys()) {
+      this.answer(requestId, { kind: "cancel" }).catch((error: unknown) =>
+        this.notice("warning", `Could not cancel a request: ${errorMessage(error)}`),
+      );
+    }
+  }
+
   /**
    * Ends the session: its open items, its turn, and its open requests, which
    * nothing will answer now. A session closed on purpose ends its turn as
@@ -65,6 +113,7 @@ export class SessionEvents {
     if (this.#closed) return;
     this.#closed = true;
     const error = closing ? null : reason;
+    this.#answers.clear();
     for (const requestId of this.#requests) this.emit({ type: "request.resolved", requestId });
     for (const item of this.#items.values()) {
       // Work still running failed, since it never finished.

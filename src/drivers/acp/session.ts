@@ -57,11 +57,6 @@ interface SessionResponse {
   configOptions?: AcpConfigOption[] | null;
 }
 
-interface Pending {
-  options: { optionId: string; kind: string }[];
-  resolve: (result: unknown) => void;
-}
-
 const PROTOCOL_VERSION = 1;
 const START_TIMEOUT_MS = 30_000;
 // Loading a session replays it and starts its MCP servers, so it gets longer than a reply.
@@ -86,6 +81,21 @@ const KIND_LABELS: Record<string, string> = {
 
 function modeFor(modes: readonly AcpMode[], names: readonly string[]): AcpMode | undefined {
   return modes.find((mode) => names.includes(mode.id.toLowerCase()));
+}
+
+/** The reply to a permission request: the option chosen, or cancelled. */
+function permissionOutcome(
+  response: RequestResponse,
+  options: readonly { optionId: string; kind: string }[],
+): unknown {
+  let optionId: string | undefined;
+  if (response.kind === "approval") optionId = response.optionId;
+  // Declining picks the agent's own one-time rejection, which lets it go on.
+  if (response.kind === "decline")
+    optionId = options.find((option) => option.kind === "reject_once")?.optionId;
+  return optionId
+    ? { outcome: { outcome: "selected", optionId } }
+    : { outcome: { outcome: "cancelled" } };
 }
 
 /** 1harness's servers in ACP's shape; HTTP ones only where the agent takes them. */
@@ -119,7 +129,6 @@ export class AcpSession implements HarnessSession {
   #rpc: JsonRpcProcess | null = null;
   #events = new SessionEvents("acp");
   #translator = new AcpTranslator();
-  #pending = new Map<string, Pending>();
   #modes: AcpMode[] = [];
   #config: AcpConfigOption[] = [];
   #canList = false;
@@ -286,28 +295,11 @@ export class AcpSession implements HarnessSession {
     if (!this.info.threadId) return;
     this.#rpc?.notify("session/cancel", { sessionId: this.info.threadId });
     // ACP has pending permission requests answered as cancelled when a turn is cancelled.
-    for (const [id, pending] of this.#pending) {
-      pending.resolve({ outcome: { outcome: "cancelled" } });
-      this.#pending.delete(id);
-      this.#events.emit({ type: "request.resolved", requestId: id });
-    }
+    this.#events.cancelAll();
   }
 
   async respond(requestId: string, response: RequestResponse): Promise<void> {
-    const pending = this.#pending.get(requestId);
-    if (!pending) return;
-    this.#pending.delete(requestId);
-    let optionId: string | undefined;
-    if (response.kind === "approval") optionId = response.optionId;
-    // Declining picks the agent's own one-time rejection, which lets it go on.
-    if (response.kind === "decline")
-      optionId = pending.options.find((option) => option.kind === "reject_once")?.optionId;
-    pending.resolve(
-      optionId
-        ? { outcome: { outcome: "selected", optionId } }
-        : { outcome: { outcome: "cancelled" } },
-    );
-    this.#events.emit({ type: "request.resolved", requestId });
+    await this.#events.answer(requestId, response);
   }
 
   async setRuntimeMode(mode: RuntimeMode): Promise<void> {
@@ -374,9 +366,7 @@ export class AcpSession implements HarnessSession {
 
   async close(): Promise<void> {
     this.#closing = true;
-    for (const pending of this.#pending.values())
-      pending.resolve({ outcome: { outcome: "cancelled" } });
-    this.#pending.clear();
+    this.#events.cancelAll();
     await this.#rpc?.close();
     // A session whose start failed before the agent ran has no process to report the end.
     this.#events.close(this.#turnId, "closed", true);
@@ -498,10 +488,8 @@ export class AcpSession implements HarnessSession {
     }));
     const action = approvalAction(params.toolCall);
     return new Promise((resolve) => {
-      this.#pending.set(id, { options: params.options, resolve });
-      this.#events.emit({
-        type: "request.opened",
-        request: {
+      this.#events.ask(
+        {
           kind: "approval",
           id,
           title:
@@ -519,12 +507,12 @@ export class AcpSession implements HarnessSession {
           options,
           defaultOptionId: options[0]?.id ?? "",
         },
-      });
+        (response) => resolve(permissionOutcome(response, params.options)),
+      );
     });
   }
 
   #closed(reason: string): void {
-    this.#pending.clear();
     this.#events.close(this.#turnId, reason, this.#closing);
     this.#turnId = null;
   }

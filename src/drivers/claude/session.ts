@@ -134,7 +134,6 @@ export class ClaudeSession implements HarnessSession {
   #input = new AsyncQueue<SDKUserMessage>();
   #events = new SessionEvents("claude");
   #translator = new ClaudeTranslator();
-  #pending = new Map<string, (response: RequestResponse) => void>();
   #turn: Turn | null = null;
   #interruptRequested = false;
   #bypassAllowed: boolean;
@@ -221,7 +220,7 @@ export class ClaudeSession implements HarnessSession {
   }
 
   async respond(requestId: string, response: RequestResponse): Promise<void> {
-    this.#pending.get(requestId)?.(response);
+    await this.#events.answer(requestId, response);
   }
 
   async setModel(model: string | null): Promise<void> {
@@ -334,7 +333,7 @@ export class ClaudeSession implements HarnessSession {
   async close(): Promise<void> {
     if (this.#events.closed) return;
     this.#closing = true;
-    for (const resolve of this.#pending.values()) resolve({ kind: "cancel" });
+    this.#events.cancelAll();
     this.#input.end();
     this.#query?.close();
     this.#finish("closed");
@@ -571,16 +570,12 @@ export class ClaudeSession implements HarnessSession {
 
   #ask(request: HarnessRequest, signal: AbortSignal): Promise<RequestResponse> {
     return new Promise((resolve) => {
-      const settle = (response: RequestResponse) => {
-        if (!this.#pending.delete(request.id)) return;
+      const abort = () => void this.#events.answer(request.id, { kind: "cancel" });
+      this.#events.ask(request, (response) => {
         signal.removeEventListener("abort", abort);
-        this.#events.emit({ type: "request.resolved", requestId: request.id });
         resolve(response);
-      };
-      const abort = () => settle({ kind: "cancel" });
-      this.#pending.set(request.id, settle);
+      });
       signal.addEventListener("abort", abort);
-      this.#events.emit({ type: "request.opened", request });
     });
   }
 
