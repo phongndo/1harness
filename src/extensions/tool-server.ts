@@ -117,7 +117,7 @@ export class ToolServer {
 }
 
 /** A tool as an operation lists it: one only agents in 1harness threads call. */
-export function toolInfo(tool: ToolDefinition): OperationInfo {
+function toolInfo(tool: ToolDefinition): OperationInfo {
   return {
     name: tool.name,
     description: tool.description,

@@ -74,7 +74,7 @@ type AnyEventHandler = (event: ThreadEvent, context: ExtensionContext) => void |
 
 const MODULE_EXTENSIONS = new Set([".ts", ".mts", ".js", ".mjs"]);
 /** Extension modules in a folder: module files, and folders with an `index` module. */
-export function findExtensions(folder: string): string[] {
+function findExtensions(folder: string): string[] {
   let names: string[];
   try {
     names = readdirSync(folder).toSorted();
@@ -99,7 +99,7 @@ export function findExtensions(folder: string): string[] {
 }
 
 /** The name an extension goes by: its file name, or its folder's for an `index` module. */
-export function extensionName(path: string): string {
+function extensionName(path: string): string {
   const file = basename(path, extname(path));
   return file === "index" ? basename(dirname(path)) : file;
 }
@@ -149,7 +149,7 @@ export class JsonStorage implements ExtensionStorage {
 }
 
 /** Folders whose `.1harness/extensions` the user has agreed to run. */
-export class TrustList {
+class TrustList {
   #storage: JsonStorage;
 
   constructor(stateDir: string) {
