@@ -40,7 +40,7 @@ import {
   type Operation,
   type OperationInfo,
 } from "../operations/operation.ts";
-import { agentTool, toolOperation } from "../operations/tools.ts";
+import { agentTools, toolOperation } from "../operations/tools.ts";
 import {
   PROTOCOL_VERSION,
   RpcError,
@@ -243,7 +243,7 @@ export class Host {
   #options: HostOptions;
   /** Extensions by folder and the modules a client named, each set with its commands. */
   #sets: ExtensionSets;
-  #orchestratorTools: ReadonlyMap<string, { tool: ToolDefinition }> = new Map();
+  #agentTools: ReadonlyMap<string, { tool: ToolDefinition }> = new Map();
   /** html2term, for images shrunk to their size on screen and pages drawn as pictures. */
   readonly media = new Media();
   /** Pages kept running for clients, through html2term's browser worker. */
@@ -317,8 +317,8 @@ export class Host {
           .map((client) => this.#sets.key(client.cwd, client.extensions)),
       ],
     });
-    // Every session gets the orchestrator's tools; its folder's extensions add theirs.
-    this.tools = new ToolServer(() => this.#orchestratorTools, options.version);
+    // Every session gets 1harness's own tools; its folder's extensions add theirs.
+    this.tools = new ToolServer(() => this.#agentTools, options.version);
     this.manager = new ThreadManager({
       version: options.version,
       extensions: (cwd, client) => this.#extensionsFor(cwd, client),
@@ -366,11 +366,7 @@ export class Host {
       }),
       ...this.pageTools.map(toolOperation),
     ];
-    this.#orchestratorTools = new Map(
-      this.operations
-        .filter((operation) => operation.callers.includes("agent"))
-        .map((operation) => [operation.name, { tool: agentTool(operation) }]),
-    );
+    this.#agentTools = new Map(agentTools(this.operations).map((tool) => [tool.name, { tool }]));
     this.manager.subscribe((event) => this.#managerEvent(event));
     this.#handlers = this.#methods();
   }

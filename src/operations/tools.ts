@@ -22,6 +22,11 @@ export function agentTool(operation: Operation): ToolDefinition {
   };
 }
 
+/** The operations agents in 1harness threads may call, as the tools their sessions get. */
+export function agentTools(operations: readonly Operation[]): ToolDefinition[] {
+  return operations.filter((operation) => operation.callers.includes("agent")).map(agentTool);
+}
+
 /** A tool only agents in 1harness threads call, such as an extension's, as an operation. */
 export function toolOperation(tool: ToolDefinition): Operation {
   return {

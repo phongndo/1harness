@@ -14,7 +14,7 @@ import {
   type Caller,
   type Operation,
 } from "../operations/operation.ts";
-import { agentTool } from "../operations/tools.ts";
+import { agentTools } from "../operations/tools.ts";
 import type { TaskRow } from "../store/store.ts";
 import type { HarnessInfo } from "../protocol.ts";
 import {
@@ -437,7 +437,7 @@ export class Orchestrator {
 
   /** The operations agents in 1harness threads call, as the tools their sessions get. */
   get tools(): ToolDefinition[] {
-    return this.operations.filter((op) => op.callers.includes("agent")).map(agentTool);
+    return agentTools(this.operations);
   }
 
   /** Every task, for a store to keep. */
