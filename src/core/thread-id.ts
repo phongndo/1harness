@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 /** How many of a thread ID's characters are shown and enough to type. */
-export const SHORT_ID = 8;
+const SHORT_ID = 8;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** A UUID's first characters, at least as many as are shown. */

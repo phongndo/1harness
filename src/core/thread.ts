@@ -998,7 +998,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined>
  * What makes two approvals the same action: the exact command, the same files,
  * or the same tool. Null for actions that cannot be compared.
  */
-export function actionKey(action: ApprovalAction): string | null {
+function actionKey(action: ApprovalAction): string | null {
   switch (action.type) {
     case "command":
       return `command\0${action.command}`;

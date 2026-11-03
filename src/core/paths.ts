@@ -21,7 +21,7 @@ export function storeFile(env: NodeJS.ProcessEnv = process.env): string {
  * user can enter and which the system clears at logout, or a folder in the
  * state folder where there is no runtime folder, as on macOS.
  */
-export function runtimeDir(env: NodeJS.ProcessEnv = process.env): string {
+function runtimeDir(env: NodeJS.ProcessEnv = process.env): string {
   const runtime = env["XDG_RUNTIME_DIR"];
   return runtime ? join(runtime, "1harness") : join(stateDir(env), "run");
 }
