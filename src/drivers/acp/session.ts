@@ -18,7 +18,7 @@ import {
 } from "../../core/events.ts";
 import { errorMessage } from "../../core/errors.ts";
 import { record } from "../../core/values.ts";
-import { ANSWER, ASK, askFor, askForChanges, fileName } from "../../core/wording.ts";
+import { ANSWER, ASK, askFor, askForChanges, fileName, steppedDown } from "../../core/wording.ts";
 import { readImage } from "../images.ts";
 import { JsonRpcProcess, RpcError } from "../jsonrpc.ts";
 import { SessionEvents, started } from "../session-events.ts";
@@ -173,7 +173,7 @@ export class AcpSession implements HarnessSession {
         `1harness could not read a message from ${this.#spec.label}: ${errorMessage(error)}`,
       ),
     );
-    void rpc.exited.then((reason) => this.#closed(reason));
+    void rpc.exited.then((reason) => this.#finish(reason));
 
     const init = await rpc.request<{
       agentInfo?: { version?: string } | null;
@@ -245,7 +245,7 @@ export class AcpSession implements HarnessSession {
     if (mode && mode !== requested && this.info.runtimeMode === mode)
       this.#events.notice(
         "warning",
-        `${this.#spec.label} has no ${requested} mode, so this thread runs in ${mode}`,
+        steppedDown(`${this.#spec.label} has no ${requested} mode`, mode),
       );
     // Plan is one of the agent's modes, so it goes on after the runtime mode.
     if (this.#options.interactionMode === "plan" && this.capabilities.planMode) {
@@ -513,7 +513,7 @@ export class AcpSession implements HarnessSession {
     });
   }
 
-  #closed(reason: string): void {
+  #finish(reason: string): void {
     this.#events.close(this.#turnId, reason, this.#closing);
     this.#turnId = null;
   }

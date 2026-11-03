@@ -20,6 +20,7 @@ import {
   type UserInput,
 } from "../../core/events.ts";
 import { errorMessage } from "../../core/errors.ts";
+import { steppedDown } from "../../core/wording.ts";
 import { readImage } from "../images.ts";
 import { SessionEvents, started } from "../session-events.ts";
 import { slashCommand } from "../text.ts";
@@ -109,7 +110,7 @@ export class OpenCodeSession implements HarnessSession {
   #ownRequests = new Set<string>();
   #turnId: string | null = null;
   /** Esc came before the turn's execution started, so it stops once it does. */
-  #interruptWanted = false;
+  #interruptRequested = false;
   #closing = false;
 
   constructor(config: OpenCodeSessionConfig) {
@@ -180,10 +181,7 @@ export class OpenCodeSession implements HarnessSession {
     const requested = this.#config.runtimeMode;
     const mode = fitRuntimeMode(requested, RUNTIME_MODES) ?? "supervised";
     if (mode !== requested)
-      this.#events.notice(
-        "warning",
-        `${LABEL} has no ${requested} mode, so this thread runs in ${mode}`,
-      );
+      this.#events.notice("warning", steppedDown(`${LABEL} has no ${requested} mode`, mode));
     const plan = this.#config.interactionMode === "plan" && this.capabilities.planMode;
     this.#agent = plan ? PLAN_AGENT : this.#mainAgent;
     const { model: name, effort } = this.#config;
@@ -235,7 +233,7 @@ export class OpenCodeSession implements HarnessSession {
 
   async interrupt(): Promise<void> {
     if (!this.info.threadId) return;
-    if (this.#turnId === null) this.#interruptWanted = this.#sent.length > 0;
+    if (this.#turnId === null) this.#interruptRequested = this.#sent.length > 0;
     await this.#post(`/api/session/${this.info.threadId}/interrupt`);
   }
 
@@ -380,7 +378,7 @@ export class OpenCodeSession implements HarnessSession {
       if (!this.#sent.some((entry) => entry.inboxId === response.id)) sent.inboxId = response.id;
     } catch (error) {
       this.#sent = this.#sent.filter((entry) => entry !== sent);
-      if (this.#sent.length === 0) this.#interruptWanted = false;
+      if (this.#sent.length === 0) this.#interruptRequested = false;
       throw error;
     }
   }
@@ -441,8 +439,8 @@ export class OpenCodeSession implements HarnessSession {
         if (this.#turnId !== null) return;
         this.#turnId = randomUUID();
         this.#events.emit({ type: "turn.started", turnId: this.#turnId });
-        if (this.#interruptWanted) {
-          this.#interruptWanted = false;
+        if (this.#interruptRequested) {
+          this.#interruptRequested = false;
           void this.interrupt().catch((error: unknown) =>
             this.#events.notice("warning", `Interrupt failed: ${errorMessage(error)}`),
           );
@@ -527,7 +525,7 @@ export class OpenCodeSession implements HarnessSession {
     const turnId = this.#turnId;
     if (turnId === null) return;
     this.#turnId = null;
-    this.#interruptWanted = false;
+    this.#interruptRequested = false;
     this.#events.emit(...this.#translator.flush());
     // A request of the session's own still open will not be answered; a
     // subagent's may be, since subagents can work on in the background.

@@ -29,7 +29,14 @@ import {
 import { errorMessage } from "../../core/errors.ts";
 import { record, text } from "../../core/values.ts";
 import { checkToolHook } from "../../core/tools.ts";
-import { ANSWER, ASK, PLAN_TITLE, askForChanges, planOptions } from "../../core/wording.ts";
+import {
+  ANSWER,
+  ASK,
+  PLAN_TITLE,
+  askForChanges,
+  planOptions,
+  steppedDown,
+} from "../../core/wording.ts";
 import { HOOK_TIMEOUT_SEC, HookServer } from "./hook-server.ts";
 import { INIT_PROMPT } from "./prompts.ts";
 import { JsonRpcProcess, RpcError, type RequestId } from "../jsonrpc.ts";
@@ -207,7 +214,7 @@ export class CodexSession implements HarnessSession {
         `1harness could not read a message from Codex: ${errorMessage(error)}`,
       ),
     );
-    void rpc.exited.then((reason) => this.#closed(reason));
+    void rpc.exited.then((reason) => this.#finish(reason));
 
     const initialized = await rpc.request<{ userAgent: string }>(
       "initialize",
@@ -271,7 +278,7 @@ export class CodexSession implements HarnessSession {
     if (granted !== this.info.runtimeMode) {
       this.#events.notice(
         "warning",
-        `Codex's settings do not allow ${this.info.runtimeMode}, so this thread runs in ${granted}`,
+        steppedDown(`Codex's settings do not allow ${this.info.runtimeMode}`, granted),
       );
       this.info.runtimeMode = granted;
     }
@@ -578,7 +585,7 @@ export class CodexSession implements HarnessSession {
     await this.#rpc?.close();
     await this.#hooks?.close();
     // A session whose start failed before Codex ran has no process to report the end.
-    this.#closed("closed");
+    this.#finish("closed");
   }
 
   /**
@@ -925,7 +932,7 @@ export class CodexSession implements HarnessSession {
     );
   }
 
-  #closed(reason: string): void {
+  #finish(reason: string): void {
     if (this.#events.closed) return;
     this.#events.close(this.#turnId, reason, this.#closing);
     this.#turnId = null;

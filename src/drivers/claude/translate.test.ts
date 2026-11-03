@@ -92,7 +92,7 @@ describe("ClaudeTranslator", () => {
     translator.translate(
       assistant("m4", [{ type: "tool_use", id: "t", name: "Grep", input: { pattern: "x" } }]),
     );
-    const settled = translator.settleOpenTools(true);
+    const settled = translator.flush(true);
     assert.equal(settled.length, 1);
     assert.equal(
       settled[0]?.type === "item.completed" &&
@@ -100,7 +100,7 @@ describe("ClaudeTranslator", () => {
         settled[0].item.status,
       "failed",
     );
-    assert.deepEqual(translator.settleOpenTools(true), []);
+    assert.deepEqual(translator.flush(true), []);
   });
 
   it("reports usage with context window and cost from the result", () => {

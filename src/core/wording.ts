@@ -106,6 +106,11 @@ export const ANSWER = {
   never: (subject = "it") => `No, and always block ${subject}`,
 };
 
+/** Says a thread runs in a narrower mode than asked, and why. */
+export function steppedDown(why: string, mode: RuntimeMode): string {
+  return `${why}, so this thread runs in ${mode}`;
+}
+
 export const PLAN_TITLE = "Implement this plan?";
 const KEEP_PLANNING = "keep";
 

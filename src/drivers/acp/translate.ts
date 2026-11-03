@@ -51,9 +51,13 @@ export type AcpUpdate =
   | { sessionUpdate: "current_mode_update"; currentModeId: string }
   | { sessionUpdate: "usage_update"; used: number; size: number };
 
-const CATEGORIES: Record<string, ToolCategory> = { read: "read", search: "search", fetch: "fetch" };
+const TOOL_CATEGORIES: Record<string, ToolCategory> = {
+  read: "read",
+  search: "search",
+  fetch: "fetch",
+};
 
-function toolStatus(status: string | null | undefined): ItemStatus {
+function itemStatus(status: string | null | undefined): ItemStatus {
   if (status === "completed") return "completed";
   if (status === "failed") return "failed";
   return "running";
@@ -95,7 +99,7 @@ function fileChanges(call: AcpToolCall): FileChange[] {
 
 /** A tool call as a 1harness item, by the kind the agent gives it. */
 export function toolItem(call: AcpToolCall): Item {
-  const status = toolStatus(call.status);
+  const status = itemStatus(call.status);
   // Diffs and terminals show as the item's changes and command instead.
   const output = contentText(
     (call.content ?? []).flatMap((part) => (part.type === "content" ? [part.content] : [])),
@@ -120,7 +124,7 @@ export function toolItem(call: AcpToolCall): Item {
         id: call.toolCallId,
         tool: call.name ?? call.title ?? "tool",
         server: null,
-        category: CATEGORIES[call.kind ?? ""] ?? "other",
+        category: TOOL_CATEGORIES[call.kind ?? ""] ?? "other",
         summary: call.title ?? field(call.rawInput, "path", "query", "url") ?? "",
         output,
         status,

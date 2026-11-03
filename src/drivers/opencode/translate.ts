@@ -185,7 +185,7 @@ export type OcMessage =
       output?: { output: string };
     };
 
-const CATEGORIES: Record<string, ToolCategory> = {
+const TOOL_CATEGORIES: Record<string, ToolCategory> = {
   read: "read",
   glob: "search",
   grep: "search",
@@ -377,7 +377,7 @@ export function toolItem(
         id,
         tool: mcp?.tool ?? name,
         server: mcp?.server ?? null,
-        category: mcp ? "other" : (CATEGORIES[name] ?? "other"),
+        category: mcp ? "other" : (TOOL_CATEGORIES[name] ?? "other"),
         summary: summarizeInput(input, SUMMARY_KEYS),
         output: "",
         status: "running",

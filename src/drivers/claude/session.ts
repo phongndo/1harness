@@ -50,7 +50,7 @@ import {
 import { errorMessage } from "../../core/errors.ts";
 import { text } from "../../core/values.ts";
 import { checkToolHook, mcpTool, toolAction } from "../../core/tools.ts";
-import { ANSWER, ASK, PLAN_TITLE, fileName, planOptions } from "../../core/wording.ts";
+import { ANSWER, ASK, PLAN_TITLE, fileName, planOptions, steppedDown } from "../../core/wording.ts";
 import { StderrTail } from "../child.ts";
 import { readImage } from "../images.ts";
 import { SessionEvents } from "../session-events.ts";
@@ -162,7 +162,7 @@ export class ClaudeSession implements HarnessSession {
     // A mode that is turned off steps down to the broadest one left.
     const runtimeMode = fitRuntimeMode(config.runtimeMode, modes) ?? "supervised";
     if (runtimeMode !== config.runtimeMode)
-      this.#stepDown = `${this.#unavailable(config.runtimeMode)}, so this thread runs in ${runtimeMode}`;
+      this.#stepDown = steppedDown(this.#unavailable(config.runtimeMode), runtimeMode);
     this.#bypassAllowed = runtimeMode === "full-access";
     this.info = {
       harness: "claude",
@@ -196,7 +196,7 @@ export class ClaudeSession implements HarnessSession {
   }
 
   async startTurn(input: UserInput): Promise<void> {
-    if (!this.#query) throw new Error("The session is not running");
+    if (!this.#query) throw new Error("The session has not started");
     // Read first: an image that cannot be read fails the send, not a turn already begun.
     const content = userContent(input);
     const uuid = randomUUID();
@@ -341,7 +341,7 @@ export class ClaudeSession implements HarnessSession {
   }
 
   #require(): Query {
-    if (!this.#query) throw new Error("The session is not running");
+    if (!this.#query) throw new Error("The session has not started");
     return this.#query;
   }
 
@@ -450,7 +450,7 @@ export class ClaudeSession implements HarnessSession {
     const interrupted = this.#interruptRequested || aborted;
     const failed = result.subtype !== "success" || result.is_error;
     const status = interrupted ? "interrupted" : failed ? "failed" : "completed";
-    this.#events.emit(...this.#translator.settleOpenTools(status !== "completed"));
+    this.#events.emit(...this.#translator.flush(status !== "completed"));
     // A command such as /cost can answer only in the result.
     const sawText = this.#translator.takeSawText();
     if (
@@ -550,7 +550,7 @@ export class ClaudeSession implements HarnessSession {
           this.#events.emit(event);
       }
     }
-    this.#events.emit(...replay.settleOpenTools(false));
+    this.#events.emit(...replay.flush(false));
   }
 
   /**

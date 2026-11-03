@@ -324,7 +324,7 @@ export class ClaudeTranslator {
   }
 
   /** Completes tool calls still waiting for results, so an ended turn leaves nothing running. */
-  settleOpenTools(failed: boolean): HarnessEvent[] {
+  flush(failed: boolean): HarnessEvent[] {
     const events: HarnessEvent[] = [];
     for (const item of this.#tools.values()) {
       events.push({ type: "item.completed", item: complete(item, "", failed) });
