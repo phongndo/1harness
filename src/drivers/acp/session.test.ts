@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
-import type { HarnessEvent, SessionOptions } from "../../core/events.ts";
+import type { SessionOptions } from "../../core/events.ts";
+import { collect, notices, until, within } from "../../testing/events.ts";
 import { AcpSession, type AcpAgentSpec } from "./session.ts";
 
 let root: string;
@@ -76,32 +77,6 @@ const options: SessionOptions = {
   resume: null,
 };
 
-/** Reads a session's events as they come; `ended` settles when they stop. */
-function collect(session: AcpSession): { events: HarnessEvent[]; ended: Promise<void> } {
-  const events: HarnessEvent[] = [];
-  const ended = (async () => {
-    for await (const event of session.events) events.push(event);
-  })();
-  return { events, ended };
-}
-
-function warnings(events: HarnessEvent[]): string[] {
-  return events.flatMap((event) =>
-    event.type === "item.completed" &&
-    event.item.kind === "notice" &&
-    event.item.level === "warning"
-      ? [event.item.text]
-      : [],
-  );
-}
-
-function within<T>(promise: Promise<T>, ms: number): Promise<T | "timed out"> {
-  return Promise.race([
-    promise,
-    new Promise<"timed out">((resolve) => setTimeout(resolve, ms, "timed out").unref()),
-  ]);
-}
-
 describe("AcpSession", () => {
   it("ends the tool calls and reply it was in when the agent dies", async () => {
     const session = new AcpSession(spec, { ...options, cwd: root }, "test");
@@ -127,7 +102,7 @@ describe("AcpSession", () => {
     try {
       await plain.start();
       assert.equal(plain.info.model, null);
-      assert.match(warnings(plainEvents).join("\n"), /Could not use big/);
+      assert.match(notices(plainEvents, "warning").join("\n"), /Could not use big/);
       await assert.rejects(plain.setModel("big"), /does not let 1harness choose its model/);
     } finally {
       await plain.close();
@@ -144,7 +119,10 @@ describe("AcpSession", () => {
       const refusedEvents = collect(refused).events;
       await refused.start();
       assert.equal(refused.info.model, "small");
-      assert.match(warnings(refusedEvents).join("\n"), /Could not use missing: no such model/);
+      assert.match(
+        notices(refusedEvents, "warning").join("\n"),
+        /Could not use missing: no such model/,
+      );
       await refused.close();
     } finally {
       delete process.env["FAKE_MODELS"];
@@ -163,7 +141,7 @@ describe("AcpSession", () => {
       await session.start();
       assert.equal(session.info.runtimeMode, "supervised");
       assert.equal(session.info.interactionMode, "default");
-      const warned = warnings(events).join("\n");
+      const warned = notices(events, "warning").join("\n");
       assert.match(warned, /Could not use full-access: modes are locked/);
       assert.match(warned, /Could not start in plan mode: modes are locked/);
     } finally {
@@ -186,8 +164,7 @@ describe("AcpSession", () => {
       assert.equal(started, ended);
       // The session takes the next message.
       await session.startTurn({ text: "again" });
-      for (let tries = 0; tries < 100 && !events.some((e) => e.type === "turn.ended"); tries++)
-        await new Promise((resolve) => setTimeout(resolve, 10));
+      await until(() => events.some((event) => event.type === "turn.ended"), "the turn to end");
       assert.ok(
         events.some((event) => event.type === "turn.ended" && event.status === "completed"),
       );

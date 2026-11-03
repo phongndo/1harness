@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
-import type { HarnessEvent } from "../../core/events.ts";
+import { collect, notices, until } from "../../testing/events.ts";
 import { OpenCodeSession, type OpenCodeSessionConfig } from "./session.ts";
 
 let root: string;
@@ -90,38 +90,16 @@ function config(): OpenCodeSessionConfig {
   };
 }
 
-function collect(session: OpenCodeSession): HarnessEvent[] {
-  const events: HarnessEvent[] = [];
-  void (async () => {
-    for await (const event of session.events) events.push(event);
-  })();
-  return events;
-}
-
-async function until(check: () => boolean, what: string, ms = 3_000): Promise<void> {
-  for (const start = Date.now(); Date.now() - start < ms;) {
-    if (check()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`Timed out waiting for ${what}`);
-}
-
 describe("OpenCodeSession", () => {
   it("says so when a stop held until the turn began fails", async () => {
     const session = new OpenCodeSession(config());
-    const events = collect(session);
+    const { events } = collect(session);
     try {
       await session.start();
       await session.startTurn({ text: "hi" });
       await assert.rejects(session.interrupt(), /not now/);
       await until(
-        () =>
-          events.some(
-            (event) =>
-              event.type === "item.completed" &&
-              event.item.kind === "notice" &&
-              event.item.text === "Interrupt failed: not now",
-          ),
+        () => notices(events, "warning").includes("Interrupt failed: not now"),
         "the notice",
       );
     } finally {
@@ -132,17 +110,10 @@ describe("OpenCodeSession", () => {
   it("warns when it cannot list MCP servers, commands, or skills", async () => {
     process.env["FAKE_NO_LISTS"] = "1";
     const session = new OpenCodeSession(config());
-    const events = collect(session);
+    const { events } = collect(session);
     try {
       await session.start();
-      const warned = events.flatMap((event) =>
-        event.type === "item.completed" &&
-        event.item.kind === "notice" &&
-        event.item.level === "warning"
-          ? [event.item.text]
-          : [],
-      );
-      assert.deepEqual(warned.toSorted(), [
+      assert.deepEqual(notices(events, "warning").toSorted(), [
         "Could not list OpenCode's MCP servers: broken",
         "Could not list OpenCode's commands: broken",
         "Could not list OpenCode's skills: broken",
@@ -155,7 +126,7 @@ describe("OpenCodeSession", () => {
 
   it("withdraws the requests it leaves open when it closes", async () => {
     const session = new OpenCodeSession(config());
-    const events = collect(session);
+    const { events } = collect(session);
     await session.start();
     await session.startTurn({ text: "ask" });
     await until(() => events.some((event) => event.type === "request.opened"), "the request");

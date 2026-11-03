@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import type { HarnessEvent, SessionOptions } from "../../core/events.ts";
+import { collect, notices, until, within } from "../../testing/events.ts";
 import { CodexSession, type CodexSessionConfig } from "./session.ts";
 
 let root: string;
@@ -105,28 +106,8 @@ function config(overrides: Partial<CodexSessionConfig> = {}): CodexSessionConfig
   return { ...options, command: codex, version: "test", ...overrides };
 }
 
-/** Reads a session's events as they come; `ended` settles when they stop. */
-function collect(session: CodexSession): { events: HarnessEvent[]; ended: Promise<void> } {
-  const events: HarnessEvent[] = [];
-  const ended = (async () => {
-    for await (const event of session.events) events.push(event);
-  })();
-  return { events, ended };
-}
-
-async function until(check: () => boolean, what: string, ms = 3_000): Promise<void> {
-  for (const start = Date.now(); Date.now() - start < ms;) {
-    if (check()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`Timed out waiting for ${what}`);
-}
-
-function within<T>(promise: Promise<T>, ms: number): Promise<T | "timed out"> {
-  return Promise.race([
-    promise,
-    new Promise<"timed out">((resolve) => setTimeout(resolve, ms, "timed out").unref()),
-  ]);
+function turnsStarted(events: readonly HarnessEvent[]): number {
+  return events.filter((event) => event.type === "turn.started").length;
 }
 
 describe("CodexSession", () => {
@@ -179,71 +160,47 @@ describe("CodexSession", () => {
     }
   });
 
-  it("does not start the plan's implementation while another turn is starting", async () => {
-    const session = new CodexSession(config({ model: "gpt", interactionMode: "plan" }));
-    const { events } = collect(session);
-    try {
-      await session.start();
-      await session.startTurn({ text: "plan" });
-      await until(
-        () =>
-          events.some((event) => event.type === "request.opened") &&
-          events.some((event) => event.type === "turn.ended"),
-        "the offer to implement the plan",
-      );
-      const offer = events.find((event) => event.type === "request.opened");
-      assert.ok(offer?.type === "request.opened");
-      // Codex has not answered this one yet when the plan is accepted.
-      const slow = session.startTurn({ text: "slow" });
-      await session.respond(offer.request.id, { kind: "approval", optionId: "supervised" });
-      await slow;
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      assert.equal(events.filter((event) => event.type === "turn.started").length, 2);
-      assert.ok(
-        events.some(
-          (event) =>
-            event.type === "item.completed" &&
-            event.item.kind === "notice" &&
-            /turn is running/.test(event.item.text),
-        ),
-      );
-    } finally {
-      await session.close();
-    }
-  });
-
-  it("does not start the plan's implementation while a review is starting", async () => {
-    const session = new CodexSession(config({ model: "gpt", interactionMode: "plan" }));
-    const { events } = collect(session);
-    try {
-      await session.start();
-      await session.startTurn({ text: "plan" });
-      await until(
-        () =>
-          events.some((event) => event.type === "request.opened") &&
-          events.some((event) => event.type === "turn.ended"),
-        "the offer to implement the plan",
-      );
-      const offer = events.find((event) => event.type === "request.opened");
-      assert.ok(offer?.type === "request.opened");
-      // Codex has not answered the review yet when the plan is accepted.
-      const review = session.startTurn({ text: "/review" });
-      await session.respond(offer.request.id, { kind: "approval", optionId: "supervised" });
-      await review;
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      assert.equal(events.filter((event) => event.type === "turn.started").length, 2);
-      assert.ok(
-        events.some(
-          (event) =>
-            event.type === "item.completed" &&
-            event.item.kind === "notice" &&
-            /turn is running/.test(event.item.text),
-        ),
-      );
-    } finally {
-      await session.close();
-    }
-  });
+  for (const { during, text, started } of [
+    // Codex has not answered the turn or review yet when the plan is accepted.
+    { during: "another turn is starting", text: "slow", started: false },
+    { during: "a review is starting", text: "/review", started: false },
+    // The thread sent the next message once the plan's turn ended.
+    { during: "another turn runs", text: "hold", started: true },
+  ]) {
+    it(`does not start the plan's implementation while ${during}`, async () => {
+      const session = new CodexSession(config({ model: "gpt", interactionMode: "plan" }));
+      const { events } = collect(session);
+      try {
+        await session.start();
+        await session.startTurn({ text: "plan" });
+        await until(
+          () =>
+            events.some((event) => event.type === "request.opened") &&
+            events.some((event) => event.type === "turn.ended"),
+          "the offer to implement the plan",
+        );
+        const offer = events.find((event) => event.type === "request.opened");
+        assert.ok(offer?.type === "request.opened");
+        const busy = session.startTurn({ text });
+        if (started) {
+          await busy;
+          await until(() => turnsStarted(events) === 2, "the second turn");
+        }
+        await session.respond(offer.request.id, { kind: "approval", optionId: "supervised" });
+        await busy;
+        // Refusing is all the offer does, so no third turn can follow.
+        await until(
+          () =>
+            turnsStarted(events) === 2 &&
+            notices(events, "error").some((notice) => /turn is running/.test(notice)),
+          "the refusal",
+        );
+        assert.equal(turnsStarted(events), 2);
+      } finally {
+        await session.close();
+      }
+    });
+  }
 
   it("warns that tool calls go unchecked when Codex does not list its hooks", async () => {
     process.env["FAKE_NO_HOOKS"] = "1";
@@ -253,53 +210,13 @@ describe("CodexSession", () => {
       await session.start();
       await until(
         () =>
-          events.some(
-            (event) =>
-              event.type === "item.completed" &&
-              event.item.kind === "notice" &&
-              event.item.level === "warning" &&
-              /cannot check this thread's tool calls/.test(event.item.text),
+          notices(events, "warning").some((notice) =>
+            /cannot check this thread's tool calls/.test(notice),
           ),
         "the warning",
       );
     } finally {
       delete process.env["FAKE_NO_HOOKS"];
-      await session.close();
-    }
-  });
-
-  it("does not start the plan's implementation while another turn runs", async () => {
-    const session = new CodexSession(config({ model: "gpt", interactionMode: "plan" }));
-    const { events } = collect(session);
-    try {
-      await session.start();
-      await session.startTurn({ text: "plan" });
-      await until(
-        () =>
-          events.some((event) => event.type === "request.opened") &&
-          events.some((event) => event.type === "turn.ended"),
-        "the offer to implement the plan",
-      );
-      const offer = events.find((event) => event.type === "request.opened");
-      assert.ok(offer?.type === "request.opened");
-      // The thread sent the next message once the plan's turn ended.
-      await session.startTurn({ text: "hold" });
-      await until(
-        () => events.filter((event) => event.type === "turn.started").length === 2,
-        "the second turn",
-      );
-      await session.respond(offer.request.id, { kind: "approval", optionId: "supervised" });
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      assert.equal(events.filter((event) => event.type === "turn.started").length, 2);
-      assert.ok(
-        events.some(
-          (event) =>
-            event.type === "item.completed" &&
-            event.item.kind === "notice" &&
-            /turn is running/.test(event.item.text),
-        ),
-      );
-    } finally {
       await session.close();
     }
   });

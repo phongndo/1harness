@@ -1,7 +1,3 @@
-// A scripted harness for tests: each message plays one turn with reasoning
-// and a reply streamed in deltas, a command, and a todo list that keeps its ID
-// across turns, as Codex's does. A message ending in ASK waits for an approval.
-
 import { AsyncQueue } from "../core/async-queue.ts";
 import type {
   Capabilities,
@@ -17,9 +13,9 @@ import { registerDriver } from "../drivers/index.ts";
 let natives = 0;
 
 /**
- * A harness that plays a scripted turn for each message: reasoning and a reply
- * streamed in deltas, a command, and a todo list that keeps its ID across
- * turns, as Codex's does.
+ * A harness for tests that plays a scripted turn for each message: reasoning
+ * and a reply streamed in deltas, a command, and a todo list that keeps its ID
+ * across turns, as Codex's does. A message ending in ASK waits for an approval.
  */
 export class ScriptedSession {
   readonly capabilities: Capabilities = {
