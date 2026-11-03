@@ -49,6 +49,7 @@ import { Menu, entry, infoPanel, type MenuConfig, type MenuEntry } from "./menu.
 import { listedEntry, ResumeView, type ResumeEntry } from "./resume.ts";
 import { ancestry, family, lastActive, threadEntries } from "./threads.ts";
 import { PictureViewer } from "./viewer.ts";
+import { goodbye } from "./goodbye.ts";
 import {
   ChoicePrompt,
   QuestionPrompt,
@@ -1645,9 +1646,9 @@ export class App {
     this.#prompt = null;
     this.#requests = [];
     // What was still working, before a host in this process stops it on the way out.
-    const working = this.#ownThreads()
-      .filter((thread) => thread.busy && thread.status !== "closed")
-      .map((thread) => thread.id);
+    const working = this.#ownThreads().filter(
+      (thread) => thread.busy && thread.status !== "closed",
+    );
     // Leaving detaches from the host; a server keeps the threads working.
     await this.#client.close().catch(() => {});
     for (const timer of [
@@ -1664,44 +1665,14 @@ export class App {
     if (this.#stderrWrite) process.stderr.write = this.#stderrWrite;
     this.#in.pause();
     for (const undo of this.#unlisten.splice(0)) undo();
-    const server = this.#server;
-    if (this.#next !== undefined) {
-      process.stdout.write(
-        style.muted(`Connecting to ${this.#next || "this machine's 1harness"}…\n`),
-      );
-    } else {
-      const on = server.local ? "" : ` -S ${server.label}`;
-      // The thread on screen, or one still working when that one has nothing to go back to.
-      const target =
-        current && current.runCount > 0
-          ? current
-          : working.length > 0
-            ? this.#client.threads.get(working[0] ?? "")
-            : undefined;
-      const hint = !target
-        ? null
-        : this.#stored
-          ? `1harness${on} --resume ${target.id}`
-          : target.info.threadId
-            ? `1harness${on} --harness ${target.harness} --resume ${target.info.threadId}`
-            : null;
-      // A server keeps what was working going; this process takes it down with it.
-      const they = working.length === 1 ? "it" : "they";
-      if (working.length > 0)
-        process.stdout.write(
-          style.muted(
-            server.inProcess
-              ? `${working.join(", ")} stopped working: without a server, ${they} ran in this 1harness.\n`
-              : `${working.join(", ")} ${working.length === 1 ? "is" : "are"} still working; ${they} ${working.length === 1 ? "carries" : "carry"} on in 1harness's server${server.local ? "" : ` on ${server.label}`}.\n`,
-          ),
-        );
-      if (hint)
-        process.stdout.write(
-          style.muted(
-            `${working.length > 0 && !server.inProcess ? "Come back" : "Resume"} with: ${hint}\n`,
-          ),
-        );
-    }
+    const said = goodbye({
+      next: this.#next,
+      server: this.#server,
+      stored: this.#stored,
+      current,
+      working,
+    });
+    for (const line of said) process.stdout.write(style.muted(`${line}\n`));
     this.#exited();
   }
 
