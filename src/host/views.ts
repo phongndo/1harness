@@ -1,3 +1,4 @@
+import { truncate } from "../core/wording.ts";
 import type { Usage } from "../core/events.ts";
 import type { ThreadListing, ThreadState } from "../protocol.ts";
 import type { ThreadRow, ThreadSummaryRow } from "../store/store.ts";
@@ -31,7 +32,7 @@ export function updatedAt(runs: readonly RunRecord[], createdAt: number): number
 }
 
 function clipText(text: string | null): string | null {
-  return text !== null && text.length > RUN_TEXT ? `${text.slice(0, RUN_TEXT)}…` : text;
+  return text === null ? null : truncate(text, RUN_TEXT);
 }
 
 /** A thread's last run as its state carries it, its message and reply clipped. */

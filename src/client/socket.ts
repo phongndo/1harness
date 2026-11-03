@@ -1,3 +1,4 @@
+import { errorMessage } from "../core/errors.ts";
 import { Agent, request, type ClientRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
 import {
@@ -159,7 +160,7 @@ export class SocketConnection implements HostConnection {
           this.#reviveFailure = null;
         },
         (failure: unknown) => {
-          const reason = `could not start the server again: ${failure instanceof Error ? failure.message : String(failure)}`;
+          const reason = `could not start the server again: ${errorMessage(failure)}`;
           this.#reviveFailure = reason;
           for (const tell of this.#onReviveFailure) tell(reason);
         },
@@ -172,7 +173,7 @@ export class SocketConnection implements HostConnection {
   /** A request's failure, with why the server could not be started again, if it could not. */
   #failure(error: unknown): unknown {
     if (this.#reviveFailure === null || !unreachable(error)) return error;
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     return new Error(`${message}; ${this.#reviveFailure}`, { cause: error });
   }
 

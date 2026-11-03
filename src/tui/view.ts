@@ -1,5 +1,5 @@
 import type { Report } from "../commands/registry.ts";
-import type { HarnessRequest, Item } from "../core/events.ts";
+import type { HarnessRequest, Item, NoticeLevel } from "../core/events.ts";
 import type { Message } from "../core/thread.ts";
 import { stripHandoff } from "../host/handoff.ts";
 import type { LogEntry, TurnTokens } from "../protocol.ts";
@@ -245,7 +245,7 @@ export class ThreadView {
   }
 
   /** A notice of the terminal's own. */
-  say(level: "info" | "warning" | "error", text: string): Extract<Block, { kind: "notice" }> {
+  say(level: NoticeLevel, text: string): Extract<Block, { kind: "notice" }> {
     return this.local({ kind: "notice", level, text });
   }
 
@@ -282,7 +282,7 @@ export class ThreadView {
    * A notice that comes of the log, such as why a turn failed, which
    * building the view again from the log shows again; `say` keeps its own.
    */
-  notice(level: "info" | "warning" | "error", text: string): void {
+  notice(level: NoticeLevel, text: string): void {
     this.transcript.add({ kind: "notice", level, text });
   }
 

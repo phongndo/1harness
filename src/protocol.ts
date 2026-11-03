@@ -18,6 +18,7 @@ import type {
   SessionOptions,
   TurnStatus,
   Usage,
+  NoticeLevel,
 } from "./core/events.ts";
 import type { FileMatch } from "./core/files.ts";
 import type { OperationInfo } from "./operations/operation.ts";
@@ -148,7 +149,7 @@ export interface HarnessInfo {
 
 /** What the host asks of the client running a command, or tells it. */
 export type UiRequest =
-  | { id: string; method: "notify"; level: "info" | "warning" | "error"; text: string }
+  | { id: string; method: "notify"; level: NoticeLevel; text: string }
   | { id: string; method: "report"; report: Report }
   | { id: string; method: "panel"; title: string; rows: [string, string][] }
   /** Answered with `ui.reply`: the chosen index, or null. */
@@ -166,7 +167,7 @@ export type UiRequest =
       id: string;
       method: "settle";
       progress: string;
-      level: "info" | "warning" | "error";
+      level: NoticeLevel;
       text: string;
     }
   | { id: string; method: "setInput"; text: string }
@@ -181,7 +182,7 @@ export type HostEvent =
   | { seq: number; type: "removed"; threadId: string }
   | { seq: number; type: "entry"; threadId: string; entry: LogEntry }
   /** Something every client should show, such as an extension that failed. */
-  | { seq: number; type: "notice"; level: "info" | "warning" | "error"; text: string }
+  | { seq: number; type: "notice"; level: NoticeLevel; text: string }
   | { seq: number; type: "ui"; clientId: string; request: UiRequest }
   /** A pending pick was answered or dropped; the client closes it. */
   | { seq: number; type: "ui.done"; clientId: string; id: string }

@@ -11,9 +11,11 @@ import {
   type RuntimeMode,
   type TurnStatus,
   type Usage,
+  type NoticeLevel,
 } from "../../core/events.ts";
 import { limitNotice } from "../../core/wording.ts";
-import { todoStatus, truncate } from "../text.ts";
+import { truncate } from "../../core/wording.ts";
+import { todoStatus } from "../text.ts";
 import { INIT_PROMPT } from "./prompts.ts";
 
 // The subset of the app-server protocol this driver reads. Generate the full
@@ -504,7 +506,7 @@ export class CodexTranslator {
   #lastAgentText: string | null = null;
   #repeats = new Set<string>();
 
-  notice(level: "info" | "warning" | "error", text: string): HarnessEvent {
+  notice(level: NoticeLevel, text: string): HarnessEvent {
     return {
       type: "item.completed",
       item: { kind: "notice", id: `codex-notice-${++this.#notices}`, level, text },

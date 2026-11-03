@@ -38,6 +38,20 @@ export const ASK = {
   fromAgent: (question: string) => `Another agent asks: ${question}`,
 };
 
+/** `value` cut to `limit` characters, the last of them an ellipsis, when it is longer. */
+export function truncate(value: string, limit: number): string {
+  return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+}
+
+/** `text` on one line, its runs of whitespace one space each, cut to `width`. */
+export function oneLine(text: string, width: number): string {
+  return truncate(text.replace(/\s+/g, " ").trim(), width);
+}
+
+export function plural(count: number, noun: string): string {
+  return `${count} ${count === 1 ? noun : `${noun}s`}`;
+}
+
 /** The last part of a path, as questions name files. */
 export function fileName(path: string): string {
   return path.split("/").at(-1) || path;

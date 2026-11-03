@@ -1,8 +1,8 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ReportSpan } from "../commands/registry.ts";
-import type { CommandAction, FileChange, Item, TodoStep } from "../core/events.ts";
-import { fileName } from "../core/wording.ts";
+import type { CommandAction, FileChange, Item, TodoStep, NoticeLevel } from "../core/events.ts";
+import { fileName, plural } from "../core/wording.ts";
 import {
   isLive,
   paintStatus,
@@ -63,7 +63,7 @@ export type Block =
    * it changed with their lines added and removed.
    */
   | { kind: "worked"; text: string; files: { path: string; added: number; removed: number }[] }
-  | { kind: "notice"; level: "info" | "warning" | "error"; text: string }
+  | { kind: "notice"; level: NoticeLevel; text: string }
   /** A 1harness command's output, such as /mcp: a heading over aligned lines. */
   | { kind: "report"; title: string; lines: ReportSpan[][] }
   /** The agents a turn started: one row each, with its status and how it ended. */
@@ -856,10 +856,6 @@ function todoRows(steps: readonly TodoStep[], width: number): string[] {
 // Tool groups
 
 type Category = "edit" | "command" | "read" | "search" | "web" | "fetch" | "agent" | "other";
-
-function plural(count: number, noun: string): string {
-  return `${count} ${count === 1 ? noun : `${noun}s`}`;
-}
 
 function times(count: number): string {
   return count === 1 ? "once" : count === 2 ? "twice" : `${count} times`;

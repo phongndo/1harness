@@ -20,9 +20,10 @@ import type {
   RequestResponse,
   SessionInfo,
   SessionOptions,
+  NoticeLevel,
 } from "../core/events.ts";
 import { looksLikeThreadId, shortThreadId } from "../core/thread-id.ts";
-import { errorMessage } from "../core/thread.ts";
+import { errorMessage } from "../core/errors.ts";
 import { HARNESS_STATES, contextUsed, formatCost, limitDetail } from "../core/wording.ts";
 import type { ClientEvent, HostClient } from "../client/client.ts";
 import {
@@ -322,7 +323,7 @@ export class App {
     | { kind: "lineage"; view: ResumeView }
     | null = null;
   /** The host's progress lines, by request. */
-  #progress = new Map<string, (level: "info" | "warning" | "error", text: string) => void>();
+  #progress = new Map<string, (level: NoticeLevel, text: string) => void>();
   /** The lists that open under the composer: commands, their words, and files. */
   #suggestions: Suggestions;
 
@@ -2907,7 +2908,7 @@ export class App {
     return this.#info?.cwd ?? this.#settings.cwd;
   }
 
-  #notice(level: "info" | "warning" | "error", text: string): void {
+  #notice(level: NoticeLevel, text: string): void {
     this.#view.say(level, text);
     this.#schedule();
   }

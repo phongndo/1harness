@@ -1,3 +1,4 @@
+import { errorMessage } from "../core/errors.ts";
 import { serverHello } from "./socket.ts";
 import { loadHosts, resolveServer, saveHosts } from "./hosts.ts";
 
@@ -25,7 +26,7 @@ async function check(spec: string | undefined): Promise<boolean> {
     );
     return true;
   } catch (error) {
-    line(`${label}  ${error instanceof Error ? error.message : String(error)}`);
+    line(`${label}  ${errorMessage(error)}`);
     return false;
   }
 }
@@ -86,7 +87,7 @@ export async function whoami(spec: string | undefined): Promise<number> {
     );
     return 0;
   } catch (error) {
-    line(`${label}: ${error instanceof Error ? error.message : String(error)}`);
+    line(`${label}: ${errorMessage(error)}`);
     return 1;
   }
 }

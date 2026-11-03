@@ -13,10 +13,12 @@ import type {
   RuntimeMode,
   ToolCategory,
   Usage,
+  NoticeLevel,
 } from "../../core/events.ts";
 import { unifiedDiff } from "../../core/diff.ts";
 import { ANSWER, askFor, askForChanges } from "../../core/wording.ts";
-import { record, summarizeInput, text, truncate } from "../text.ts";
+import { truncate } from "../../core/wording.ts";
+import { record, summarizeInput, text } from "../text.ts";
 
 // OpenCode 2's server API in the parts 1harness reads. Events arrive on
 // `/api/event` as `{ type, data }`; tools are named by `session.tool.input.started`
@@ -784,7 +786,7 @@ export class OpenCodeTranslator {
     return events;
   }
 
-  notice(level: "info" | "warning" | "error", message: string): HarnessEvent {
+  notice(level: NoticeLevel, message: string): HarnessEvent {
     return {
       type: "item.completed",
       item: { kind: "notice", id: `opencode-notice-${randomUUID()}`, level, text: message },

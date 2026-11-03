@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { registerHooks } from "node:module";
 import { pathToFileURL } from "node:url";
-import type { CommandRegistry, CommandUI, NoticeLevel, ReportSpan } from "../commands/registry.ts";
+import type { CommandRegistry, CommandUI, ReportSpan } from "../commands/registry.ts";
+import type { NoticeLevel } from "../core/events.ts";
 import type {
   HarnessRequest,
   McpServerConfig,
@@ -12,7 +13,8 @@ import type {
   UserInput,
 } from "../core/events.ts";
 import { loadMcpConfig } from "../core/mcp-config.ts";
-import { errorMessage, type Thread, type ThreadEvent } from "../core/thread.ts";
+import { errorMessage } from "../core/errors.ts";
+import { type Thread, type ThreadEvent } from "../core/thread.ts";
 import {
   choose,
   type ExtensionAPI,

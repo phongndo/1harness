@@ -1,3 +1,4 @@
+import { errorMessage } from "../core/errors.ts";
 import { randomUUID } from "node:crypto";
 import type { Host } from "../host/host.ts";
 import { RpcError, type HostEvent, type Method, type Params, type Result } from "../protocol.ts";
@@ -50,7 +51,7 @@ export class LocalConnection implements HostConnection {
       return copy(result);
     } catch (error) {
       if (error instanceof RpcError) throw error;
-      throw new Error(error instanceof Error ? error.message : String(error), { cause: error });
+      throw new Error(errorMessage(error), { cause: error });
     }
   }
 

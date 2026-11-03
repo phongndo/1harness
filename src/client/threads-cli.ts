@@ -1,6 +1,6 @@
 import { parseArgs } from "node:util";
 import { shortThreadId } from "../core/thread-id.ts";
-import { shortTime } from "../core/wording.ts";
+import { oneLine, shortTime } from "../core/wording.ts";
 import type { LogEntry, ThreadListing } from "../protocol.ts";
 import type { HostClient } from "./client.ts";
 
@@ -11,11 +11,6 @@ Lists 1harness's threads, newest first: this folder's, or every folder's with
 --all. Words search titles and what was said. \`show\` prints a thread's
 transcript. 1harness -r <id> reopens one.
 `;
-
-function oneLine(text: string, width: number): string {
-  const line = text.replace(/\s+/g, " ").trim();
-  return line.length > width ? `${line.slice(0, width - 1)}…` : line;
-}
 
 /** A transcript as plain text: messages, replies, commands, answers, and notices. */
 export function transcriptText(entries: readonly LogEntry[]): string {

@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { configDir, socketFile } from "../core/paths.ts";
-import { errorMessage } from "../core/thread.ts";
+import { errorMessage } from "../core/errors.ts";
 import type { ServerTarget } from "./socket.ts";
 
 /** Servers known by a short name, such as `z`, kept in `hosts.json` in the config folder. */

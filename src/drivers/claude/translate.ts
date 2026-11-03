@@ -20,10 +20,12 @@ import {
   type TodoStep,
   type ToolCategory,
   type Usage,
+  type NoticeLevel,
 } from "../../core/events.ts";
 import { unifiedDiff } from "../../core/diff.ts";
 import { limitNotice } from "../../core/wording.ts";
-import { record, summarizeInput, text, todoStatus, truncate } from "../text.ts";
+import { truncate } from "../../core/wording.ts";
+import { record, summarizeInput, text, todoStatus } from "../text.ts";
 
 type ContentBlock = SDKAssistantMessage["message"]["content"][number];
 type StreamEvent = SDKPartialAssistantMessage["event"];
@@ -303,11 +305,11 @@ export class ClaudeTranslator {
     this.replay = options.replay ?? false;
   }
 
-  #noticeUpdate(id: string, level: "info" | "warning" | "error", message: string): HarnessEvent {
+  #noticeUpdate(id: string, level: NoticeLevel, message: string): HarnessEvent {
     return { type: "item.updated", item: { kind: "notice", id, level, text: message } };
   }
 
-  notice(level: "info" | "warning" | "error", message: string): HarnessEvent {
+  notice(level: NoticeLevel, message: string): HarnessEvent {
     return {
       type: "item.completed",
       item: { kind: "notice", id: `claude-notice-${++this.#ids}`, level, text: message },

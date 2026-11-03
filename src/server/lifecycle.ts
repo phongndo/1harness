@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { serverHello, type ServerTarget } from "../client/socket.ts";
 import { configDir, serverLog, socketFile, storeFile } from "../core/paths.ts";
 import { loadSettings } from "../core/settings.ts";
-import { errorMessage } from "../core/thread.ts";
+import { errorMessage } from "../core/errors.ts";
 import { registerConfiguredAgents } from "../drivers/index.ts";
 import { Host } from "../host/host.ts";
 import type { ServerHello } from "../protocol.ts";

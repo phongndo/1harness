@@ -16,7 +16,7 @@ import {
   type ThreadSummary,
   type UserInput,
 } from "../../core/events.ts";
-import { errorMessage } from "../../core/thread.ts";
+import { errorMessage } from "../../core/errors.ts";
 import { ANSWER, ASK, askFor, askForChanges, fileName } from "../../core/wording.ts";
 import { readImage } from "../images.ts";
 import { JsonRpcProcess, RpcError } from "../jsonrpc.ts";

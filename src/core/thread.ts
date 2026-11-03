@@ -1,3 +1,4 @@
+import { errorMessage } from "./errors.ts";
 import { randomUUID } from "node:crypto";
 import {
   SESSION_METHODS,
@@ -974,10 +975,6 @@ export function appendDelta(item: Item, chunk: string): Item {
     default:
       return item;
   }
-}
-
-export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 /** Resolves with undefined if `promise` takes longer than `ms`. */

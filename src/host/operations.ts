@@ -1,3 +1,4 @@
+import { truncate } from "../core/wording.ts";
 import {
   isRuntimeMode,
   modeRank,
@@ -52,10 +53,6 @@ function required(input: Record<string, unknown>, name: string): string {
   const value = text(input, name);
   if (!value) throw new OperationError("invalid_request", `${name} is required`);
   return value;
-}
-
-function clip(value: string): string {
-  return value.length > TEXT_LIMIT ? `${value.slice(0, TEXT_LIMIT)}…` : value;
 }
 
 const THREAD_ID = { type: "string", description: "A thread's ID." };
@@ -526,13 +523,13 @@ function entryView(entry: LogEntry): ({ type: string } & Record<string, unknown>
 function itemView(item: Item, from: string): ({ type: string } & Record<string, unknown>) | null {
   switch (item.kind) {
     case "user_message":
-      return { type: "message", from, text: clip(item.text) };
+      return { type: "message", from, text: truncate(item.text, TEXT_LIMIT) };
     case "assistant_message":
-      return { type: "reply", text: clip(item.text) };
+      return { type: "reply", text: truncate(item.text, TEXT_LIMIT) };
     case "command":
       return {
         type: "command",
-        command: clip(item.command),
+        command: truncate(item.command, TEXT_LIMIT),
         exitCode: item.exitCode,
         status: item.status,
       };
@@ -547,7 +544,7 @@ function itemView(item: Item, from: string): ({ type: string } & Record<string, 
         type: "tool",
         tool: item.tool,
         server: item.server,
-        summary: clip(item.summary),
+        summary: truncate(item.summary, TEXT_LIMIT),
         status: item.status,
       };
     case "web_search":
@@ -557,7 +554,7 @@ function itemView(item: Item, from: string): ({ type: string } & Record<string, 
     case "todo_list":
       return { type: "todo", steps: item.steps };
     case "plan":
-      return { type: "plan", text: clip(item.text) };
+      return { type: "plan", text: truncate(item.text, TEXT_LIMIT) };
     case "notice":
       return { type: "notice", level: item.level, text: item.text };
     case "reasoning":

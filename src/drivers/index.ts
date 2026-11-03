@@ -3,7 +3,7 @@ import { accessSync, constants, readFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import type { HarnessId, HarnessSession, SessionOptions } from "../core/events.ts";
 import type { HarnessInfo } from "../protocol.ts";
-import { errorMessage } from "../core/thread.ts";
+import { errorMessage } from "../core/errors.ts";
 import { AcpSession, type AcpAgentSpec } from "./acp/session.ts";
 import { ClaudeSession, claudeSessionTitle } from "./claude/session.ts";
 import { CodexSession } from "./codex/session.ts";

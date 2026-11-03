@@ -1,3 +1,4 @@
+import { errorMessage } from "../core/errors.ts";
 import {
   RUNTIME_MODES,
   isRuntimeMode,
@@ -191,7 +192,7 @@ export class AcpAgent {
       } catch (error) {
         // What the server refused is the editor's to show, not a fault here.
         if (error instanceof RpcError) throw error;
-        throw new RpcError(-32603, error instanceof Error ? error.message : String(error));
+        throw new RpcError(-32603, errorMessage(error));
       }
     });
     this.#peer.onNotification((method, params) => {

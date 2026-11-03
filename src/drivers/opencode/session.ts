@@ -18,7 +18,7 @@ import {
   type TurnStatus,
   type UserInput,
 } from "../../core/events.ts";
-import { errorMessage } from "../../core/thread.ts";
+import { errorMessage } from "../../core/errors.ts";
 import { readImage } from "../images.ts";
 import { SessionEvents, started } from "../session-events.ts";
 import { OpenCodeServer } from "./server.ts";

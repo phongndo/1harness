@@ -7,7 +7,7 @@ import type {
 } from "../commands/registry.ts";
 import type { NativeCommand } from "../core/events.ts";
 import type { FileMatch } from "../core/files.ts";
-import { errorMessage } from "../core/thread.ts";
+import { errorMessage } from "../core/errors.ts";
 import { BoundedMap } from "./cache.ts";
 import type { Editor } from "./editor.ts";
 import type { Key } from "./input.ts";

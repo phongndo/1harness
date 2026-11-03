@@ -1,3 +1,4 @@
+import { errorMessage } from "../core/errors.ts";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Host } from "../host/host.ts";
@@ -414,7 +415,7 @@ function header(request: IncomingMessage, name: string): string | null {
 function errorBody(error: unknown): { code: string; message: string } {
   return {
     code: error instanceof RpcError ? error.code : "error",
-    message: error instanceof Error ? error.message : String(error),
+    message: errorMessage(error),
   };
 }
 

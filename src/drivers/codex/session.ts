@@ -26,7 +26,7 @@ import {
   type ThreadSummary,
   type UserInput,
 } from "../../core/events.ts";
-import { errorMessage } from "../../core/thread.ts";
+import { errorMessage } from "../../core/errors.ts";
 import { policyHookOutput } from "../../core/tools.ts";
 import { ANSWER, ASK, PLAN_TITLE, askForChanges, planOptions } from "../../core/wording.ts";
 import { HOOK_TIMEOUT_SEC, HookServer } from "./hook-server.ts";

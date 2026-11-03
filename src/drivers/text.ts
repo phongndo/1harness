@@ -1,4 +1,5 @@
 import type { TodoStep } from "../core/events.ts";
+import { truncate } from "../core/wording.ts";
 
 // Reading the loosely typed values harnesses send, the same way in every driver.
 
@@ -8,10 +9,6 @@ export function record(value: unknown): Record<string, unknown> {
 
 export function text(value: unknown): string {
   return typeof value === "string" ? value : "";
-}
-
-export function truncate(value: string, limit: number): string {
-  return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
 }
 
 /**

@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { errorMessage } from "../core/thread.ts";
+import { errorMessage } from "../core/errors.ts";
 import { mcpReply, rpcError, type JsonRpcMessage, type McpEndpoint } from "./mcp.ts";
 
 const MAX_BODY_BYTES = 4 * 1024 * 1024;

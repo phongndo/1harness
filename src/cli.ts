@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { errorMessage } from "./core/errors.ts";
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -438,7 +439,7 @@ try {
     await main(args, server, version);
   }
 } catch (error) {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   process.stderr.write(`1harness: ${message}\n`);
   process.exitCode = 2;
 }

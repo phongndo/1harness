@@ -9,12 +9,13 @@ import {
 } from "../core/events.ts";
 import {
   Thread,
-  errorMessage,
   messageText,
   type MessageOrigin,
   type SavedThread,
   type ThreadEvent,
 } from "../core/thread.ts";
+import { errorMessage } from "../core/errors.ts";
+import { oneLine } from "../core/wording.ts";
 import { createSession, drivers, findDriver, harnessName as label } from "../drivers/index.ts";
 import type { ExtensionHost } from "../extensions/host.ts";
 import type { ToolGrant, ToolServer } from "../extensions/tool-server.ts";
@@ -207,8 +208,7 @@ const TITLE_LENGTH = 48;
 
 /** A one-line title from the start of a message. */
 export function titleFrom(text: string): string {
-  const line = text.replace(/\s+/g, " ").trim();
-  return line.length > TITLE_LENGTH ? `${line.slice(0, TITLE_LENGTH - 1)}…` : line;
+  return oneLine(text, TITLE_LENGTH);
 }
 
 /**

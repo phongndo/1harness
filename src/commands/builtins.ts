@@ -1,7 +1,7 @@
 import type { McpAction, McpServer, ModelOption } from "../core/events.ts";
 import type { HarnessInfo, ThreadListing } from "../protocol.ts";
 import { looksLikeThreadId, shortThreadId } from "../core/thread-id.ts";
-import { errorMessage } from "../core/thread.ts";
+import { errorMessage } from "../core/errors.ts";
 import { EFFORT_DESCRIPTIONS, HARNESS_STATES, MODE_DESCRIPTIONS } from "../core/wording.ts";
 import {
   completion,

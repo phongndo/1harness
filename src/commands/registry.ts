@@ -9,6 +9,7 @@ import type {
   RuntimeMode,
   SessionInfo,
   ThreadSummary,
+  NoticeLevel,
 } from "../core/events.ts";
 import type { Message } from "../core/thread.ts";
 import type { OperationInfo } from "../operations/operation.ts";
@@ -34,8 +35,6 @@ export interface PickEntry {
   /** The tab it goes under, when the pick has tabs. */
   group?: string;
 }
-
-export type NoticeLevel = "info" | "warning" | "error";
 
 /** How a client shows things to the user and asks them, for commands to use. */
 export interface CommandUI {

@@ -1,4 +1,4 @@
-import { errorMessage } from "../core/thread.ts";
+import { errorMessage } from "../core/errors.ts";
 import { mcpContent, type OperationInfo } from "./operation.ts";
 
 // The newest first; a client asking for another gets the newest.

@@ -10,6 +10,7 @@ import {
   type HarnessId,
   type SessionOptions,
   type UserInput,
+  type NoticeLevel,
 } from "../core/events.ts";
 import { FileIndex, mentionedImages } from "../core/files.ts";
 import { randomUUID } from "node:crypto";
@@ -17,7 +18,8 @@ import { homedir } from "node:os";
 import { join as joinPath, resolve as resolvePath } from "node:path";
 import { configDir, stateDir } from "../core/paths.ts";
 import { DEFAULT_AGENT_MODE, loadLastHarness, loadSettings } from "../core/settings.ts";
-import { errorMessage, type Thread } from "../core/thread.ts";
+import { errorMessage } from "../core/errors.ts";
+import { type Thread } from "../core/thread.ts";
 import { isThreadIdPrefix, shortThreadId } from "../core/thread-id.ts";
 import { formatTokens } from "../core/wording.ts";
 import {
@@ -933,12 +935,7 @@ export class Host {
    * Adds a line of the host's own to a thread's transcript, or changes the one
    * with `id`; returns its ID.
    */
-  #notice(
-    threadId: string,
-    level: "info" | "warning" | "error",
-    text: string,
-    id?: string,
-  ): string {
+  #notice(threadId: string, level: NoticeLevel, text: string, id?: string): string {
     const noticeId = id ?? `notice-${this.#feed.next}`;
     if (!this.manager.get(threadId)) return noticeId;
     const entry = this.#log(threadId).item(
@@ -968,7 +965,7 @@ export class Host {
   }
 
   /** Something every client shows, such as an extension that failed. */
-  #broadcast(level: "info" | "warning" | "error", text: string): void {
+  #broadcast(level: NoticeLevel, text: string): void {
     this.#feed.emit({ type: "notice", level, text });
   }
 

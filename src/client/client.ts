@@ -1,3 +1,4 @@
+import { errorMessage } from "../core/errors.ts";
 import type {
   HarnessInfo,
   HelloParams,
@@ -131,7 +132,7 @@ export class HostClient {
       this.#tell({
         type: "connection",
         state: "reconnecting",
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
       setTimeout(() => void this.#resync(), 1000).unref();
     }

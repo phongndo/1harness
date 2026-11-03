@@ -101,9 +101,9 @@ export type Item =
   | { kind: "todo_list"; id: string; steps: TodoStep[] }
   | { kind: "plan"; id: string; text: string }
   | { kind: "agent"; id: string; description: string; summary: string; status: ItemStatus }
-  | { kind: "notice"; id: string; level: "info" | "warning" | "error"; text: string };
+  | { kind: "notice"; id: string; level: NoticeLevel; text: string };
 
-export type ItemKind = Item["kind"];
+export type NoticeLevel = "info" | "warning" | "error";
 
 /** Tool calls that read, search, or fetch are grouped as exploration. */
 export type ToolCategory = "read" | "search" | "fetch" | "other";

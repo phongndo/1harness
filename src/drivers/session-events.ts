@@ -1,9 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { AsyncQueue } from "../core/async-queue.ts";
-import type { HarnessEvent, Item, SessionInfo } from "../core/events.ts";
+import type { HarnessEvent, Item, SessionInfo, NoticeLevel } from "../core/events.ts";
 import { appendDelta } from "../core/thread.ts";
-
-type NoticeLevel = "info" | "warning" | "error";
 
 /** The harness's ID for the session, which its requests name; it has none until it starts. */
 export function started(info: SessionInfo): string {

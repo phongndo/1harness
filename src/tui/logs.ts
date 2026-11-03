@@ -1,5 +1,6 @@
 import type { HostClient } from "../client/client.ts";
-import { appendDelta, errorMessage } from "../core/thread.ts";
+import { errorMessage } from "../core/errors.ts";
+import { appendDelta } from "../core/thread.ts";
 import type { LogEntry, ThreadState } from "../protocol.ts";
 import { agentRowOf } from "./agents.ts";
 import type { RenderContext } from "./transcript.ts";
