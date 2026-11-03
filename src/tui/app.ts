@@ -945,65 +945,79 @@ export class App {
     announce = true,
     fallback = true,
   ): Promise<void> {
-    const previous = this.#current;
-    const startedOn = this.#currentId;
     const before = { harness: this.#harness, settings: this.#settings };
-    this.#openedId = null;
-    this.#announce = settings.resume
-      ? `Resuming ${harness} thread ${settings.resume}`
-      : announce
-        ? `New ${harness} thread`
-        : null;
-    this.#opening++;
-    try {
+    const opened = await this.#opened({
+      announce: settings.resume
+        ? `Resuming ${harness} thread ${settings.resume}`
+        : announce
+          ? `New ${harness} thread`
+          : null,
       // The host announces the thread as it starts, which shows it.
-      const state = await this.#client.call("thread.open", { harness, settings }).finally(() => {
-        this.#opening--;
-      });
-      if (this.#stayed(startedOn) && this.#currentId !== state.id) this.#show(state);
-    } catch (error) {
-      this.#harness = before.harness;
-      this.#settings = before.settings;
-      this.#announce = null;
-      // Back where the user was, unless they went elsewhere meanwhile.
-      const stayed = this.#stayed(startedOn);
-      const back = stayed && previous !== undefined && this.#showIfOpen(previous.id);
-      // Nothing to go back to: a thread on the harness that was in use, to type in.
-      // The same harness again would only fail again.
-      if (stayed && !back && fallback && !this.#live && before.harness !== harness)
-        await this.#open(before.harness, { ...before.settings, resume: null }, false, false);
-      this.#notice("error", `Could not start ${harness}: ${errorMessage(error)}`);
-      return;
-    } finally {
-      this.#announce = null;
-      this.#releaseHeld();
-    }
+      call: () => this.#client.call("thread.open", { harness, settings }),
+      again: false,
+      failed: () => {
+        this.#harness = before.harness;
+        this.#settings = before.settings;
+        return `Could not start ${harness}`;
+      },
+      // A thread on the harness that was in use; the same harness again would only fail again.
+      fallback:
+        fallback && before.harness !== harness
+          ? () => this.#open(before.harness, { ...before.settings, resume: null }, false, false)
+          : null,
+    });
     // As asked for, since the harness may not report them all yet.
-    this.#settings = { ...settings, resume: null };
+    if (opened) this.#settings = { ...settings, resume: null };
   }
 
   /** Opens an earlier thread: 1harness's own, by its ID or the start of it, or a harness's by its ID. */
   async #resume(id: string, harness: HarnessId): Promise<void> {
+    await this.#opened({
+      announce: `Resuming ${id}`,
+      call: () =>
+        this.#client.call("thread.resume", {
+          id,
+          harness,
+          settings: { ...this.#settings, resume: null },
+        }),
+      again: true,
+      failed: () => `Could not resume ${id}`,
+      fallback: () => this.#open(harness, { ...this.#settings, resume: null }, false),
+    });
+  }
+
+  /**
+   * Shows the thread `call` opens, unless the user went elsewhere meanwhile;
+   * `again` shows it even where its first state already did. If it cannot
+   * open, the user is back where they were, or, with nothing to go back to,
+   * on what `fallback` opens to type in, and `failed` says what went wrong.
+   * Returns whether it opened.
+   */
+  async #opened(how: {
+    announce: string | null;
+    call: () => Promise<ThreadState>;
+    again: boolean;
+    failed: () => string;
+    fallback: (() => Promise<void>) | null;
+  }): Promise<boolean> {
     const previous = this.#current;
     const startedOn = this.#currentId;
-    this.#announce = `Resuming ${id}`;
     this.#openedId = null;
+    this.#announce = how.announce;
     this.#opening++;
     try {
-      const state = await this.#client
-        .call("thread.resume", { id, harness, settings: { ...this.#settings, resume: null } })
-        .finally(() => {
-          this.#opening--;
-        });
-      if (this.#stayed(startedOn)) this.#show(state);
+      const state = await how.call().finally(() => {
+        this.#opening--;
+      });
+      if (this.#stayed(startedOn) && (how.again || this.#currentId !== state.id)) this.#show(state);
+      return true;
     } catch (error) {
-      this.#announce = null;
+      const failure = how.failed();
       const stayed = this.#stayed(startedOn);
       const back = stayed && previous !== undefined && this.#showIfOpen(previous.id);
-      // With nothing to show, start somewhere to type.
-      if (stayed && !back && !this.#live)
-        await this.#open(harness, { ...this.#settings, resume: null }, false);
-      this.#notice("error", `Could not resume ${id}: ${errorMessage(error)}`);
+      if (stayed && !back && !this.#live && how.fallback) await how.fallback();
+      this.#notice("error", `${failure}: ${errorMessage(error)}`);
+      return false;
     } finally {
       this.#announce = null;
       this.#releaseHeld();
