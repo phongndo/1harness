@@ -13,6 +13,7 @@ let spec: AcpAgentSpec;
  * A stand-in for an ACP agent. A prompt's text says what it does: "die" starts
  * a tool call and a reply, then exits; anything else ends the turn. With
  * FAKE_MODELS set, it offers models, and refuses the one named "missing".
+ * With FAKE_MODES set, it offers modes and refuses to switch them.
  */
 const FAKE = `import { createInterface } from "node:readline";
 const send = (message) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\\n");
@@ -31,7 +32,13 @@ for await (const line of createInterface({ input: process.stdin })) {
         ...(process.env.FAKE_MODELS
           ? { configOptions: [{ id: "model", currentValue: "small", options: [{ value: "small", name: "Small" }, { value: "big", name: "Big" }] }] }
           : {}),
+        ...(process.env.FAKE_MODES
+          ? { modes: { currentModeId: "ask", availableModes: [{ id: "ask", name: "Ask" }, { id: "yolo", name: "Yolo" }, { id: "plan", name: "Plan" }] } }
+          : {}),
       });
+      break;
+    case "session/set_mode":
+      send({ id: message.id, error: { code: -32603, message: "modes are locked" } });
       break;
     case "session/set_config_option":
       if (message.params.value === "missing")
@@ -141,6 +148,27 @@ describe("AcpSession", () => {
       await refused.close();
     } finally {
       delete process.env["FAKE_MODELS"];
+    }
+  });
+
+  it("warns when the agent will not switch to the modes asked", async () => {
+    process.env["FAKE_MODES"] = "1";
+    const session = new AcpSession(
+      spec,
+      { ...options, cwd: root, runtimeMode: "full-access", interactionMode: "plan" },
+      "test",
+    );
+    const { events } = collect(session);
+    try {
+      await session.start();
+      assert.equal(session.info.runtimeMode, "supervised");
+      assert.equal(session.info.interactionMode, "default");
+      const warned = warnings(events).join("\n");
+      assert.match(warned, /Could not use full-access: modes are locked/);
+      assert.match(warned, /Could not start in plan mode: modes are locked/);
+    } finally {
+      delete process.env["FAKE_MODES"];
+      await session.close();
     }
   });
 

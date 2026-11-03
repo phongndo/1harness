@@ -588,16 +588,15 @@ export class OpenCodeSession implements HarnessSession {
       );
     });
     await Promise.all(added);
-    const servers = await this.#data<{ name: string }[]>("/api/mcp").catch(() => []);
+    // Unlisted servers leave their tools under the names OpenCode joins them by.
+    const servers = await this.#list<{ name: string }>("/api/mcp", "MCP servers");
     this.#translator.mcpServers = servers.map((server) => server.name);
   }
 
   async #loadCommands(): Promise<void> {
     const [commands, skills] = await Promise.all([
-      this.#data<{ name: string; description?: string }[]>("/api/command").catch(() => []),
-      this.#data<{ id: string; name: string; description?: string }[]>("/api/skill").catch(
-        () => [],
-      ),
+      this.#list<{ name: string; description?: string }>("/api/command", "commands"),
+      this.#list<{ id: string; name: string; description?: string }>("/api/skill", "skills"),
     ]);
     this.#commands = [
       ...commands.map((command) => ({
@@ -694,6 +693,16 @@ export class OpenCodeSession implements HarnessSession {
 
   #agentInfo(): OcAgent | undefined {
     return this.#agents.find((agent) => agent.id === this.#agent);
+  }
+
+  /** A listing the session goes on without, saying so if it fails. */
+  async #list<T>(path: string, what: string): Promise<T[]> {
+    try {
+      return await this.#data<T[]>(path);
+    } catch (error) {
+      this.#events.notice("warning", `Could not list ${LABEL}'s ${what}: ${errorMessage(error)}`);
+      return [];
+    }
   }
 
   /** A request's `data`, which every read answers with. */

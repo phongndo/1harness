@@ -228,7 +228,10 @@ export class AcpSession implements HarnessSession {
     // thread manager refuses the thread if the agent still runs broader than asked.
     const requested = this.#options.runtimeMode;
     const mode = fitRuntimeMode(requested, this.capabilities.runtimeModes);
-    if (mode && mode !== this.info.runtimeMode) await this.setRuntimeMode(mode).catch(() => {});
+    if (mode && mode !== this.info.runtimeMode)
+      await this.setRuntimeMode(mode).catch((error: unknown) =>
+        this.#events.notice("warning", `Could not use ${mode}: ${errorMessage(error)}`),
+      );
     if (mode && mode !== requested && this.info.runtimeMode === mode)
       this.#events.notice(
         "warning",
@@ -236,7 +239,9 @@ export class AcpSession implements HarnessSession {
       );
     // Plan is one of the agent's modes, so it goes on after the runtime mode.
     if (this.#options.interactionMode === "plan" && this.capabilities.planMode) {
-      await this.setInteractionMode("plan").catch(() => {});
+      await this.setInteractionMode("plan").catch((error: unknown) =>
+        this.#events.notice("warning", `Could not start in plan mode: ${errorMessage(error)}`),
+      );
     }
     this.#events.info(this.info);
   }

@@ -12,7 +12,8 @@ let opencode: string;
 /**
  * A stand-in for `opencode serve`, with one session. A prompt of "ask" starts
  * a turn that asks a permission. Interrupting always fails, and a turn starts
- * just after, as when the stop came before OpenCode began the turn.
+ * just after, as when the stop came before OpenCode began the turn. With
+ * FAKE_NO_LISTS set, listing MCP servers, commands, and skills fails.
  */
 const FAKE = `import { createServer } from "node:http";
 const streams = [];
@@ -28,6 +29,8 @@ const server = createServer((request, response) => {
       response.end(JSON.stringify(value));
     };
     const path = new URL(request.url, "http://localhost").pathname;
+    if (process.env.FAKE_NO_LISTS && ["/api/mcp", "/api/command", "/api/skill"].includes(path))
+      return json(500, { message: "broken" });
     switch (path) {
       case "/api/event":
         response.writeHead(200, { "content-type": "text/event-stream" });
@@ -122,6 +125,30 @@ describe("OpenCodeSession", () => {
         "the notice",
       );
     } finally {
+      await session.close();
+    }
+  });
+
+  it("warns when it cannot list MCP servers, commands, or skills", async () => {
+    process.env["FAKE_NO_LISTS"] = "1";
+    const session = new OpenCodeSession(config());
+    const events = collect(session);
+    try {
+      await session.start();
+      const warned = events.flatMap((event) =>
+        event.type === "item.completed" &&
+        event.item.kind === "notice" &&
+        event.item.level === "warning"
+          ? [event.item.text]
+          : [],
+      );
+      assert.deepEqual(warned.toSorted(), [
+        "Could not list OpenCode's MCP servers: broken",
+        "Could not list OpenCode's commands: broken",
+        "Could not list OpenCode's skills: broken",
+      ]);
+    } finally {
+      delete process.env["FAKE_NO_LISTS"];
       await session.close();
     }
   });
