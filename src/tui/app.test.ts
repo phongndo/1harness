@@ -155,7 +155,9 @@ async function start(
     done,
     async type(text) {
       keyboard.write(text);
-      await settle(30);
+      // The App reads keys as the stream hands them over, and draws what they did at once.
+      while (keyboard.readableLength > 0) await new Promise(setImmediate);
+      await new Promise(setImmediate);
     },
     async sees(pattern, timeoutMs = 3000) {
       const deadline = Date.now() + timeoutMs;
