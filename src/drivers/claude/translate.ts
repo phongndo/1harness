@@ -25,6 +25,7 @@ import {
 import { unifiedDiff } from "../../core/diff.ts";
 import { limitNotice } from "../../core/wording.ts";
 import { truncate } from "../../core/wording.ts";
+import { noticeEvent } from "../session-events.ts";
 import { record, summarizeInput, text, todoStatus } from "../text.ts";
 
 type ContentBlock = SDKAssistantMessage["message"]["content"][number];
@@ -309,13 +310,6 @@ export class ClaudeTranslator {
     return { type: "item.updated", item: { kind: "notice", id, level, text: message } };
   }
 
-  notice(level: NoticeLevel, message: string): HarnessEvent {
-    return {
-      type: "item.completed",
-      item: { kind: "notice", id: `claude-notice-${++this.#ids}`, level, text: message },
-    };
-  }
-
   /** Whether assistant text appeared since the last call; asking resets it. */
   takeSawText(): boolean {
     const saw = this.#sawText;
@@ -438,7 +432,7 @@ export class ClaudeTranslator {
         usage.output_tokens;
     }
     if (message.error) {
-      events.push(this.notice("error", `API error: ${message.error}`));
+      events.push(noticeEvent("claude", "error", `API error: ${message.error}`));
     }
     for (const block of message.message.content as ContentBlock[]) {
       switch (block.type) {
@@ -542,7 +536,7 @@ export class ClaudeTranslator {
     if (/<local-command-caveat>/.test(content)) return [];
     // Claude Code records an interruption as a placeholder prompt.
     if (/^\[Request interrupted by user[^\]]*\]$/.test(content.trim())) {
-      return [this.notice("info", "Interrupted")];
+      return [noticeEvent("claude", "info", "Interrupted")];
     }
     const output =
       /<local-command-(?:stdout|stderr)>([\s\S]*?)<\/local-command-(?:stdout|stderr)>/.exec(
@@ -550,7 +544,7 @@ export class ClaudeTranslator {
       );
     if (output) {
       const body = stripVTControlCharacters(output[1] ?? "").trim();
-      return body ? [this.notice("info", body)] : [];
+      return body ? [noticeEvent("claude", "info", body)] : [];
     }
     const command = /<command-name>([\s\S]*?)<\/command-name>/.exec(content);
     if (command) {
@@ -620,7 +614,7 @@ export class ClaudeTranslator {
     if (status !== "ok" && previous?.status !== status) {
       // Claude Code holds the turn until the limit resets rather than failing it.
       const waits = status === "exceeded" ? ". The turn waits for it to reset; esc stops it." : "";
-      events.push(this.notice("warning", `${limitNotice(limit)}${waits}`));
+      events.push(noticeEvent("claude", "warning", `${limitNotice(limit)}${waits}`));
     }
     events.push(this.#usageEvent());
     return events;
@@ -715,21 +709,26 @@ export class ClaudeTranslator {
       case "informational": {
         if (message.level === "info") return [];
         const level = message.level === "notice" ? "info" : "warning";
-        return [this.notice(message.prevent_continuation ? "warning" : level, message.content)];
+        return [
+          noticeEvent("claude", message.prevent_continuation ? "warning" : level, message.content),
+        ];
       }
       case "commands_changed":
         return [{ type: "commands.updated" }];
       case "local_command_output":
-        return [this.notice("info", message.content)];
+        return [noticeEvent("claude", "info", message.content)];
       case "notification":
         return [
-          this.notice(
+          noticeEvent(
+            "claude",
             message.priority === "high" || message.priority === "immediate" ? "warning" : "info",
             message.text,
           ),
         ];
       case "permission_denied":
-        return [this.notice("warning", `${message.tool_name} was denied: ${message.message}`)];
+        return [
+          noticeEvent("claude", "warning", `${message.tool_name} was denied: ${message.message}`),
+        ];
       case "task_started": {
         this.#work.set(message.task_id, {
           description: message.description,
@@ -768,7 +767,8 @@ export class ClaudeTranslator {
         if (item?.kind === "agent") return [];
         const status = message.status === "completed" ? "finished" : message.status;
         return [
-          this.notice(
+          noticeEvent(
+            "claude",
             message.status === "failed" ? "warning" : "info",
             `Background task ${status}: ${message.summary}`,
           ),

@@ -10,6 +10,17 @@ export function started(info: SessionInfo): string {
 }
 
 /**
+ * A notice from a driver; `source` starts its ID, such as `codex`. IDs are
+ * random, since a resumed thread already holds notices from its earlier sessions.
+ */
+export function noticeEvent(source: string, level: NoticeLevel, text: string): HarnessEvent {
+  return {
+    type: "item.completed",
+    item: { kind: "notice", id: `${source}-notice-${randomUUID()}`, level, text },
+  };
+}
+
+/**
  * A session's event stream. It keeps the items and requests the session has
  * opened and not ended, so a session that closes, or whose process dies, ends
  * them rather than leave work spinning and approvals waiting.
@@ -42,10 +53,7 @@ export class SessionEvents {
   }
 
   notice(level: NoticeLevel, text: string): void {
-    this.emit({
-      type: "item.completed",
-      item: { kind: "notice", id: `${this.#prefix}-notice-${randomUUID()}`, level, text },
-    });
+    this.emit(noticeEvent(this.#prefix, level, text));
   }
 
   /**

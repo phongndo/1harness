@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type {
   ApprovalAction,
   ApprovalOption,
@@ -13,11 +12,11 @@ import type {
   RuntimeMode,
   ToolCategory,
   Usage,
-  NoticeLevel,
 } from "../../core/events.ts";
 import { unifiedDiff } from "../../core/diff.ts";
 import { ANSWER, askFor, askForChanges } from "../../core/wording.ts";
 import { truncate } from "../../core/wording.ts";
+import { noticeEvent } from "../session-events.ts";
 import { record, summarizeInput, text } from "../text.ts";
 
 // OpenCode 2's server API in the parts 1harness reads. Events arrive on
@@ -707,9 +706,11 @@ export class OpenCodeTranslator {
           },
         ];
       case "session.compaction.ended":
-        return [this.notice("info", "Compacted the conversation")];
+        return [noticeEvent("opencode", "info", "Compacted the conversation")];
       case "session.compaction.failed":
-        return [this.notice("error", `Compaction failed: ${text(event.data.error?.message)}`)];
+        return [
+          noticeEvent("opencode", "error", `Compaction failed: ${text(event.data.error?.message)}`),
+        ];
       default:
         return [];
     }
@@ -784,13 +785,6 @@ export class OpenCodeTranslator {
       }
     }
     return events;
-  }
-
-  notice(level: NoticeLevel, message: string): HarnessEvent {
-    return {
-      type: "item.completed",
-      item: { kind: "notice", id: `opencode-notice-${randomUUID()}`, level, text: message },
-    };
   }
 }
 

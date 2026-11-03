@@ -11,10 +11,10 @@ import {
   type RuntimeMode,
   type TurnStatus,
   type Usage,
-  type NoticeLevel,
 } from "../../core/events.ts";
 import { limitNotice } from "../../core/wording.ts";
 import { truncate } from "../../core/wording.ts";
+import { noticeEvent } from "../session-events.ts";
 import { todoStatus } from "../text.ts";
 import { INIT_PROMPT } from "./prompts.ts";
 
@@ -490,7 +490,6 @@ function errorText(error: CodexTurnError | null): string | null {
  */
 export class CodexTranslator {
   threadId: string | null = null;
-  #notices = 0;
   #limits = new Map<string, RateLimit>();
   #warned = new Set<string>();
   #usage: Omit<Usage, "limits"> | null = null;
@@ -505,13 +504,6 @@ export class CodexTranslator {
   #reviewText: string | null = null;
   #lastAgentText: string | null = null;
   #repeats = new Set<string>();
-
-  notice(level: NoticeLevel, text: string): HarnessEvent {
-    return {
-      type: "item.completed",
-      item: { kind: "notice", id: `codex-notice-${++this.#notices}`, level, text },
-    };
-  }
 
   /** Whether the turn produced a proposed plan; asking clears it. */
   takePlan(turnId: string): boolean {
@@ -653,8 +645,9 @@ export class CodexTranslator {
         const name = String(params["name"]);
         return [
           params["success"] === true
-            ? this.notice("info", `Signed in to ${name}`)
-            : this.notice(
+            ? noticeEvent("codex", "info", `Signed in to ${name}`)
+            : noticeEvent(
+                "codex",
                 "warning",
                 `Could not sign in to ${name}${params["error"] ? `: ${String(params["error"])}` : ""}`,
               ),
@@ -662,7 +655,8 @@ export class CodexTranslator {
       }
       case "model/rerouted":
         return [
-          this.notice(
+          noticeEvent(
+            "codex",
             "info",
             `Model rerouted from ${String(params["fromModel"])} to ${String(params["toModel"])}`,
           ),
@@ -670,7 +664,8 @@ export class CodexTranslator {
       case "mcpServer/startupStatus/updated":
         return params["status"] === "failed"
           ? [
-              this.notice(
+              noticeEvent(
+                "codex",
                 "warning",
                 `MCP server ${String(params["name"])} failed to start${params["error"] ? `: ${String(params["error"])}` : ""}`,
               ),
@@ -682,14 +677,16 @@ export class CodexTranslator {
         const verdict = review.status === "denied" ? "denied" : "timed out on";
         const rationale = review.rationale ? `: ${review.rationale}` : "";
         // Codex's auto-review is the safety check auto mode describes.
-        return [this.notice("warning", `The safety check ${verdict} an action${rationale}`)];
+        return [
+          noticeEvent("codex", "warning", `The safety check ${verdict} an action${rationale}`),
+        ];
       }
       case "warning":
       case "guardianWarning":
-        return [this.notice("warning", String(params["message"]))];
+        return [noticeEvent("codex", "warning", String(params["message"]))];
       case "configWarning":
       case "deprecationNotice":
-        return [this.notice("warning", String(params["summary"]))];
+        return [noticeEvent("codex", "warning", String(params["summary"]))];
       default:
         return [];
     }
@@ -728,12 +725,12 @@ export class CodexTranslator {
       if (limit.status === "ok") this.#warned.delete(key);
       else if (!this.#warned.has(key)) {
         this.#warned.add(key);
-        events.push(this.notice("warning", limitNotice(limit)));
+        events.push(noticeEvent("codex", "warning", limitNotice(limit)));
       }
     }
     if (reached && !this.#warned.has("reached")) {
       this.#warned.add("reached");
-      events.push(this.notice("warning", "Usage limit reached"));
+      events.push(noticeEvent("codex", "warning", "Usage limit reached"));
     } else if (!reached) this.#warned.delete("reached");
     events.push(this.#usageEvent());
     return events;
