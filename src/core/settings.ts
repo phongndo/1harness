@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { RUNTIME_MODES, isRuntimeMode, type RuntimeMode } from "./events.ts";
+import { DEFAULT_RUNTIME_MODE, RUNTIME_MODES, isRuntimeMode, type RuntimeMode } from "./events.ts";
 
 /** What the user sets in `settings.json` in the config folder. */
 export interface Settings {
@@ -135,4 +135,14 @@ export function saveSettings(configDir: string, changes: Partial<Settings>): voi
   const temporary = `${file}.${process.pid}.tmp`;
   writeFileSync(temporary, `${JSON.stringify({ ...values, ...changes }, null, 2)}\n`);
   renameSync(temporary, file);
+}
+
+/** The harness 1harness starts when none is named: the user's default, else the one used last. */
+export function defaultHarness(settings: Settings, stateDir: string): string | null {
+  return settings.harness ?? loadLastHarness(stateDir);
+}
+
+/** The mode a person's new thread starts in when none is named. */
+export function defaultMode(settings: Settings): RuntimeMode {
+  return settings.mode ?? DEFAULT_RUNTIME_MODE;
 }

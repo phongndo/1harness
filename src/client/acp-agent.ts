@@ -7,6 +7,7 @@ import {
   type Item,
   type ModelOption,
   type RuntimeMode,
+  type SessionOptions,
 } from "../core/events.ts";
 import { MODE_DESCRIPTIONS } from "../core/wording.ts";
 import { JsonRpcPeer, RpcError } from "../drivers/jsonrpc.ts";
@@ -243,14 +244,7 @@ export class AcpAgent {
       );
     const state = await this.#client.call("thread.open", {
       harness,
-      settings: {
-        cwd: typeof params["cwd"] === "string" ? params["cwd"] : process.cwd(),
-        model: null,
-        effort: null,
-        runtimeMode: this.#defaults.mode,
-        interactionMode: "default",
-        resume: null,
-      },
+      settings: this.#settings(params),
     });
     this.#track(state);
     return { sessionId: state.id, ...(await this.#controls(state)) };
@@ -258,23 +252,29 @@ export class AcpAgent {
 
   async #loadSession(params: Params): Promise<unknown> {
     const id = String(params["sessionId"] ?? "");
+    const harness = this.#defaults.harness;
     const state = await this.#client.call("thread.resume", {
       id,
-      harness: this.#defaults.harness ?? "claude",
-      settings: {
-        cwd: typeof params["cwd"] === "string" ? params["cwd"] : process.cwd(),
-        model: null,
-        effort: null,
-        runtimeMode: this.#defaults.mode,
-        interactionMode: "default",
-        resume: null,
-      },
+      ...(harness ? { harness } : {}),
+      settings: this.#settings(params),
     });
     const session = this.#track(state, id);
     // The editor shows the conversation from what it is sent, so it is sent again.
     const page = await this.#client.call("thread.attach", { threadId: state.id });
     for (const { entry } of page.entries) this.#replay(session, id, entry);
     return this.#controls(state);
+  }
+
+  /** What a session the editor opens or loads starts with, in the folder it names. */
+  #settings(params: Params): SessionOptions {
+    return {
+      cwd: typeof params["cwd"] === "string" ? params["cwd"] : process.cwd(),
+      model: null,
+      effort: null,
+      runtimeMode: this.#defaults.mode,
+      interactionMode: "default",
+      resume: null,
+    };
   }
 
   async #listSessions(params: Params): Promise<unknown> {

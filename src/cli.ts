@@ -18,6 +18,8 @@ import { LocalConnection, newClientId } from "./client/connection.ts";
 import { SocketConnection } from "./client/socket.ts";
 import { configDir, socketFile, stateDir, storeFile } from "./core/paths.ts";
 import {
+  defaultHarness,
+  defaultMode,
   loadLastHarness,
   loadSettings,
   saveLastHarness,
@@ -470,8 +472,8 @@ async function acp(args: string[], server: string | undefined, version: string):
     output: process.stdout,
     client,
     defaults: {
-      harness: values.harness ?? settings.harness ?? loadLastHarness(stateDir()),
-      mode: values.mode ?? settings.mode ?? DEFAULT_RUNTIME_MODE,
+      harness: values.harness ?? defaultHarness(settings, stateDir()),
+      mode: values.mode ?? defaultMode(settings),
     },
     version,
   });
@@ -527,16 +529,13 @@ async function main(argv: string[], server: string | undefined, version: string)
     // Harnesses from agents.json and extensions register later, so an unknown
     // name fails when the session starts, listing the ones there are. With no
     // default and none used before, the terminal asks; no harness is everyone's.
-    const harness = values.harness ?? settings.harness ?? loadLastHarness(stateDir());
+    const harness = values.harness ?? defaultHarness(settings, stateDir());
     const warnings = [...settingsWarnings, ...registerConfiguredAgents(configDir())];
     const session: SessionOptions = {
       cwd: resolve(values.cwd ?? process.cwd()),
       model: values.model ?? null,
       effort: values.effort ?? null,
-      runtimeMode:
-        choice<RuntimeMode>(values.mode, RUNTIME_MODES, "mode") ??
-        settings.mode ??
-        DEFAULT_RUNTIME_MODE,
+      runtimeMode: choice<RuntimeMode>(values.mode, RUNTIME_MODES, "mode") ?? defaultMode(settings),
       interactionMode: values.plan ? "plan" : "default",
       resume: values.resume ?? null,
     };

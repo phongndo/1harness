@@ -424,6 +424,29 @@ describe("Host", () => {
     await running;
     assert.equal((globalThis as { waited?: unknown }).waited, null);
   });
+
+  it("favors no harness where nothing names one", async () => {
+    const extension = join(root, "where.mjs");
+    writeFileSync(
+      extension,
+      `export default (api) => api.registerCommand({
+        name: "where",
+        description: "",
+        group: "Test",
+        async run(context) {
+          globalThis.where = context.harness;
+        },
+      });\n`,
+    );
+    newHost();
+    const client = await connect("tui", [extension]);
+    await client.call("commands.run", { threadId: null, name: "where", args: "" });
+    assert.equal((globalThis as { where?: unknown }).where, "");
+    await assert.rejects(
+      client.call("thread.resume", { id: "unknown-native", settings }),
+      /name a harness/,
+    );
+  });
 });
 
 describe("Pages the agent shows", () => {

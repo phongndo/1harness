@@ -329,7 +329,8 @@ export interface Methods {
   "thread.open": { params: OpenParams; result: ThreadState };
   /** Opens a stored thread or a native one: a 1harness ID or the start of one, or a harness's own. */
   "thread.resume": {
-    params: { id: string; harness: HarnessId; settings: SessionOptions };
+    /** `harness` resumes a harness's own ID there; a 1harness thread needs none. */
+    params: { id: string; harness?: HarnessId; settings: SessionOptions };
     result: ThreadState;
   };
   "thread.attach": {

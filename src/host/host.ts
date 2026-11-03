@@ -5,18 +5,13 @@ import {
   type CommandUI,
   type SessionHandle,
 } from "../commands/registry.ts";
-import {
-  DEFAULT_RUNTIME_MODE,
-  type HarnessId,
-  type SessionOptions,
-  type NoticeLevel,
-} from "../core/events.ts";
+import { type HarnessId, type SessionOptions, type NoticeLevel } from "../core/events.ts";
 import { FileIndex } from "../core/files.ts";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join as joinPath, resolve as resolvePath } from "node:path";
 import { configDir, stateDir } from "../core/paths.ts";
-import { DEFAULT_AGENT_MODE, loadLastHarness, loadSettings } from "../core/settings.ts";
+import { DEFAULT_AGENT_MODE, defaultHarness, defaultMode, loadSettings } from "../core/settings.ts";
 import { errorMessage } from "../core/errors.ts";
 import { type Thread } from "../core/thread.ts";
 import { isThreadIdPrefix, shortThreadId } from "../core/thread-id.ts";
@@ -372,9 +367,8 @@ export class Host {
           caller.kind === "agent"
             ? this.#scope.agent(caller).thread.info.cwd
             : this.#client(caller.clientId).cwd,
-        defaultHarness: () =>
-          this.#settings().harness ?? loadLastHarness(options.stateDir ?? stateDir()),
-        defaultMode: () => this.#settings().mode ?? DEFAULT_RUNTIME_MODE,
+        defaultHarness: () => defaultHarness(this.#settings(), options.stateDir ?? stateDir()),
+        defaultMode: () => defaultMode(this.#settings()),
         seq: () => this.seq,
         since: (after) => this.since(after),
         subscribe: (listener) => this.subscribe(listener),
@@ -1127,14 +1121,15 @@ export class Host {
         cwd: info?.cwd ?? client.cwd,
         model: info?.model ?? null,
         effort: info?.effort ?? null,
-        runtimeMode: info?.runtimeMode ?? "supervised",
+        runtimeMode: info?.runtimeMode ?? defaultMode(this.#settings()),
         interactionMode: info?.interactionMode ?? "default",
         resume: null,
       };
     };
     return {
       ui: this.#clientUi(client),
-      harness: managed?.harness ?? "claude",
+      // No thread is on no harness, as a terminal without one says; none is everyone's.
+      harness: managed?.harness ?? "",
       thread: managed ? this.#commandThread(managed, client) : null,
       info: managed?.thread.info ?? null,
       session: () => {
@@ -1464,6 +1459,8 @@ export class Host {
         const stored = this.#store?.threadByNative(id);
         const again = stored ? await this.#reopen(stored.id) : null;
         if (again) return shown(again);
+        if (!harness)
+          throw new RpcError("thread_not_found", `No thread ${id}; name a harness to resume it on`);
         return this.#handlers["thread.open"](client, {
           harness,
           settings: { ...settings, resume: id },
