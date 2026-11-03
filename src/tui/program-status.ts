@@ -2,6 +2,7 @@ import type { HarnessRequest } from "../core/events.ts";
 import type { ThreadState } from "../protocol.ts";
 import { shortThreadId } from "../core/thread-id.ts";
 import { firstLine } from "./text.ts";
+import { ancestry } from "./threads.ts";
 
 // The Program Status Protocol (OSC 7501), which lets a program tell its
 // terminal what it is doing: idle, working, blocked on the user, done, or
@@ -172,12 +173,12 @@ export function statusRecords(
 ): StatusRecord[] {
   const open = threads.filter((thread) => thread.status !== "closed");
   const byId = new Map(open.map((thread) => [thread.id, thread]));
-  const path = (thread: ThreadStatusInput): string => {
-    const parent = thread.parentId ? byId.get(thread.parentId) : undefined;
-    // A UUID is longer than a segment may be, so each goes by its short form.
-    const id = shortThreadId(thread.id);
-    return parent ? `${path(parent)}/${id}` : id;
-  };
+  const path = (thread: ThreadStatusInput): string =>
+    ancestry(thread, (child) => (child.parentId ? byId.get(child.parentId) : undefined))
+      // A UUID is longer than a segment may be, so each goes by its short form.
+      .map((one) => shortThreadId(one.id))
+      .toReversed()
+      .join("/");
   const records: StatusRecord[] = [];
   for (const thread of open) {
     const id = path(thread);

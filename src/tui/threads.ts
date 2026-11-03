@@ -10,6 +10,16 @@ export function lastActive(thread: ThreadState): number {
   return thread.lastRun?.endedAt ?? thread.lastRun?.startedAt ?? thread.createdAt;
 }
 
+/**
+ * A thread and the ones above it, nearest first, as far as `parent` finds
+ * them; a parent met twice ends it, so a loop in what the host says cannot.
+ */
+export function ancestry<T>(thread: T, parent: (thread: T) => T | undefined): T[] {
+  const chain = [thread];
+  for (let up = parent(thread); up && !chain.includes(up); up = parent(up)) chain.push(up);
+  return chain;
+}
+
 /** An open thread's entry, as it stands now. */
 export function liveEntry(thread: ThreadState): ResumeEntry {
   const status = agentStatus(thread);
@@ -66,13 +76,13 @@ export function flattenTree(
 
 /**
  * The thread list: your threads, newest first, each followed by the agents
- * it started; then your archived threads. `open` are the threads open now,
- * each before the agents it started; `currentId` the thread on screen.
+ * it started; then your archived threads. `open` are the threads open now;
+ * `currentId` the thread on screen.
  */
 export function threadEntries(
   recent: readonly ThreadListing[],
   archived: readonly ThreadListing[],
-  open: readonly ThreadState[],
+  open: Iterable<ThreadState>,
   currentId: string | null,
 ): ResumeEntry[] {
   // The thread on screen with nothing in it yet is where you are, not one to go back to.
@@ -107,8 +117,10 @@ export function family(
   for (const thread of stored) nodes.set(thread.id, listedNode(thread));
   // Threads open here as they stand now, over what the store last kept of them.
   for (const thread of open) nodes.set(thread.id, liveNode(thread));
-  let root = currentId ? nodes.get(currentId) : undefined;
-  while (root?.parentId && nodes.has(root.parentId)) root = nodes.get(root.parentId);
+  const current = currentId ? nodes.get(currentId) : undefined;
+  const root =
+    current &&
+    ancestry(current, (node) => (node.parentId ? nodes.get(node.parentId) : undefined)).at(-1);
   if (!root) return { title: "", agents: [] };
   const id = root.entry.id;
   const agents = [...nodes.values()]

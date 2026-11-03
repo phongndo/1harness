@@ -46,7 +46,7 @@ import { LivePages } from "./live.ts";
 import { ThreadLogs } from "./logs.ts";
 import { Menu, entry, infoPanel, type MenuConfig, type MenuEntry } from "./menu.ts";
 import { listedEntry, ResumeView, type ResumeEntry } from "./resume.ts";
-import { family, lastActive, threadEntries } from "./threads.ts";
+import { ancestry, family, lastActive, threadEntries } from "./threads.ts";
 import { PictureViewer } from "./viewer.ts";
 import {
   ChoicePrompt,
@@ -853,15 +853,12 @@ export class App {
    * agents they started. Another terminal on the same host reports its own.
    */
   #ownThreads(): ThreadState[] {
-    const all = [...this.#client.threads.values()];
-    const mine = (thread: ThreadState): boolean =>
-      this.#own.has(thread.id) ||
-      (thread.parentId !== null &&
-        (() => {
-          const parent = this.#client.threads.get(thread.parentId);
-          return parent ? mine(parent) : false;
-        })());
-    return all.filter(mine);
+    const threads = this.#client.threads;
+    const parent = (thread: ThreadState) =>
+      thread.parentId ? threads.get(thread.parentId) : undefined;
+    return [...threads.values()].filter((thread) =>
+      ancestry(thread, parent).some((one) => this.#own.has(one.id)),
+    );
   }
 
   /**
@@ -1228,7 +1225,7 @@ export class App {
       this.#client.call("threads.list", { scope: "recent", limit: 100 }),
       this.#client.call("threads.list", { scope: "archived", limit: 100 }),
     ]);
-    return threadEntries(recent, archived, this.#threadOrder(), this.#currentId);
+    return threadEntries(recent, archived, this.#client.threads.values(), this.#currentId);
   }
 
   /** A harness's name as people know it, such as `Claude Code`. */
@@ -1529,18 +1526,6 @@ export class App {
     };
   }
 
-  /** Threads with each one's children right after it. */
-  #threadOrder(): ThreadState[] {
-    const all = [...this.#client.threads.values()];
-    // Your threads newest first; the agents each started under it, as they were started.
-    const under = (parentId: string | null): ThreadState[] =>
-      all
-        .filter((thread) => thread.parentId === parentId)
-        .toSorted((a, b) => (parentId === null ? lastActive(b) - lastActive(a) : 0))
-        .flatMap((thread) => [thread, ...under(thread.id)]);
-    return under(null);
-  }
-
   /** Fetches the harness's own commands for completion and /help. */
   async #loadCommands(): Promise<void> {
     const thread = this.#live;
@@ -1738,9 +1723,12 @@ export class App {
         if (this.#currentId === event.threadId) {
           // Gone from under the terminal, as when another forgets it: on to another open one.
           this.#currentId = null;
-          const next = this.#threadOrder().find(
-            (thread) => thread.status !== "closed" && thread.parentId === null && !thread.archived,
-          );
+          const next = [...this.#client.threads.values()]
+            .filter(
+              (thread) =>
+                thread.status !== "closed" && thread.parentId === null && !thread.archived,
+            )
+            .toSorted((a, b) => lastActive(b) - lastActive(a))[0];
           // An open or resume under way goes back on its own if it fails.
           if (next && this.#opening === 0) this.#show(next);
         }
