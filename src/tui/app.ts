@@ -271,6 +271,8 @@ export class App {
   #notes: string[];
   /** Commands the harness runs itself, shown beside 1harness's own. */
   #nativeCommands: NativeCommand[] = [];
+  /** The commands version of the thread on screen whose commands were last loaded. */
+  #commandsSeen = -1;
   /** Whether the host keeps threads, so one can be resumed by its 1harness ID. */
   #stored = false;
   /** The host's run the terminal last caught up with, to tell when it restarted. */
@@ -283,6 +285,15 @@ export class App {
   #details = false;
   /** Whether the terminal shows images, which it says when asked. */
   #graphics = false;
+  /**
+   * ONEHARNESS_IMAGES and ONEHARNESS_PROGRAM_STATUS, read once: `1` or `0`
+   * says whether the terminal shows pictures or takes status reports, over
+   * what it replies.
+   */
+  #setting = {
+    images: process.env["ONEHARNESS_IMAGES"],
+    status: process.env["ONEHARNESS_PROGRAM_STATUS"],
+  };
   /** A character cell's size in pixels, which images are sized by. */
   #cell: CellSize = DEFAULT_CELL;
   /** Pictures of image files, by cells and path, as the host sent them. */
@@ -787,18 +798,18 @@ export class App {
 
   /**
    * Asks the terminal for its background and whether it takes program status
-   * reports; the device attributes reply, which every terminal sends, bounds
-   * the wait. Either can be set instead with ONEHARNESS_THEME and
-   * ONEHARNESS_PROGRAM_STATUS.
+   * reports, and whether it shows pictures and its cells' size in pixels; the
+   * device attributes reply, which every terminal sends, bounds the wait.
+   * ONEHARNESS_THEME, ONEHARNESS_PROGRAM_STATUS, and ONEHARNESS_IMAGES set
+   * them instead.
    */
   async #detectTerminal(): Promise<void> {
     const theme = process.env["ONEHARNESS_THEME"];
     const themeSet = theme === "light" || theme === "dark";
     if (themeSet) setLightTheme(theme === "light");
-    const status = process.env["ONEHARNESS_PROGRAM_STATUS"];
+    const { status, images } = this.#setting;
     if (status === "1") this.#enableStatus();
     // Images: whether the terminal speaks the Kitty graphics protocol, and its cell size.
-    const images = process.env["ONEHARNESS_IMAGES"];
     if (images === "1") this.#graphics = true;
     const query = `${themeSet ? "" : "\x1b]11;?\x1b\\"}${status === "0" || status === "1" ? "" : STATUS_QUERY}${images === "0" ? "" : `${images === "1" ? "" : GRAPHICS_QUERY}${CELL_QUERY}`}`;
     if (query === "") return;
@@ -819,7 +830,7 @@ export class App {
    * into view, as a pane first drawn hidden gets its real cells only then.
    */
   #measureCells(): void {
-    if (this.#graphics && process.env["ONEHARNESS_IMAGES"] !== "0" && !this.#exiting)
+    if (this.#graphics && this.#setting.images !== "0" && !this.#exiting)
       process.stdout.write(CELL_QUERY);
   }
 
@@ -1818,9 +1829,6 @@ export class App {
     }
   }
 
-  /** The commands version of the thread on screen whose commands were last loaded. */
-  #commandsSeen = -1;
-
   /** The host caught the terminal up after it missed events; every view is built again. */
   #resynced(hello: HelloResult): void {
     const current = this.#currentId;
@@ -2126,7 +2134,7 @@ export class App {
         this.#themeReply?.();
         return;
       case "programStatus":
-        if (process.env["ONEHARNESS_PROGRAM_STATUS"] !== "0") this.#enableStatus();
+        if (this.#setting.status !== "0") this.#enableStatus();
         return;
       case "focus":
         this.#focused = event.focused;
@@ -2134,7 +2142,7 @@ export class App {
         this.#statusChanged();
         return;
       case "graphics":
-        if (process.env["ONEHARNESS_IMAGES"] !== "0") this.#graphics = event.ok;
+        if (this.#setting.images !== "0") this.#graphics = event.ok;
         return;
       case "cellSize":
         if (event.width === this.#cell.width && event.height === this.#cell.height) return;
