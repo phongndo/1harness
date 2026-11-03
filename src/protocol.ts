@@ -422,6 +422,8 @@ export interface Methods {
     params: { cwd: string; query: string; limit: number };
     result: { matches: FileMatch[]; loading: boolean };
   };
+  /** The git branch of a folder on the host; null outside a repository. */
+  "files.branch": { params: { cwd: string }; result: string | null };
   /**
    * An image where the host runs, as a base64 PNG no larger than the box in
    * pixels, for showing it; null when it is none. Without html2term on the

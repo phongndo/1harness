@@ -17,6 +17,7 @@ import { join as joinPath, resolve as resolvePath } from "node:path";
 import { configDir, stateDir } from "../core/paths.ts";
 import { DEFAULT_AGENT_MODE, defaultHarness, defaultMode, loadSettings } from "../core/settings.ts";
 import { errorMessage } from "../core/errors.ts";
+import { gitBranch } from "../core/git.ts";
 import { type Thread } from "../core/thread.ts";
 import { isThreadIdPrefix, shortThreadId } from "../core/thread-id.ts";
 import { formatTokens } from "../core/wording.ts";
@@ -1619,6 +1620,7 @@ export class Host {
     | "commands.run"
     | "commands.complete"
     | "files.search"
+    | "files.branch"
   > {
     return {
       "harnesses.list": async (_client, { id }) => this.#checkHarnesses(id),
@@ -1643,6 +1645,7 @@ export class Host {
       },
       "files.search": async (_client, { cwd, query, limit }) =>
         this.#files.search(resolvePath(expandHome(cwd)), query, limit),
+      "files.branch": async (_client, { cwd }) => gitBranch(expandHome(cwd)),
     };
   }
 }

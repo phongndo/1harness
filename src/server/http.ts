@@ -45,6 +45,7 @@ const READS: ReadonlySet<string> = new Set<Method>([
   "commands.list",
   "commands.complete",
   "files.search",
+  "files.branch",
   "files.image",
   "media.html",
   "page.frame",
