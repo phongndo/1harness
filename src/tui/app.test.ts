@@ -28,6 +28,8 @@ class Terminal extends Writable {
   /** Everything written outside the screen's rows, such as what quitting prints. */
   raw = "";
   #row = 0;
+  /** A move to a row's start, which the text drawn next replaces the row with. */
+  #fresh = false;
 
   override _write(chunk: Buffer | string, _encoding: string, done: () => void): void {
     const text = String(chunk);
@@ -39,10 +41,14 @@ class Terminal extends Writable {
     for (const match of text.matchAll(pattern)) {
       if (match[1] !== undefined) {
         this.#row = Number(match[1]) - 1;
-        if (match[2] === "1") this.screen[this.#row] = "";
+        // Only text replaces the row: the cursor moves to a row's start too.
+        this.#fresh = match[2] === "1";
       } else if (match[0] === "\x1b[2J") this.screen = [];
-      else if (match[3] !== undefined && this.#row < this.rows)
-        this.screen[this.#row] = (this.screen[this.#row] ?? "") + match[3];
+      else if (match[0] === "\x1b[K" && this.#fresh) this.screen[this.#row] = "";
+      else if (match[3] !== undefined && this.#row < this.rows) {
+        this.screen[this.#row] = (this.#fresh ? "" : (this.screen[this.#row] ?? "")) + match[3];
+        this.#fresh = false;
+      }
     }
     done();
   }
@@ -209,14 +215,14 @@ describe("App", () => {
     const session = await start();
     await session.sees("Ask anything");
     await session.type("first message");
-    assert.match(await session.sees("first message"), /┃ first message/);
+    assert.match(await session.sees("first message"), /^first message/m);
     await session.type("\r");
     await session.sees("Done with first message");
     await session.type("second\r");
     const screen = await session.sees("Done with second");
     assert.ok(screen.indexOf("Done with first message") < screen.indexOf("┃ second"));
     // The composer empties once a message is sent.
-    assert.match(screen, /┃ Ask anything/);
+    assert.match(screen, /^Ask anything/m);
   });
 
   it("sends a message typed while the first thread is still starting once it opens", async () => {
@@ -240,7 +246,7 @@ describe("App", () => {
       const screen = await session.sees(/Done with early[\s\S]*Done with later/);
       assert.ok(screen.indexOf("Done with early") < screen.indexOf("┃ later"));
       // Neither message is left behind in the composer.
-      assert.match(screen, /┃ Ask anything/);
+      assert.match(screen, /^Ask anything/m);
     } finally {
       unregisterSlow();
     }
@@ -262,7 +268,7 @@ describe("App", () => {
       await session.type("draft");
       fail(new Error("no harness"));
       const screen = await session.sees("Could not start broken");
-      assert.match(screen, /┃ held\n┃?\s*\n?┃? ?draft/);
+      assert.match(screen, /^held\n\s*\n?draft/m);
     } finally {
       unregisterBroken();
     }
@@ -445,7 +451,7 @@ describe("App commands", () => {
       await session.type("$tidy later\r");
       await session.sees("queued: /tidy later");
       await session.type("/unqueue\r");
-      await session.sees("┃ $tidy later");
+      await session.sees(/^\$tidy later/m);
     } finally {
       unregisterSkilled();
     }
@@ -462,7 +468,7 @@ describe("App commands", () => {
     // Esc closes the panel and leaves the composer as it was.
     await session.type("\x1b");
     assert.doesNotMatch(session.terminal.text(), /tab category/);
-    assert.match(session.terminal.text(), /┃ Ask anything/);
+    assert.match(session.terminal.text(), /^Ask anything/m);
   });
 
   it("shows the session in /status and switches modes from /mode", async () => {
@@ -599,9 +605,9 @@ describe("App threads and keys", () => {
     const session = await start();
     await session.sees("supervised · scripted · big");
     await session.type("half a thought");
-    await session.sees("┃ half a thought");
+    await session.sees(/^half a thought/m);
     await session.type("\x03");
-    await session.sees("┃ Ask anything");
+    await session.sees(/^Ask anything/m);
     await session.type("\x03");
     await session.sees("Press ctrl+c again to exit");
     await session.type("\x03");

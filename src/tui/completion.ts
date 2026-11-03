@@ -376,8 +376,8 @@ export class Suggestions {
     const menu = this.#args?.menu ?? new Menu({ title: "", entries, bare: true });
     menu.setEntries(entries);
     const start = text.length - (match[2] ?? "").length + found.start;
-    // Lined up under the word, past the composer's `┃ ` marker.
-    menu.indent = 2 + visibleWidth(text.slice(0, start));
+    // Lined up under the word.
+    menu.indent = visibleWidth(text.slice(0, start));
     // A move holds while the word is the same; typing more of it starts over.
     const moved = this.#args?.start === start && this.#args.typed === typed && this.#args.moved;
     // A word typed in full is chosen over longer ones, so /resume t1 is not t12.

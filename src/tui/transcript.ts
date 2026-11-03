@@ -741,7 +741,8 @@ function decisionRows(block: Extract<Block, { kind: "decision" }>, width: number
 
 function userRows(block: Extract<Block, { kind: "user" }>, context: RenderContext): string[] {
   const { width } = context;
-  const marker = `${style.strong("┃")} `;
+  // In its own color, so what you sent stands apart from what agents wrote.
+  const marker = `${style.prompt("┃")} `;
   const lines = plainText(block.text).replace(/\s+$/, "").split("\n");
   const shown = lines.slice(0, USER_LINES);
   const rows = block.label ? [truncate(marker + style.muted(block.label), width)] : [];

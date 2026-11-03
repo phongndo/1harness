@@ -201,13 +201,14 @@ export function footerRows(state: FooterState, width: number, height: number): F
     rows.push(...rendered.rows, "", state.status);
   } else {
     const limit = Math.max(1, Math.min(10, Math.floor(height / 3)));
-    const layout = state.editor.layout(`${style.strong("┃")} `, width);
+    // The rules mark it off, so it needs no marker of its own.
+    const layout = state.editor.layout("", width);
     // An empty composer says what it takes.
     if (state.editor.empty && !panel) {
       const hint = state.busy
         ? "Add to the turn, or tab to queue a message"
         : "Ask anything · / commands · $ skills · @ files";
-      layout.rows[0] = truncate(`${style.strong("┃")} ${style.faint(hint)}`, width);
+      layout.rows[0] = truncate(style.faint(hint), width);
     }
     const start = Math.max(0, Math.min(layout.cursor.row - limit + 1, layout.rows.length - limit));
     const composer = layout.rows.slice(start, start + limit);
@@ -230,9 +231,12 @@ export function footerRows(state: FooterState, width: number, height: number): F
               : [];
     if (listed) list = { menu: listed, row: rows.length };
     if (shown.length > 0) rows.push(...shown, "");
+    // Rules above and below mark off what the composer holds.
+    const edge = style.rule("─".repeat(width));
+    rows.push(edge);
     if (!panel)
       cursor = { row: rows.length + layout.cursor.row - start, column: layout.cursor.column };
-    rows.push(...composer, "", state.status);
+    rows.push(...composer, edge, state.status);
   }
   if (rows.length > height) {
     const cut = rows.length - height;

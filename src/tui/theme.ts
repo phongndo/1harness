@@ -1,61 +1,34 @@
-// fx's monochrome palette: hierarchy comes from 256-color grays and weight, with
-// color reserved for links, diff markers, and what agents are doing. Values
-// follow fx's dark and light themes.
+// Colors come from the terminal's own scheme: text in its foreground, muted
+// text and rules faint, and accents in its ANSI colors, so 1harness reads as
+// the rest of the terminal does, light or dark. Fixed shades of gray drew
+// brighter than the scheme's own text.
 
 const colorEnabled = process.env["NO_COLOR"] === undefined;
 
-interface Palette {
-  /** Primary text: the user marker, inline code, selected rows. */
-  strong: number;
+/** Each role's SGR color: `39` the terminal's foreground, 30–37 its ANSI colors. */
+const PALETTE = {
+  /** Primary text: inline code, selected rows. */
+  strong: 39,
   /** Secondary emphasis: the activity label, notice labels, code keywords. */
-  text: number;
+  text: 39,
   /** Tertiary text: notice bodies, code strings and numbers, command flags. */
-  soft: number;
-  /** Muted text: tool rows, hints, the status line. */
-  muted: number;
-  rule: number;
-  link: number;
-  added: number;
-  removed: number;
+  soft: 39,
+  link: 34,
+  added: 32,
+  removed: 31,
+  /** The marker on what you sent, apart from what agents wrote. */
+  prompt: 34,
   /** An agent at work. */
-  active: number;
+  active: 36,
   /** An agent waiting on the user. */
-  attention: number;
-}
+  attention: 33,
+} as const;
 
-const DARK: Palette = {
-  strong: 255,
-  text: 252,
-  soft: 250,
-  muted: 245,
-  rule: 240,
-  link: 75,
-  added: 71,
-  removed: 167,
-  active: 75,
-  attention: 179,
-};
-
-const LIGHT: Palette = {
-  strong: 235,
-  text: 238,
-  soft: 241,
-  muted: 243,
-  rule: 250,
-  link: 25,
-  added: 71,
-  removed: 167,
-  active: 25,
-  attention: 136,
-};
-
-let palette = DARK;
 let light = false;
 
-/** Switches between the dark and light palettes. Rendered text must be rebuilt afterwards. */
+/** Whether the background is light, which pictures are drawn for. Rendered pictures must be rebuilt afterwards. */
 export function setLightTheme(value: boolean): void {
   light = value;
-  palette = value ? LIGHT : DARK;
 }
 
 export function isLightTheme(): boolean {
@@ -78,9 +51,9 @@ export function diffLine(line: string, other: (text: string) => string): string 
   return other(line);
 }
 
-function color(role: keyof Palette): (text: string) => string {
+function color(role: keyof typeof PALETTE): (text: string) => string {
   return (text) =>
-    colorEnabled && text !== "" ? wrapStyle(`\x1b[38;5;${palette[role]}m`, "\x1b[39m", text) : text;
+    colorEnabled && text !== "" ? wrapStyle(`\x1b[${PALETTE[role]}m`, "\x1b[39m", text) : text;
 }
 
 function attribute(open: number, close: number): (text: string) => string {
@@ -95,9 +68,11 @@ export const style = {
   strong: color("strong"),
   text: color("text"),
   soft: color("soft"),
-  muted: color("muted"),
-  rule: color("rule"),
+  /** Tool rows, hints, the status line: faint, which suits any scheme, as its gray may not. */
+  muted: attribute(2, 22),
+  rule: attribute(2, 22),
   link: color("link"),
+  prompt: color("prompt"),
   added: color("added"),
   removed: color("removed"),
   active: color("active"),
