@@ -26,7 +26,8 @@ import { unifiedDiff } from "../../core/diff.ts";
 import { limitNotice } from "../../core/wording.ts";
 import { truncate } from "../../core/wording.ts";
 import { noticeEvent } from "../session-events.ts";
-import { record, summarizeInput, text, todoStatus } from "../text.ts";
+import { record, text } from "../../core/values.ts";
+import { summarizeInput, todoStatus } from "../text.ts";
 
 type ContentBlock = SDKAssistantMessage["message"]["content"][number];
 type StreamEvent = SDKPartialAssistantMessage["event"];
@@ -51,10 +52,8 @@ const LIMIT_LABELS: Record<string, string> = {
  * mode (`disableAutoMode`, at the top or under `permissions`).
  */
 export function claudeRuntimeModes(settings: readonly unknown[]): RuntimeMode[] {
-  const sources = settings.map((entry) => (entry ?? {}) as Record<string, unknown>);
-  const permissions = sources.map(
-    (source) => (source["permissions"] ?? {}) as Record<string, unknown>,
-  );
+  const sources = settings.map(record);
+  const permissions = sources.map((source) => record(source["permissions"]));
   const bypassOff = permissions.some(
     (entry) => entry["disableBypassPermissionsMode"] === "disable",
   );

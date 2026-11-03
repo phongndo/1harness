@@ -17,6 +17,7 @@ import {
   type UserInput,
 } from "../../core/events.ts";
 import { errorMessage } from "../../core/errors.ts";
+import { record } from "../../core/values.ts";
 import { ANSWER, ASK, askFor, askForChanges, fileName } from "../../core/wording.ts";
 import { readImage } from "../images.ts";
 import { JsonRpcProcess, RpcError } from "../jsonrpc.ts";
@@ -420,7 +421,7 @@ export class AcpSession implements HarnessSession {
 
   #notification(method: string, raw: unknown): void {
     if (method !== "session/update") return;
-    const params = (raw ?? {}) as { sessionId?: string; update?: AcpUpdate };
+    const params = record(raw) as { sessionId?: string; update?: AcpUpdate };
     if (
       !params.update ||
       (params.sessionId && params.sessionId !== this.info.threadId && this.info.threadId)
@@ -457,7 +458,7 @@ export class AcpSession implements HarnessSession {
       // 1harness offers agents no file system or terminal of its own.
       throw new RpcError(-32601, `1harness does not handle ${method}`);
     }
-    const params = (raw ?? {}) as {
+    const params = record(raw) as {
       toolCall: AcpToolCall;
       options: { optionId: string; name: string; kind: string }[];
     };

@@ -27,6 +27,7 @@ import {
   type UserInput,
 } from "../../core/events.ts";
 import { errorMessage } from "../../core/errors.ts";
+import { record, text } from "../../core/values.ts";
 import { policyHookOutput } from "../../core/tools.ts";
 import { ANSWER, ASK, PLAN_TITLE, askForChanges, planOptions } from "../../core/wording.ts";
 import { HOOK_TIMEOUT_SEC, HookServer } from "./hook-server.ts";
@@ -725,7 +726,7 @@ export class CodexSession implements HarnessSession {
   }
 
   #notification(method: string, raw: unknown): void {
-    const params = (raw ?? {}) as Record<string, unknown>;
+    const params = record(raw);
     // Codex names a thread for what it is doing; the name goes out with the session's info.
     if (method === "thread/name/updated") {
       const name = params["threadName"];
@@ -817,7 +818,7 @@ export class CodexSession implements HarnessSession {
   }
 
   #serverRequest(method: string, raw: unknown, rpcId: RequestId): Promise<unknown> {
-    const params = (raw ?? {}) as Record<string, unknown>;
+    const params = record(raw);
     const id = codexRequestId(rpcId);
     switch (method) {
       case "item/commandExecution/requestApproval":
@@ -853,7 +854,7 @@ export class CodexSession implements HarnessSession {
     params: Record<string, unknown>,
     decisions: Map<string, unknown>,
   ): HarnessRequest | null {
-    const reason = typeof params["reason"] === "string" ? params["reason"] : "";
+    const reason = text(params["reason"]);
     // Codex's own agents run in their own threads and ask through the parent's connection.
     const agent =
       typeof params["threadId"] === "string" && params["threadId"] !== this.info.threadId;
@@ -899,7 +900,7 @@ export class CodexSession implements HarnessSession {
       }
     }
 
-    const command = unwrapShell(typeof params["command"] === "string" ? params["command"] : "");
+    const command = unwrapShell(text(params["command"]));
     const network = params["networkApprovalContext"] as { host: string } | null | undefined;
     const fallback: unknown[] = ["accept", "acceptForSession"];
     if (params["proposedExecpolicyAmendment"]) {
@@ -963,28 +964,34 @@ function decisionLabel(decision: unknown, subject: "command" | "edits"): string 
     return ANSWER.again(subject === "command" ? "this command" : "these files");
   if (decision === "decline") return ANSWER.noAndContinue;
   if (decision === "cancel") return ANSWER.noAndExplain;
-  const record = (decision ?? {}) as Record<string, Record<string, unknown> | undefined>;
-  const amendment = record["acceptWithExecpolicyAmendment"]?.["execpolicy_amendment"];
-  if (Array.isArray(amendment)) {
+  const rule = amendment(decision);
+  if (rule?.kind === "command") {
     // A prefix such as [shell, "-lc", command] names the command inside the shell.
-    const tokens = amendment.map(String);
+    const tokens = rule.prefix;
     const prefix =
       tokens.length === 3 && /^-l?c$/.test(tokens[1] ?? "") ? (tokens[2] ?? "") : tokens.join(" ");
-    // Codex keeps these rules beyond the session.
     return ANSWER.always(`commands starting with \`${prefix}\``);
   }
-  const network = record["applyNetworkPolicyAmendment"]?.["network_policy_amendment"] as
-    | { host: string; action: string }
-    | undefined;
-  if (network) {
-    return network.action === "deny" ? ANSWER.never(network.host) : ANSWER.always(network.host);
-  }
+  if (rule?.kind === "network")
+    return rule.deny ? ANSWER.never(rule.host) : ANSWER.always(rule.host);
   return JSON.stringify(decision);
 }
 
+/** The rule a decision adds, which Codex keeps beyond the session. */
+function amendment(
+  decision: unknown,
+): { kind: "command"; prefix: string[] } | { kind: "network"; host: string; deny: boolean } | null {
+  const fields = record(decision);
+  const command = record(fields["acceptWithExecpolicyAmendment"])["execpolicy_amendment"];
+  if (Array.isArray(command)) return { kind: "command", prefix: command.map(String) };
+  const network = record(fields["applyNetworkPolicyAmendment"])["network_policy_amendment"];
+  if (!network) return null;
+  const rule = record(network);
+  return { kind: "network", host: text(rule["host"]), deny: rule["action"] === "deny" };
+}
+
 function describePermissions(permissions: unknown): string {
-  const record = (permissions ?? {}) as Record<string, unknown>;
-  return Object.entries(record)
+  return Object.entries(record(permissions))
     .filter(([, value]) => value !== null && value !== undefined)
     .map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
     .join("\n");
@@ -1066,7 +1073,7 @@ function elicitationRequest(
     );
   }
   if (mode !== "form" && mode !== "openai/form" && mode !== "openaiForm") return null;
-  const schema = (params["requestedSchema"] ?? {}) as {
+  const schema = record(params["requestedSchema"]) as {
     properties?: Record<string, ElicitationField>;
     required?: string[];
   };
@@ -1096,7 +1103,7 @@ function elicitationRequest(
       const remembered = content(persist);
       const offered = fields.some(([key, field]) =>
         [key, field.title ?? "", ...fieldChoices(field).map((choice) => choice.value)].some(
-          (text) => persistence(text) === persist,
+          (word) => persistence(word) === persist,
         ),
       );
       if (remembered && offered) {
@@ -1144,19 +1151,12 @@ export function decisionEffect(decision: unknown): ApprovalOption["effect"] {
   if (decision === "accept" || decision === "turn") return "allow";
   if (decision === "acceptForSession" || decision === "session") return "allow-always";
   if (decision === "decline" || decision === "cancel" || decision === "deny") return "deny";
-  const record = (decision ?? {}) as Record<string, Record<string, unknown> | undefined>;
-  if (record["acceptWithExecpolicyAmendment"]) return "allow-always";
-  const network = record["applyNetworkPolicyAmendment"]?.["network_policy_amendment"] as
-    | { action: string }
-    | undefined;
-  if (network) return network.action === "deny" ? "deny" : "allow-always";
+  const rule = amendment(decision);
+  if (rule) return rule.kind === "network" && rule.deny ? "deny" : "allow-always";
   // An MCP elicitation reply.
-  const reply = (decision ?? {}) as Record<string, unknown>;
+  const reply = record(decision);
   const action = reply["action"];
-  if (action === "accept") {
-    const meta = reply["_meta"] as { persist?: string } | null | undefined;
-    return meta?.persist ? "allow-always" : "allow";
-  }
+  if (action === "accept") return record(reply["_meta"])["persist"] ? "allow-always" : "allow";
   if (action === "decline" || action === "cancel") return "deny";
   return "other";
 }
@@ -1218,7 +1218,7 @@ export function codexResponse(request: NativeRequest, response: RequestResponse)
   }
   if (method === "mcpServer/elicitation/request") {
     if (response.kind === "question") {
-      const schema = (params["requestedSchema"] ?? {}) as {
+      const schema = record(params["requestedSchema"]) as {
         properties?: Record<string, ElicitationField>;
       };
       const content = Object.fromEntries(
@@ -1248,7 +1248,7 @@ export function codexResponse(request: NativeRequest, response: RequestResponse)
   if (method === "item/permissions/requestApproval") {
     const scope = response.kind === "approval" ? decisions.get(response.optionId) : "deny";
     if (scope === "turn" || scope === "session") {
-      const requested = (params["permissions"] ?? {}) as Record<string, unknown>;
+      const requested = record(params["permissions"]);
       const granted = Object.fromEntries(
         Object.entries(requested).filter(([, value]) => value !== null),
       );

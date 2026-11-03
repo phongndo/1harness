@@ -48,6 +48,7 @@ import {
   type UserInput,
 } from "../../core/events.ts";
 import { errorMessage } from "../../core/errors.ts";
+import { text } from "../../core/values.ts";
 import { policyHookOutput, toolAction } from "../../core/tools.ts";
 import { ANSWER, ASK, PLAN_TITLE, fileName, planOptions } from "../../core/wording.ts";
 import { StderrTail } from "../child.ts";
@@ -696,7 +697,7 @@ export class ClaudeSession implements HarnessSession {
     input: Record<string, unknown>,
     context: Parameters<CanUseTool>[2],
   ): Promise<PermissionResult> {
-    const plan = typeof input["plan"] === "string" ? input["plan"] : "";
+    const plan = text(input["plan"]);
     if (plan)
       this.#events.emit({
         type: "item.completed",
@@ -818,8 +819,8 @@ function alwaysAllowLabel(tool: string, suggestions: PermissionUpdate[] | undefi
 function distinctLines(lines: string[]): string[] {
   const kept: string[] = [];
   for (const line of lines) {
-    const text = line.trim();
-    if (text !== "" && !kept.some((earlier) => earlier.endsWith(text))) kept.push(line);
+    const trimmed = line.trim();
+    if (trimmed !== "" && !kept.some((earlier) => earlier.endsWith(trimmed))) kept.push(line);
   }
   return kept;
 }

@@ -8,6 +8,7 @@ import type {
   ToolCategory,
 } from "../../core/events.ts";
 import { unifiedDiff } from "../../core/diff.ts";
+import { record } from "../../core/values.ts";
 import { todoStatus } from "../text.ts";
 
 // The subset of the Agent Client Protocol (v1) this driver reads. Updates of
@@ -58,7 +59,7 @@ function toolStatus(status: string | null | undefined): ItemStatus {
   return "running";
 }
 
-function text(content: readonly AcpToolContent[] | null | undefined): string {
+function contentText(content: readonly AcpToolContent[] | null | undefined): string {
   return (content ?? [])
     .map((part) => (part.type === "content" ? (part.content.text ?? `[${part.content.type}]`) : ""))
     .filter(Boolean)
@@ -66,8 +67,8 @@ function text(content: readonly AcpToolContent[] | null | undefined): string {
 }
 
 function field(input: unknown, ...names: string[]): string | null {
-  const record = (input ?? {}) as Record<string, unknown>;
-  for (const name of names) if (typeof record[name] === "string") return record[name];
+  const fields = record(input);
+  for (const name of names) if (typeof fields[name] === "string") return fields[name];
   return null;
 }
 
@@ -102,7 +103,7 @@ function fileChanges(call: AcpToolCall): FileChange[] {
 /** A tool call as a 1harness item, by the kind the agent gives it. */
 export function toolItem(call: AcpToolCall): Item {
   const status = toolStatus(call.status);
-  const output = text(call.content);
+  const output = contentText(call.content);
   switch (call.kind) {
     case "execute":
       return {

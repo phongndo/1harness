@@ -1,4 +1,5 @@
 import type { ApprovalAction, ToolPolicy } from "./events.ts";
+import { record } from "./values.ts";
 
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
 
@@ -7,7 +8,7 @@ const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
  * Codex both name tools this way in permission checks and hooks.
  */
 export function toolAction(tool: string, input: unknown): ApprovalAction {
-  const fields = (input ?? {}) as Record<string, unknown>;
+  const fields = record(input);
   if (tool === "Bash" && typeof fields["command"] === "string") {
     return { type: "command", command: fields["command"], cwd: null };
   }

@@ -17,7 +17,8 @@ import { unifiedDiff } from "../../core/diff.ts";
 import { ANSWER, askFor, askForChanges } from "../../core/wording.ts";
 import { truncate } from "../../core/wording.ts";
 import { noticeEvent } from "../session-events.ts";
-import { record, summarizeInput, text } from "../text.ts";
+import { record, text } from "../../core/values.ts";
+import { summarizeInput } from "../text.ts";
 
 // OpenCode 2's server API in the parts 1harness reads. Events arrive on
 // `/api/event` as `{ type, data }`; tools are named by `session.tool.input.started`
