@@ -147,7 +147,7 @@ function mouse(rows: string[]) {
   const copied: string[] = [];
   const clicks: [number, number][] = [];
   const pointer = new Mouse({
-    column: () => ({ width: 40, margin: 2 }),
+    width: () => 40,
     scrollBy: () => {},
     scrolled: () => 0,
     rows: (from, to) => rows.slice(from, to + 1),
@@ -162,9 +162,9 @@ function mouse(rows: string[]) {
 describe("Mouse", () => {
   it("copies what a drag selects, and keeps it shown selected", () => {
     const { pointer, copied, clicks } = mouse(["  first line", "  second line"]);
-    pointer.event(button("press", 0, 4));
-    pointer.event(button("drag", 1, 9));
-    pointer.event(button("release", 1, 9));
+    pointer.event(button("press", 0, 2));
+    pointer.event(button("drag", 1, 7));
+    pointer.event(button("release", 1, 7));
     assert.deepEqual(copied, ["first line\nsecond"]);
     assert.ok(pointer.selection);
     assert.deepEqual(clicks, []);
@@ -172,11 +172,11 @@ describe("Mouse", () => {
 
   it("hands a click on, and takes the word under a double click", () => {
     const { pointer, copied, clicks } = mouse(["  hello world"]);
-    pointer.event(button("press", 0, 10));
-    pointer.event(button("release", 0, 10));
+    pointer.event(button("press", 0, 8));
+    pointer.event(button("release", 0, 8));
     assert.deepEqual(clicks, [[0, 8]]);
-    pointer.event(button("press", 0, 10));
-    pointer.event(button("release", 0, 10));
+    pointer.event(button("press", 0, 8));
+    pointer.event(button("release", 0, 8));
     assert.deepEqual(copied, ["world"]);
   });
 });

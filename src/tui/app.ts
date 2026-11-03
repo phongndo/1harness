@@ -162,14 +162,6 @@ function pickEntry(item: PickEntry): MenuEntry {
   });
 }
 
-/** The widest the column gets, in columns; ONEHARNESS_COLUMN sets another. */
-const COLUMN_WIDTH = 100;
-
-function columnWidth(): number {
-  const set = Number(process.env["ONEHARNESS_COLUMN"]);
-  return Number.isInteger(set) && set >= 40 ? set : COLUMN_WIDTH;
-}
-
 /** The message the composer's text sends, `//` making one that starts with `/`; null for a command. */
 function messageText(text: string): string | null {
   if (text.startsWith("//")) return text.slice(1);
@@ -369,7 +361,7 @@ export class App {
       client: this.#client,
       live: this.#livePages,
       liveHost: () => this.#liveHost,
-      columnWidth: () => this.#column().width,
+      columnWidth: () => this.#screen.columns,
       screenRows: () => this.#screen.rows,
       redraw: () => this.#redrawViews(),
     });
@@ -399,7 +391,7 @@ export class App {
       schedule: () => this.#schedule(),
     });
     this.#pointer = new Mouse({
-      column: () => this.#column(),
+      width: () => this.#screen.columns,
       scrollBy: (rows) => this.#scrollBy(rows),
       scrolled: () => this.#view.scroll,
       rows: (from, to) =>
@@ -1325,7 +1317,7 @@ export class App {
   /** What the transcript renders with: the screen's width, and what is on. */
   #renderContext(): RenderContext {
     return {
-      width: this.#column().width,
+      width: this.#screen.columns,
       cwd: this.#cwd(),
       blink: this.#blinkOn,
       now: Date.now(),
@@ -1347,16 +1339,6 @@ export class App {
   #redrawViews(): void {
     for (const view of this.#allViews()) view.transcript.invalidate();
     this.#schedule();
-  }
-
-  /**
-   * The column everything is laid out in: the screen's width up to a reading
-   * width, centered with the margin split on both sides.
-   */
-  #column(): { width: number; margin: number } {
-    const screen = this.#screen.columns;
-    const width = Math.min(screen, columnWidth());
-    return { width, margin: Math.floor((screen - width) / 2) };
   }
 
   #viewContext(threadId: string): ViewContext {
@@ -2078,7 +2060,7 @@ export class App {
     // A live page takes a click on itself; its caption opens it whole.
     const live = target.kind === "picture" ? this.#livePages.showing(target.picture) : undefined;
     if (live && target.kind === "picture") {
-      const columns = this.#column().width - IMAGE_INDENT * 2;
+      const columns = this.#screen.columns - IMAGE_INDENT * 2;
       const size = fit(target.picture, columns, {
         ...this.#pictures.media(),
         maxRows: PLACEHOLDER_LIMIT,
@@ -2120,7 +2102,7 @@ export class App {
       figures: this.#pictures.figures,
       screen: () => ({ columns: this.#screen.columns, rows: this.#screen.rows }),
       media: () => this.#pictures.media(),
-      pageSize: () => this.#pictures.pageSize(this.#column().width - IMAGE_INDENT * 2),
+      pageSize: () => this.#pictures.pageSize(this.#screen.columns - IMAGE_INDENT * 2),
       copy: (text, said) => this.#copy(text, said),
       schedule: () => this.#schedule(),
       closed: () => {
@@ -2473,7 +2455,7 @@ export class App {
       this.#renderViewer(this.#viewer);
       return;
     }
-    const { width, margin } = this.#column();
+    const width = this.#screen.columns;
     const height = this.#screen.rows;
     const context = this.#renderContext();
     const shown = this.#view;
@@ -2519,11 +2501,9 @@ export class App {
       ? { menu: footer.list.menu, row: above.length + footer.list.row }
       : null;
     const cursor = footer.cursor
-      ? { row: above.length + footer.cursor.row, column: margin + footer.cursor.column }
+      ? { row: above.length + footer.cursor.row, column: footer.cursor.column }
       : null;
-    const indent = " ".repeat(margin);
-    const rows = [...above, ...footer.rows].map((row) => (row === "" ? row : indent + row));
-    this.#screen.render(rows, cursor, view.pictures);
+    this.#screen.render([...above, ...footer.rows], cursor, view.pictures);
     this.#animate();
   }
 

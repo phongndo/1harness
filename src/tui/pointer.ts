@@ -9,7 +9,7 @@ import { CLICK_MS, type InputEvent, type Key } from "./input.ts";
 import { style } from "./theme.ts";
 import { charWidth, columnsText, selectColumns, spread, truncate, visibleWidth } from "./text.ts";
 
-/** A place in the transcript: a row counted from its first, and a column of the reading column. */
+/** A place in the transcript: a row counted from its first, and a column on screen. */
 export interface Point {
   row: number;
   column: number;
@@ -109,15 +109,15 @@ export function wordAt(row: string, column: number): { from: number; to: number 
 
 /** What the mouse needs from the terminal around it. */
 export interface MouseHost {
-  /** The reading column: its width, and the margin left of it. */
-  column(): { width: number; margin: number };
+  /** The screen's width, in columns. */
+  width(): number;
   /** Scrolls the transcript up by `rows`, or down for fewer than none. */
   scrollBy(rows: number): void;
   /** How many rows the transcript is scrolled up. */
   scrolled(): number;
   /** The transcript's rows from `from` through `to`, however far they are out of view. */
   rows(from: number, to: number): string[];
-  /** A click on a screen row, at a column of the reading column. */
+  /** A click on a screen row, at a column on screen. */
   click(row: number, column: number): void;
   copy(text: string, said: string): void;
   schedule(): void;
@@ -161,8 +161,7 @@ export class Mouse {
 
   event(event: Extract<InputEvent, { type: "mouse" }>): void {
     if (event.button !== 0) return;
-    const { margin, width } = this.#host.column();
-    const column = Math.max(0, Math.min(width - 1, event.column - margin));
+    const column = Math.max(0, Math.min(this.#host.width() - 1, event.column));
     const rows = this.#rows.length;
     if (event.action === "press") {
       // A selection starts where the button went down, once it moves.

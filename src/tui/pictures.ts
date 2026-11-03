@@ -38,7 +38,7 @@ export interface PictureHost {
   live: LivePages;
   /** Whether the host runs pages live, scripts and all. */
   liveHost(): boolean;
-  /** The width of the column the transcript is laid out in. */
+  /** The width the transcript is laid out in. */
   columnWidth(): number;
   screenRows(): number;
   /** Something the views wait for came, so they draw again. */
