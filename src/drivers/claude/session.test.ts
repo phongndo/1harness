@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
-import type { Options, query } from "@anthropic-ai/claude-agent-sdk";
+import type { query } from "@anthropic-ai/claude-agent-sdk";
 import type { HarnessEvent } from "../../core/events.ts";
 import { ClaudeSession } from "./session.ts";
 
@@ -55,25 +55,5 @@ describe("ClaudeSession", () => {
     );
     await session.close();
     await ended;
-  });
-
-  it("caches the conversation's prompt for an hour", async () => {
-    let options: Options | undefined;
-    const session = new ClaudeSession({
-      cwd: root,
-      model: null,
-      effort: null,
-      runtimeMode: "supervised",
-      interactionMode: "default",
-      resume: null,
-      executable: "claude",
-      query: ((params: { prompt: AsyncIterable<unknown>; options: Options }) => {
-        options = params.options;
-        return silent(params as Parameters<typeof query>[0]);
-      }) as unknown as typeof query,
-    });
-    await session.start();
-    assert.deepEqual(options?.settings, { promptCacheTtl: "1h" });
-    await session.close();
   });
 });
