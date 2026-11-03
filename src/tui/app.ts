@@ -72,12 +72,15 @@ import { Mouse, paintSelection } from "./pointer.ts";
 import { CELL_QUERY, GRAPHICS_QUERY, PLACEHOLDER_LIMIT, fit } from "./images.ts";
 import {
   PASTED_IMAGE_BYTES,
+  clipboardFiles,
   clipboardImage,
+  clipboardText,
   collapsesPaste,
   imagePlaceholder,
   megabytes,
   pastedImagePaths,
   pastedTextPlaceholder,
+  pathsAsPaste,
   readPastedImage,
   type PastedImage,
 } from "./attachments.ts";
@@ -141,7 +144,7 @@ const KEYS: [string, string][] = [
   ["/", "run a 1harness command"],
   ["$", "run one of the harness's skills"],
   ["@", "mention a file or folder"],
-  ["ctrl+v", "paste the clipboard's image; a pasted or dropped image path attaches it too"],
+  ["ctrl+v", "paste the clipboard's image, copied files, or text; dropped image paths attach too"],
   ["backspace", "delete a pasted image or long text whole; paste the text again to show it all"],
   ["ctrl+j, ctrl+k", "move in any list, completions included"],
   ["j k, g G, ctrl+d ctrl+u", "move in lists that take no typing"],
@@ -2330,23 +2333,38 @@ export class App {
   }
 
   #readClipboard(): void {
-    const read = this.#pasteClipboardImage().finally(() => {
+    const read = this.#pasteClipboard().finally(() => {
       if (this.#clipboardRead === read) this.#clipboardRead = null;
     });
     this.#clipboardRead = read;
   }
 
-  /** Ctrl+v: the clipboard's image, into the composer. */
-  async #pasteClipboardImage(): Promise<void> {
-    if (!this.#takesImages()) {
-      const harness = (this.#live ?? this.#current)?.info.harness ?? this.#harness;
-      this.#notice("warning", `${this.#harnessLabel(harness)} does not take images.`);
-      return;
-    }
+  /**
+   * Ctrl+v: the clipboard's files, image, or text, into the composer. Text
+   * comes last, since a terminal's own paste brings it, and ctrl+v reaches
+   * the composer only where the terminal leaves it alone.
+   */
+  async #pasteClipboard(): Promise<void> {
     try {
-      const image = await clipboardImage();
-      if (image) this.#attachImage(image);
-      else this.#notice("warning", "No image on the clipboard.");
+      if (this.#takesImages()) {
+        const files = await clipboardFiles();
+        if (files.length > 0) {
+          this.#pasteIntoComposer(pathsAsPaste(files));
+          return;
+        }
+        const image = await clipboardImage();
+        if (image) {
+          this.#attachImage(image);
+          return;
+        }
+      }
+      const text = await clipboardText();
+      if (text !== null) this.#pasteIntoComposer(text);
+      else if (this.#takesImages()) this.#notice("warning", "No image or text on the clipboard.");
+      else {
+        const harness = (this.#live ?? this.#current)?.info.harness ?? this.#harness;
+        this.#notice("warning", `${this.#harnessLabel(harness)} does not take images.`);
+      }
     } catch (error) {
       this.#notice("warning", errorMessage(error));
     } finally {

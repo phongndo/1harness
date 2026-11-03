@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { IMAGE_TYPES, type ImageType } from "../drivers/images.ts";
 
 // What is pasted into the composer, as Claude Code and Codex take it: a
-// path pasted or dropped in, or ctrl+v with an image on the clipboard, shows
+// path pasted or dropped in, or ctrl+v with an image or files copied, shows
 // as `[Image #N]`; a long text as `[Pasted text #N +X lines]`, sent whole.
 // Images are read where the terminal runs, at once, since a screenshot's
 // file may be gone by the time the message is sent, and the host may run
@@ -166,4 +166,64 @@ export function collapsesPaste(text: string): boolean {
 export function pastedTextPlaceholder(n: number, text: string): string {
   const lines = lineCount(text);
   return `[Pasted text #${n} ${lines > 1 ? `+${lines} lines` : `${text.length} chars`}]`;
+}
+
+/** Paths written as a paste of them would be, spaces and quotes escaped. */
+export function pathsAsPaste(paths: string[]): string {
+  return paths.map((path) => path.replace(/[^\w/.,:@%+=-]/g, "\\$&")).join(" ");
+}
+
+// Finder puts a copied file's icon on the clipboard as an image too, so its
+// file is read first.
+const MAC_CLIPBOARD_FILES = `ObjC.import("AppKit");
+const urls = $.NSPasteboard.generalPasteboard.readObjectsForClassesOptions(
+  $([$.NSURL]), $({ NSPasteboardURLReadingFileURLsOnlyKey: true }));
+const paths = [];
+if (urls) for (let i = 0; i < urls.count; i++) paths.push(urls.objectAtIndex(i).path.js);
+JSON.stringify(paths);`;
+
+/**
+ * The files copied to the clipboard where the terminal runs, as from Finder
+ * or a file manager; empty when there are none.
+ */
+export async function clipboardFiles(
+  platform: NodeJS.Platform = process.platform,
+): Promise<string[]> {
+  if (platform === "darwin") {
+    const said = await output("osascript", ["-l", "JavaScript", "-e", MAC_CLIPBOARD_FILES]);
+    try {
+      const paths: unknown = JSON.parse(said?.toString() ?? "[]");
+      return Array.isArray(paths) ? paths.filter((path) => typeof path === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+  const list =
+    (process.env["WAYLAND_DISPLAY"]
+      ? await output("wl-paste", ["--no-newline", "--type", "text/uri-list"])
+      : null) ?? (await output("xclip", ["-selection", "clipboard", "-t", "text/uri-list", "-o"]));
+  return (list?.toString() ?? "")
+    .split(/\r?\n/)
+    .map((line) => (line.startsWith("file://") ? localPath(line.trim()) : null))
+    .filter((path) => path !== null);
+}
+
+/**
+ * The text on the clipboard where the terminal runs, for a ctrl+v that
+ * reaches the composer as a key rather than a paste; null when there is
+ * none. Over SSH that clipboard is not the user's, so it is not read.
+ */
+export async function clipboardText(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<string | null> {
+  if (env["SSH_CONNECTION"] || env["SSH_TTY"]) return null;
+  const text =
+    platform === "darwin"
+      ? await output("pbpaste", [])
+      : ((env["WAYLAND_DISPLAY"]
+          ? await output("wl-paste", ["--no-newline", "--type", "text"])
+          : null) ?? (await output("xclip", ["-selection", "clipboard", "-o"])));
+  const said = text?.toString() ?? "";
+  return said === "" ? null : said;
 }

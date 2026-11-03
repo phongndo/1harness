@@ -5,9 +5,11 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { after, before, describe, it } from "node:test";
 import {
+  clipboardText,
   collapsesPaste,
   pastedImagePaths,
   pastedTextPlaceholder,
+  pathsAsPaste,
   readPastedImage,
 } from "./attachments.ts";
 
@@ -42,6 +44,10 @@ describe("pastedImagePaths", () => {
     assert.equal(pastedImagePaths(`'${shot}`), null);
   });
 
+  it("reads copied files' paths back as a paste of them", () => {
+    assert.deepEqual(pastedImagePaths(pathsAsPaste([shot, photo])), [shot, photo]);
+  });
+
   it("reads an image with its type by its extension", () => {
     assert.deepEqual(readPastedImage(photo), {
       type: "image/jpeg",
@@ -60,4 +66,7 @@ describe("long pastes", () => {
     assert.equal(pastedTextPlaceholder(1, "x".repeat(1200)), "[Pasted text #1 1200 chars]");
   });
 
+  it("does not read the clipboard of a machine reached over SSH", async () => {
+    assert.equal(await clipboardText("linux", { SSH_CONNECTION: "1 2 3 4" }), null);
+  });
 });
