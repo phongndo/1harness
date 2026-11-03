@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { INIT_PROMPT } from "./prompts.ts";
-import { codexMcpConfig, codexResponse, decisionEffect } from "./session.ts";
+import { codexResponse, decisionEffect } from "./requests.ts";
 import {
   CodexTranslator,
+  codexMcpConfig,
   codexRuntimePolicy,
   grantedRuntimeMode,
   toItem,

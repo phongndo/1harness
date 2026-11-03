@@ -6,6 +6,7 @@ import {
   type Item,
   type ItemStatus,
   type McpServer,
+  type McpServerConfig,
   type McpServerState,
   type RateLimit,
   type RuntimeMode,
@@ -206,6 +207,29 @@ export function grantedRuntimeMode(asked: RuntimeMode, sandbox: CodexSandboxPoli
     case "externalSandbox":
       return "full-access";
   }
+}
+
+/**
+ * 1harness's servers as thread config. A nested `mcp_servers` table merges with
+ * the servers in Codex's config files, and unlike dotted keys it takes names
+ * with dots, which Codex's key parser would split.
+ */
+export function codexMcpConfig(servers: Record<string, McpServerConfig>): Record<string, unknown> {
+  if (Object.keys(servers).length === 0) return {};
+  return {
+    mcp_servers: Object.fromEntries(
+      Object.entries(servers).map(([name, server]) => [
+        name,
+        server.type === "http"
+          ? {
+              url: server.url,
+              http_headers: server.headers,
+              ...(server.timeoutSec ? { tool_timeout_sec: server.timeoutSec } : {}),
+            }
+          : { command: server.command, args: server.args, env: server.env },
+      ]),
+    ),
+  };
 }
 
 function itemStatus(status: string): ItemStatus {
