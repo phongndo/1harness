@@ -7,6 +7,7 @@ import { after, afterEach, before, describe, it } from "node:test";
 import { HostClient } from "../client/client.ts";
 import { LocalConnection } from "../client/connection.ts";
 import { errorMessage } from "../core/errors.ts";
+import type { UserInput } from "../core/events.ts";
 import { RpcError } from "../protocol.ts";
 import { Host } from "../host/host.ts";
 import { Store } from "../store/store.ts";
@@ -394,8 +395,10 @@ describe("App commands", () => {
       id: "skilled",
       label: "Skilled",
       unavailable: () => null,
-      create: (options) =>
-        Object.assign(new ScriptedSession(options), {
+      create: (options) => {
+        const scripted = new ScriptedSession(options);
+        const startTurn = scripted.startTurn.bind(scripted);
+        return Object.assign(scripted, {
           listCommands: async () => [
             {
               name: "tidy",
@@ -406,7 +409,21 @@ describe("App commands", () => {
               startsTurn: true,
             },
           ],
-        }),
+          // A turn that runs until stopped, so what is sent meanwhile queues.
+          startTurn: async (input: UserInput) => {
+            if (input.text !== "hold") return startTurn(input);
+            scripted.events.push({ type: "turn.started", turnId: "held" });
+          },
+          interrupt: async () => {
+            scripted.events.push({
+              type: "turn.ended",
+              turnId: "held",
+              status: "interrupted",
+              error: null,
+            });
+          },
+        });
+      },
     });
     try {
       const session = await start({ harness: "skilled" });
@@ -422,6 +439,13 @@ describe("App commands", () => {
       // A `$` that names no skill is a message.
       await session.type("$5 a month\r");
       await session.sees("Done with $5 a month");
+      // A queued skill comes back as typed.
+      await session.type("hold\r");
+      await session.sees("Add to the turn");
+      await session.type("$tidy later\r");
+      await session.sees("queued: /tidy later");
+      await session.type("/unqueue\r");
+      await session.sees("┃ $tidy later");
     } finally {
       unregisterSkilled();
     }

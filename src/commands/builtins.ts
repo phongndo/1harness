@@ -294,7 +294,9 @@ const unqueue: CommandDefinition = {
   group: "Threads",
   async run(context) {
     const message = await context.thread?.unqueue();
-    if (message) context.ui.setInput(message.input.text);
+    // A queued skill went as `/name args`, but the composer runs skills as `$name args`.
+    const text = message?.command ? `$${message.input.text.slice(1)}` : message?.input.text;
+    if (text !== undefined) context.ui.setInput(text);
   },
 };
 
