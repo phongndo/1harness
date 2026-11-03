@@ -8,7 +8,7 @@ import type {
 import type { NativeCommand } from "../core/events.ts";
 import type { FileMatch } from "../core/files.ts";
 import { errorMessage } from "../core/errors.ts";
-import { BoundedMap } from "./cache.ts";
+import { FetchCache } from "./cache.ts";
 import type { Editor } from "./editor.ts";
 import type { Key } from "./input.ts";
 import { Menu, entry, lineStep, type MenuEntry } from "./menu.ts";
@@ -165,7 +165,20 @@ export class Suggestions {
   #argsRequired: number | null = null;
   #argsDismissed = new Dismissed();
   /** Files for `@` mentions, as the host found them, by folder and query. */
-  #fileResults = new BoundedMap<string, FileMatch[] | Promise<void>>(FILE_SEARCHES);
+  #fileResults = new FetchCache<string, { matches: FileMatch[]; loading: boolean }>({
+    limit: FILE_SEARCHES,
+    arrived: (found, key) => {
+      // Results fill in as the host's first scan goes on.
+      if (found.loading)
+        setTimeout(() => {
+          if (this.#fileResults.peek(key) === found) this.#fileResults.delete(key);
+          this.#syncMention();
+          this.#host.schedule();
+        }, FILES_RETRY_MS).unref();
+      this.#syncMention();
+      this.#host.schedule();
+    },
+  });
   #mention: FileList | null = null;
   #mentionDismissed = new Dismissed();
 
@@ -409,33 +422,14 @@ export class Suggestions {
    */
   #searchFiles(query: string): FileMatch[] {
     const cwd = this.#host.cwd();
-    const key = `${cwd}\0${query}`;
-    const cached = this.#fileResults.get(key);
-    if (Array.isArray(cached)) return cached;
-    if (cached === undefined) {
-      const asking = this.#host.client
+    const found = this.#fileResults.get(`${cwd}\0${query}`, () =>
+      this.#host.client
         .call("files.search", { cwd, query, limit: MENTION_LIMIT })
-        .then(
-          ({ matches, loading }) => {
-            if (this.#fileResults.get(key) !== asking) return;
-            this.#fileResults.set(key, matches);
-            // Results fill in as the host's first scan goes on.
-            if (loading)
-              setTimeout(() => {
-                if (this.#fileResults.get(key) === matches) this.#fileResults.delete(key);
-                this.#syncMention();
-                this.#host.schedule();
-              }, FILES_RETRY_MS).unref();
-            this.#syncMention();
-            this.#host.schedule();
-          },
-          (error: unknown) => {
-            this.#fileResults.set(key, []);
-            this.#host.notice("warning", `File completion is unavailable: ${errorMessage(error)}`);
-          },
-        );
-      this.#fileResults.set(key, asking);
-    }
-    return [];
+        .catch((error: unknown) => {
+          this.#host.notice("warning", `File completion is unavailable: ${errorMessage(error)}`);
+          return { matches: [], loading: false };
+        }),
+    );
+    return found?.matches ?? [];
   }
 }

@@ -1,4 +1,4 @@
-import { BoundedMap } from "./cache.ts";
+import { BoundedMap, FetchCache } from "./cache.ts";
 import type { FigureRenderer } from "./figures.ts";
 import { picture, type CellSize, type Picture } from "./images.ts";
 import { visibleWidth } from "./text.ts";
@@ -902,8 +902,8 @@ export class Equations implements FigureRenderer {
   #onReady: () => void;
   #engine: Promise<Typeset | null> | null = null;
   #broken = false;
-  /** Each equation's SVG, by its TeX: null when it cannot be typeset, a promise while it is. */
-  #svgs = new BoundedMap<string, string | null | Promise<string | null>>(KEPT);
+  /** Each equation's SVG, by its TeX: null when it cannot be typeset. */
+  #svgs = new FetchCache<string, string | null>({ limit: KEPT, arrived: () => this.#onReady() });
   #pictures = new BoundedMap<string, Picture | null>(KEPT);
 
   constructor(onReady: () => void) {
@@ -960,17 +960,10 @@ export class Equations implements FigureRenderer {
 
   /** An equation's SVG, typeset in the background on first asking. */
   #svg(tex: string): string | null | undefined {
-    const known = this.#svgs.get(tex);
-    if (typeof known === "string" || known === null) return known;
-    if (known) return undefined;
-    const typesetting = this.#load().then(async (typeset) => {
-      const svg = typeset ? await typeset(tex) : null;
-      this.#svgs.set(tex, svg);
-      this.#onReady();
-      return svg;
+    return this.#svgs.get(tex, async () => {
+      const typeset = await this.#load();
+      return typeset ? typeset(tex) : null;
     });
-    this.#svgs.set(tex, typesetting);
-    return undefined;
   }
 
   #load(): Promise<Typeset | null> {

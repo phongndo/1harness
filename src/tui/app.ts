@@ -37,7 +37,7 @@ import {
   type UiRequest,
 } from "../protocol.ts";
 import { agentRowOf } from "./agents.ts";
-import { BoundedMap } from "./cache.ts";
+import { FetchCache } from "./cache.ts";
 import { Suggestions, inMenuOrder } from "./completion.ts";
 import { Editor, applyEditingKey } from "./editor.ts";
 import { activityLine, attentionLine, queueRows, statusLine } from "./footer.ts";
@@ -252,13 +252,13 @@ export class App {
   /** The line a thread being opened shows first, such as "New codex thread". */
   #announce: string | null = null;
   /** Lists that commands keep for the thread, such as models, fetched on first use. */
-  #lookups = new Map<string, unknown[] | Promise<unknown[]>>();
+  #lookups = new FetchCache<string, unknown[]>({ arrived: () => this.#suggested() });
   /** 1harness's commands, the host's included. */
   #commands = new CommandRegistry();
   /** The host's commands, such as extensions', as registered here. */
   #hostCommands: (() => void)[] = [];
   /** Completions the host gave for its commands, by command and arguments. */
-  #completions = new Map<string, Completions | null | Promise<void>>();
+  #completions = new FetchCache<string, Completions | null>({ arrived: () => this.#suggested() });
   #context: CommandContext;
   #warnings: string[];
   #notes: string[];
@@ -279,7 +279,12 @@ export class App {
   /** A character cell's size in pixels, which images are sized by. */
   #cell: CellSize = DEFAULT_CELL;
   /** Pictures of image files, by cells and path, as the host sent them. */
-  #images = new BoundedMap<string, Picture | null | "loading">(PICTURES_KEPT);
+  #images = new FetchCache<string, Picture | null>({
+    limit: PICTURES_KEPT,
+    arrived: (shown) => {
+      if (shown) this.#redrawViews();
+    },
+  });
   /** What the last frame's transcript rows do when clicked, by screen row; `#top` is the first one's place. */
   #targets: (Hit | null)[] = [];
   /** Whether the host runs pages live, scripts and all. */
@@ -300,11 +305,18 @@ export class App {
   /** A picture on the whole screen, opened by a click on it. */
   #viewer: PictureViewer | null = null;
   /** Pages drawn as pictures, by theme, width, cell size, and content. */
-  #pages = new BoundedMap<string, Picture | null | "loading">(PICTURES_KEPT);
+  #pages = new FetchCache<string, Picture | null>({
+    limit: PICTURES_KEPT,
+    arrived: () => this.#redrawViews(),
+  });
   /** Diagrams and equations drawn as pictures; as more can be shown, the views draw again. */
   #figures = new Figures(() => this.#redrawViews());
   /** The default model's ID by thread, for a harness that names it only once a turn runs. */
-  #defaultModels = new Map<string, string | null>();
+  #defaultModels = new FetchCache<string, string | null>({
+    arrived: (id) => {
+      if (id) this.#schedule();
+    },
+  });
 
   /** The prompt on screen, and the request it answers; request IDs are only unique per thread. */
   #prompt: { prompt: ChoicePrompt | QuestionPrompt; asking: OpenRequest } | null = null;
@@ -1397,24 +1409,15 @@ export class App {
         return { ...rows(live.picture), live: true };
       }
     }
-    const known = this.#pages.get(key);
-    if (known === null) return null;
-    if (known === undefined || known === "loading") {
-      if (known === undefined) {
-        this.#pages.set(key, "loading");
-        const { width, scale } = this.#pageSize(columns);
-        void this.#client
-          .call("media.html", { html, width, scale, dark: !light, transparent: true })
-          .then((drawn) => picture(Buffer.from(drawn.data, "base64")))
-          .catch(() => null)
-          .then((drawn) => {
-            this.#pages.set(key, drawn);
-            this.#redrawViews();
-          });
-      }
-      return { rows: [style.muted("Drawing the page…")] };
-    }
-    return rows(known);
+    const { width, scale } = this.#pageSize(columns);
+    const known = this.#pages.get(key, () =>
+      this.#client
+        .call("media.html", { html, width, scale, dark: !light, transparent: true })
+        .then((drawn) => picture(Buffer.from(drawn.data, "base64")))
+        .catch(() => null),
+    );
+    if (known === undefined) return { rows: [style.muted("Drawing the page…")] };
+    return known && rows(known);
   }
 
   /**
@@ -1434,23 +1437,12 @@ export class App {
    */
   #image(path: string): Picture | null | undefined {
     // Fetched again for other cells, as a new font size makes, so it stays sharp.
-    const key = this.#imageKey(path);
-    const known = this.#images.get(key);
-    if (known !== undefined) return known === "loading" ? undefined : known;
-    this.#images.set(key, "loading");
-    void this.#client
-      .call("files.image", { path, ...this.#imageBox() })
-      .then((found) => (found ? picture(Buffer.from(found.data, "base64")) : null))
-      .catch(() => null)
-      .then((shown) => {
-        this.#images.set(key, shown);
-        if (shown) this.#redrawViews();
-      });
-    return undefined;
-  }
-
-  #imageKey(path: string): string {
-    return `${this.#cell.width}x${this.#cell.height}\0${path}`;
+    return this.#images.get(`${this.#cell.width}x${this.#cell.height}\0${path}`, () =>
+      this.#client
+        .call("files.image", { path, ...this.#imageBox() })
+        .then((found) => (found ? picture(Buffer.from(found.data, "base64")) : null))
+        .catch(() => null),
+    );
   }
 
   #media(): MediaContext {
@@ -1621,25 +1613,18 @@ export class App {
 
   /** Completions for a host command's arguments: fetched once, then shown when they arrive. */
   #hostCompletion(name: string, args: string): Completions | null {
-    const key = `${name}\0${args}`;
-    const cached = this.#completions.get(key);
-    if (cached !== undefined && !(cached instanceof Promise)) return cached;
-    if (cached === undefined) {
-      const threadId = this.#currentId;
-      const loading = this.#client.call("commands.complete", { threadId, name, args }).then(
-        (found) => {
-          if (this.#completions.get(key) !== loading) return;
-          this.#completions.set(key, found);
-          this.#suggestions.sync();
-          this.#schedule();
-        },
-        () => {
-          this.#completions.set(key, null);
-        },
-      );
-      this.#completions.set(key, loading);
-    }
-    return null;
+    const threadId = this.#currentId;
+    return (
+      this.#completions.get(`${name}\0${args}`, () =>
+        this.#client.call("commands.complete", { threadId, name, args }).catch(() => null),
+      ) ?? null
+    );
+  }
+
+  /** Opens the lists under the composer again, for what they show that has come. */
+  #suggested(): void {
+    this.#suggestions.sync();
+    this.#schedule();
   }
 
   async #exit(): Promise<void> {
@@ -2320,31 +2305,11 @@ export class App {
    * nothing; completion menus fill in when it arrives.
    */
   #lookup<T>(key: string, load: () => Promise<T[]>): T[] {
-    const cached = this.#lookups.get(key);
-    if (Array.isArray(cached)) return cached as T[];
-    if (cached === undefined) void this.#fetch(key, load).catch(() => {});
-    return [];
+    return (this.#lookups.get(key, load) ?? []) as T[];
   }
 
   #fetch<T>(key: string, load: () => Promise<T[]>): Promise<T[]> {
-    const cached = this.#lookups.get(key);
-    if (cached !== undefined) return Promise.resolve(cached as T[] | Promise<T[]>);
-    const thread = this.#currentId;
-    const loading = load().then(
-      (items) => {
-        if (thread !== this.#currentId || this.#lookups.get(key) !== loading) return items;
-        this.#lookups.set(key, items);
-        this.#suggestions.sync();
-        this.#schedule();
-        return items;
-      },
-      (error: unknown) => {
-        if (this.#lookups.get(key) === loading) this.#lookups.delete(key);
-        throw error;
-      },
-    );
-    this.#lookups.set(key, loading);
-    return loading;
+    return this.#lookups.load(key, load) as Promise<T[]>;
   }
 
   /** Commands the current session can run: 1harness's in a set order, then the rest, then /quit. */
@@ -2886,21 +2851,21 @@ export class App {
     if (!thread) return null;
     // Each harness has its own default.
     const key = `${thread.id}\0${thread.harness}`;
-    const known = this.#defaultModels.get(key);
-    if (known !== undefined) return known;
     // Asked once its session is up; a parked thread's is not started just to name its model.
-    if (thread.status === "parked" || thread.status === "starting") return null;
-    if (!thread.methods.includes("listModels")) return null;
-    this.#defaultModels.set(key, null);
-    void (this.#callSession(thread.id, "listModels", []) as Promise<ModelOption[] | null>)
-      .then((models) => {
-        const option = (models ?? []).find((candidate) => candidate.isDefault);
-        const id = option ? (option.aliases[0] ?? option.id) : null;
-        this.#defaultModels.set(key, id);
-        if (id) this.#schedule();
-      })
-      .catch(() => {});
-    return null;
+    const unasked = thread.status === "parked" || thread.status === "starting";
+    if (!this.#defaultModels.has(key) && (unasked || !thread.methods.includes("listModels")))
+      return null;
+    return (
+      this.#defaultModels.get(key, () =>
+        (this.#callSession(thread.id, "listModels", []) as Promise<ModelOption[] | null>).then(
+          (models) => {
+            const option = (models ?? []).find((candidate) => candidate.isDefault);
+            return option ? (option.aliases[0] ?? option.id) : null;
+          },
+          () => null,
+        ),
+      ) ?? null
+    );
   }
 
   #report(report: Report): void {
