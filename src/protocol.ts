@@ -21,6 +21,7 @@ import type {
   NoticeLevel,
 } from "./core/events.ts";
 import type { FileMatch } from "./core/files.ts";
+import type { ImageType } from "./drivers/images.ts";
 import type { OperationInfo } from "./operations/operation.ts";
 import type { Message } from "./core/thread.ts";
 import type { RunRecord, SwitchResult, ThreadStatus } from "./host/manager.ts";
@@ -345,6 +346,8 @@ export interface Methods {
       steer?: boolean;
       /** A harness command, sent as written. */
       command?: boolean;
+      /** Images pasted where the client runs, which the host keeps as files for the harness. */
+      images?: { type: ImageType; data: string }[];
       /** The client's own ID for this message; a retry with the same ID sends nothing. */
       requestId?: string;
     };

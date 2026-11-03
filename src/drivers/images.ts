@@ -3,7 +3,7 @@ import { extname } from "node:path";
 
 export type ImageType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
 
-const IMAGE_TYPES: Record<string, ImageType> = {
+export const IMAGE_TYPES: Record<string, ImageType> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",

@@ -76,7 +76,7 @@ import { ExtensionSets, type ExtensionSet } from "./extension-sets.ts";
 import { hostOperations } from "./operations.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Scope } from "./scope.ts";
-import { sendText } from "./send.ts";
+import { savePastedImages, sendText } from "./send.ts";
 import { StoreWriter } from "./store-writer.ts";
 import {
   NO_FLAGS,
@@ -1369,14 +1369,22 @@ export class Host {
           children: [...children.values()],
         };
       },
-      "thread.send": async (client, { threadId, text, steer, command, requestId }) => {
+      "thread.send": async (client, { threadId, text, steer, command, images, requestId }) => {
         if (requestId) {
           const sent =
             client.sent.get(requestId) ?? this.#store?.messageByRequest(threadId, requestId);
           if (sent) return { messageId: sent };
         }
         const thread = this.#open(threadId).thread;
-        const sending = sendText(thread, text, { steer, command, requestId });
+        if (images?.length && !thread.capabilities.images)
+          throw new Error(`${thread.info.harness} does not take images`);
+        const sending = sendText(thread, text, {
+          steer,
+          command,
+          // Written at once, since awaiting would let a retry pass the check above too.
+          images: images?.length ? savePastedImages(images) : undefined,
+          requestId,
+        });
         // Awaiting a plain send would let a retry of it pass the check above first.
         const message = sending instanceof Promise ? await sending : sending;
         if (requestId) {

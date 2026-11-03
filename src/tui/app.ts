@@ -69,6 +69,15 @@ import { setLightTheme, style } from "./theme.ts";
 import { IMAGE_INDENT, type Hit, type RenderContext, type Target } from "./transcript.ts";
 import { Mouse, paintSelection } from "./pointer.ts";
 import { CELL_QUERY, GRAPHICS_QUERY, PLACEHOLDER_LIMIT, fit } from "./images.ts";
+import {
+  PASTED_IMAGE_BYTES,
+  clipboardImage,
+  imagePlaceholder,
+  megabytes,
+  pastedImagePaths,
+  readPastedImage,
+  type PastedImage,
+} from "./attachments.ts";
 import { ThreadView, type ViewContext } from "./view.ts";
 
 export interface AppOptions {
@@ -129,6 +138,7 @@ const KEYS: [string, string][] = [
   ["/", "run a 1harness command"],
   ["$", "run one of the harness's skills"],
   ["@", "mention a file or folder"],
+  ["ctrl+v", "paste the clipboard's image; a pasted or dropped image path attaches it too"],
   ["ctrl+j, ctrl+k", "move in any list, completions included"],
   ["j k, g G, ctrl+d ctrl+u", "move in lists that take no typing"],
   ["h l, q", "switch tabs and close in those lists"],
@@ -169,6 +179,11 @@ function pickEntry(item: PickEntry): MenuEntry {
     tag: item.tag ?? "",
     ...(item.group ? { group: item.group } : {}),
   });
+}
+
+/** An image's size before base64. */
+function imageBytes(image: PastedImage): number {
+  return (image.data.length * 3) / 4;
 }
 
 /** A skill named as the composer's text starts, `$name args`. */
@@ -308,6 +323,13 @@ export class App {
   #starting = true;
   /** Messages sent while a thread was still opening, for it once it opens. */
   #held: string[] = [];
+  /** Images pasted into the composer, by the `[Image #N]` that stands for each until it is sent. */
+  #images = new Map<string, PastedImage>();
+  #imageCount = 0;
+  /** A ctrl+v reading the clipboard, which the composer's keys wait for. */
+  #clipboardRead: Promise<void> | null = null;
+  /** Counts ctrl+c, which drops the keys still waiting on a clipboard read. */
+  #cleared = 0;
   /** A view for no thread, once the startup view belongs to one. */
   #nowhere = new ThreadView("none");
   /** Views standing in for shown threads whose logs are not loaded yet. */
@@ -1813,7 +1835,7 @@ export class App {
           this.#panel.menu.paste(event.text);
         } else {
           this.#panel = null;
-          this.#editor.insert(event.text);
+          this.#pasteIntoComposer(event.text);
           this.#suggestions.sync();
         }
         return;
@@ -1890,6 +1912,19 @@ export class App {
     const historyKey =
       (!key.ctrl && !key.meta && (key.name === "up" || key.name === "down")) ||
       (key.ctrl && (key.name === "p" || key.name === "n"));
+    // Keys typed while ctrl+v reads the clipboard wait for it, in order, so its
+    // image lands where it was pasted: a second ctrl+v, or enter, comes after
+    // it. Ctrl+c goes at once, and drops them.
+    const read = this.#clipboardRead;
+    if (read && !(key.ctrl && key.name === "c")) {
+      const cleared = this.#cleared;
+      void read.then(() => {
+        if (this.#cleared !== cleared) return;
+        this.#key(key);
+        this.#schedule();
+      });
+      return;
+    }
     const walking = this.#recalled && historyKey;
     this.#recalled = walking;
     if (!walking && this.#suggestions.key(key)) return;
@@ -1976,6 +2011,7 @@ export class App {
 
   #composerKey(key: Key): void {
     if (key.ctrl && key.name === "c") {
+      this.#cleared++;
       if (!this.#editor.empty) this.#editor.clear();
       else if (this.#live?.busy) void this.#stop();
       else if (this.#exitArmed) void this.#exit();
@@ -1994,6 +2030,10 @@ export class App {
     if (key.ctrl && key.name === "d") {
       if (this.#editor.empty) void this.#exit();
       else this.#editor.delete();
+      return;
+    }
+    if (key.ctrl && key.name === "v") {
+      this.#readClipboard();
       return;
     }
     if ((key.ctrl && key.name === "j") || (key.name === "return" && (key.meta || key.shift))) {
@@ -2178,16 +2218,98 @@ export class App {
       this.#notice("error", "No session is running. Use /new to start one.");
       return;
     }
-    // The host finds `@` mentioned images where the thread runs.
+    // Pasted images go with the `[Image #N]` left in the text; the host finds
+    // `@` mentioned ones where the thread runs.
+    const placeholders = [...new Set(text.match(/\[Image #\d+\]/g) ?? [])].filter((placeholder) =>
+      this.#images.has(placeholder),
+    );
+    const images = placeholders.map((placeholder) => this.#images.get(placeholder)!);
     this.#client
       .call("thread.send", {
         threadId: thread.id,
         text,
         steer: steer && thread.busy,
+        ...(images.length > 0 ? { images } : {}),
         // A send retried after a dropped connection is sent once.
         requestId: randomUUID(),
       })
+      .then(() => {
+        for (const placeholder of placeholders) this.#images.delete(placeholder);
+      })
       .catch((error: unknown) => this.#notice("error", errorMessage(error)));
+  }
+
+  /** Whether the thread on screen takes images; the host says so for one still to open. */
+  #takesImages(): boolean {
+    return (this.#live ?? this.#current)?.capabilities.images ?? true;
+  }
+
+  /** Puts an image in the composer as `[Image #N]`; false when it would make the message too large. */
+  #attachImage(image: PastedImage): boolean {
+    let total = imageBytes(image);
+    for (const [placeholder, kept] of this.#images)
+      if (this.#editor.text.includes(placeholder)) total += imageBytes(kept);
+    if (total > PASTED_IMAGE_BYTES) {
+      this.#notice(
+        "warning",
+        `One message's images can be at most ${megabytes(PASTED_IMAGE_BYTES)} together.`,
+      );
+      return false;
+    }
+    const placeholder = imagePlaceholder(++this.#imageCount);
+    this.#images.set(placeholder, image);
+    this.#editor.insert(`${placeholder} `);
+    return true;
+  }
+
+  /**
+   * A paste into the composer: image files' paths, as dropping screenshots in
+   * writes them, become images; anything else is text. An empty paste, which
+   * some terminals send for an image, takes the clipboard's image.
+   */
+  #pasteIntoComposer(text: string): void {
+    if (text === "") {
+      this.#readClipboard();
+      return;
+    }
+    const paths = this.#takesImages() ? pastedImagePaths(text) : null;
+    if (!paths) {
+      this.#editor.insert(text);
+      return;
+    }
+    try {
+      const images = paths.map(readPastedImage);
+      for (const image of images) if (!this.#attachImage(image)) break;
+    } catch (error) {
+      this.#notice("warning", errorMessage(error));
+      this.#editor.insert(text);
+    }
+  }
+
+  #readClipboard(): void {
+    const read = this.#pasteClipboardImage().finally(() => {
+      if (this.#clipboardRead === read) this.#clipboardRead = null;
+    });
+    this.#clipboardRead = read;
+  }
+
+  /** Ctrl+v: the clipboard's image, into the composer. */
+  async #pasteClipboardImage(): Promise<void> {
+    if (!this.#takesImages()) {
+      const harness = (this.#live ?? this.#current)?.info.harness ?? this.#harness;
+      this.#notice("warning", `${this.#harnessLabel(harness)} does not take images.`);
+      return;
+    }
+    try {
+      const image = await clipboardImage();
+      if (image) this.#attachImage(image);
+      else this.#notice("warning", "No image on the clipboard.");
+    } catch (error) {
+      this.#notice("warning", errorMessage(error));
+    } finally {
+      this.#suggestions.sync();
+      this.#schedule();
+    }
   }
 
   /** Stops the turn on screen and every agent under it. */

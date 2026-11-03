@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -491,6 +491,49 @@ describe("App commands", () => {
 });
 
 describe("App threads and keys", () => {
+  it("attaches an image whose path is pasted as [Image #N], and sends it with the message", async () => {
+    const received: UserInput[] = [];
+    const unregisterSeeing = registerDriver({
+      id: "seeing",
+      label: "Seeing",
+      unavailable: () => null,
+      create: (options) => {
+        const scripted = new ScriptedSession(options);
+        const startTurn = scripted.startTurn.bind(scripted);
+        return Object.assign(scripted, {
+          capabilities: { ...scripted.capabilities, images: true },
+          startTurn: async (input: UserInput) => {
+            received.push(input);
+            return startTurn(input);
+          },
+        });
+      },
+    });
+    try {
+      const shot = join(root, "Screen shot.png");
+      writeFileSync(shot, "png bytes");
+      const session = await start({ harness: "seeing" });
+      await session.sees("supervised · seeing · big");
+      // As a terminal writes a dropped file's path, in a bracketed paste.
+      await session.type(`what is \x1b[200~${shot.replaceAll(" ", "\\ ")}\x1b[201~`);
+      await session.sees(/^what is \[Image #1\]/m);
+      await session.type("\r");
+      await session.sees("Done with what is [Image #1]");
+      const [image] = received.at(-1)?.images ?? [];
+      assert.ok(image);
+      assert.equal(readFileSync(image, "utf8"), "png bytes");
+      // Together, one message's images stay under what a server takes.
+      const big = [join(root, "big-1.png"), join(root, "big-2.png")];
+      for (const path of big) writeFileSync(path, Buffer.alloc(6 * 1024 * 1024));
+      await session.type(`\x1b[200~${big.join(" ")}\x1b[201~`);
+      const refused = await session.sees("images can be at most 10 MB together");
+      assert.match(refused, /^\[Image #2\] $/m);
+      assert.doesNotMatch(refused, /\[Image #3\]/);
+    } finally {
+      unregisterSeeing();
+    }
+  });
+
   it("opens another thread with /new, and switches back to the first from ctrl+t", async () => {
     const session = await start({ prompt: "alpha" });
     await session.sees("Done with alpha");
