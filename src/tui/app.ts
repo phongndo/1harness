@@ -867,13 +867,18 @@ export class App {
     return threadStatusInput(thread, this.#views.get(thread.id)?.turn?.heading ?? null);
   }
 
+  /** Gives the terminal back as it was: no status records, its own screen, and cooked input. */
+  #restoreTerminal(): void {
+    this.#programStatus?.clear();
+    this.#screen.leave();
+    if (this.#in.isTTY) this.#in.setRawMode(false);
+  }
+
   /** Restores the terminal however the process ends. */
   #guard(): void {
     const restore = () => {
-      this.#programStatus?.clear();
-      this.#screen.leave();
+      this.#restoreTerminal();
       if (this.#stderrWrite) process.stderr.write = this.#stderrWrite;
-      if (this.#in.isTTY) this.#in.setRawMode(false);
     };
     const crashed = (error: Error) => {
       restore();
@@ -1654,10 +1659,8 @@ export class App {
       if (timer) clearTimeout(timer);
     }
     this.#livePages.stop();
-    this.#programStatus?.clear();
-    this.#screen.leave();
+    this.#restoreTerminal();
     if (this.#stderrWrite) process.stderr.write = this.#stderrWrite;
-    this.#in.setRawMode(false);
     this.#in.pause();
     for (const undo of this.#unlisten.splice(0)) undo();
     const server = this.#server;
@@ -1703,9 +1706,7 @@ export class App {
 
   #suspend(): void {
     // A suspended 1harness reports nothing; its records come back when it resumes.
-    this.#programStatus?.clear();
-    this.#screen.leave();
-    this.#in.setRawMode(false);
+    this.#restoreTerminal();
     process.once("SIGCONT", () => {
       this.#in.setRawMode(true);
       this.#screen.enter();
