@@ -3,15 +3,14 @@ import type { HarnessRequest, Item, NoticeLevel } from "../core/events.ts";
 import type { Message } from "../core/thread.ts";
 import { stripHandoff } from "../host/handoff.ts";
 import type { LogEntry, TurnTokens } from "../protocol.ts";
+import { formatTokens } from "../core/wording.ts";
 import { reportStatus, type AgentRow } from "./agents.ts";
-import {
-  Transcript,
-  changeCounts,
-  formatTokens,
-  groupSummary,
-  isToolItem,
-  type Block,
-} from "./transcript.ts";
+import { Transcript, changeCounts, groupSummary, isToolItem, type Block } from "./transcript.ts";
+
+/** A turn's tokens up and down, as its activity line and summary say them: `(↑1.2k ↓350)`. */
+export function tokenCounts(up: number, down: number): string {
+  return `(↑${formatTokens(up)} ↓${formatTokens(down)})`;
+}
 
 /** What the view needs from the client to show an entry. */
 export interface ViewContext {
@@ -366,7 +365,7 @@ export class ThreadView {
     const seconds = Math.round(((ended?.at ?? Date.now()) - turn.startedAt) / 1000);
     const up = ended?.up ?? Math.ceil(turn.up);
     const down = ended?.down ?? Math.ceil(turn.down);
-    const tokens = `(↑${formatTokens(up)} ↓${formatTokens(down)})`;
+    const tokens = tokenCounts(up, down);
     const label =
       status === "interrupted" ? "Interrupted · " : status === "failed" ? "Failed · " : "";
     this.transcript.add({ kind: "summary", text: `${label}${seconds}s ${tokens}` });

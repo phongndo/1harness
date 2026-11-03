@@ -1,10 +1,10 @@
 import type { RuntimeMode, Usage } from "../core/events.ts";
 import type { Message } from "../core/thread.ts";
-import { contextUsed, formatCost, formatTokens, limitBrief, plural } from "../core/wording.ts";
+import { contextUsed, formatCost, limitBrief, plural } from "../core/wording.ts";
 import type { ThreadState } from "../protocol.ts";
 import { style } from "./theme.ts";
 import { oneLineText, spread, truncate, visibleWidth, wrap } from "./text.ts";
-import { queuedText, type TurnState } from "./view.ts";
+import { queuedText, tokenCounts, type TurnState } from "./view.ts";
 
 // The lines under the transcript, from what the terminal shows when it draws
 // them: what the turn is doing, what waits to run, who else needs the user,
@@ -69,7 +69,7 @@ export function activityLine(
         ? "Running"
         : (turn.heading ?? turn.phase);
   const dot = state.blink ? style.text("•") : " ";
-  const tokens = `(↑${formatTokens(Math.ceil(turn.up))} ↓${formatTokens(Math.ceil(turn.down))})`;
+  const tokens = tokenCounts(Math.ceil(turn.up), Math.ceil(turn.down));
   const hint = state.steer
     ? "esc stop · enter adds to turn · tab queues"
     : "esc stop · enter queues";

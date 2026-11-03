@@ -113,8 +113,14 @@ export function fit(
   scale = Math.min(scale, (media.maxRows * cell.height) / image.pixelHeight);
   // Placeholders name rows and columns up to their table's length.
   return {
-    columns: Math.min(297, Math.max(1, Math.round((image.pixelWidth * scale) / cell.width))),
-    rows: Math.min(297, Math.max(1, Math.round((image.pixelHeight * scale) / cell.height))),
+    columns: Math.min(
+      PLACEHOLDER_LIMIT,
+      Math.max(1, Math.round((image.pixelWidth * scale) / cell.width)),
+    ),
+    rows: Math.min(
+      PLACEHOLDER_LIMIT,
+      Math.max(1, Math.round((image.pixelHeight * scale) / cell.height)),
+    ),
   };
 }
 

@@ -203,8 +203,6 @@ export function isToolItem(item: Item): item is ToolItem {
   );
 }
 
-export { formatTokens } from "../core/wording.ts";
-
 /**
  * The conversation as blocks separated by blank rows. Each block's rows are
  * cached by width and version, so a streamed delta re-renders only its block
@@ -1045,10 +1043,9 @@ function diffCounts(changes: readonly FileChange[]): string {
   let added = 0;
   let removed = 0;
   for (const change of changes) {
-    for (const line of diffBody(change.diff.split("\n"))) {
-      if (line.startsWith("+")) added++;
-      else if (line.startsWith("-")) removed++;
-    }
+    const counts = changeCounts(change);
+    added += counts.added;
+    removed += counts.removed;
   }
   if (added === 0 && removed === 0) return "";
   if (removed === 0) return ` +${added}`;
@@ -1093,6 +1090,12 @@ function toolName(item: Extract<ToolItem, { kind: "tool_call" }>): string {
   );
 }
 
+/** What a file change acts on: its one file, or how many. */
+function changeTarget(changes: readonly FileChange[], cwd: string): string {
+  const [change] = changes;
+  return changes.length === 1 && change ? shownPath(change.path, cwd) : `${changes.length} files`;
+}
+
 function asks(what: string): string {
   return `${style.attention("Asks to")} ${what}`;
 }
@@ -1104,10 +1107,7 @@ function asking(item: ToolItem, cwd: string): string {
       return asks(`${style.muted("run")} ${highlightCommand(item.command)}`);
     case "file_change": {
       const [change] = item.changes;
-      const target =
-        item.changes.length === 1 && change
-          ? shownPath(change.path, cwd)
-          : `${item.changes.length} files`;
+      const target = changeTarget(item.changes, cwd);
       const verb = change?.kind === "add" ? "write" : change?.kind === "delete" ? "delete" : "edit";
       return asks(style.muted(`${verb} ${target}${diffCounts(item.changes)}`));
     }
@@ -1151,10 +1151,7 @@ function toolLine(item: ToolItem, settled: boolean, cwd: string, waiting = false
       const [change] = item.changes;
       const kinds = new Set(item.changes.map((entry) => entry.kind));
       const kind = kinds.size === 1 ? change?.kind : "update";
-      const target =
-        item.changes.length === 1 && change
-          ? shownPath(change.path, cwd)
-          : `${item.changes.length} files`;
+      const target = changeTarget(item.changes, cwd);
       if (item.changes.length === 1 && change?.movePath) {
         const moved = `${target} → ${shownPath(change.movePath, cwd)}`;
         return style.muted(
