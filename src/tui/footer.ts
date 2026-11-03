@@ -91,6 +91,8 @@ export interface StatusLineState {
   /** A word for a moment, such as what was copied. */
   toast: string | null;
   harness: string;
+  /** The folder, with ` · branch` in a repository. */
+  folder: string | null;
   /** The thread on screen, as the host last said, once it has. */
   current: ThreadState | undefined;
   /** The model it uses, its harness's default where none was chosen and the default is known. */
@@ -105,14 +107,20 @@ export interface StatusLineState {
   details: boolean;
 }
 
-/** `full-access · claude · opus · high · ctx 12% · cache 87% · $0.42`; /status says the rest. */
+/**
+ * `~/code/app · main` on the left, `full-access · claude · opus · high · ctx
+ * 12% · cache 87% · $0.42` on the right; /status says the rest.
+ */
 export function statusLine(state: StatusLineState, width: number): string {
   if (state.exitArmed) return style.muted("Press ctrl+c again to exit");
   if (state.toast) return truncate(`${style.added("✓")} ${style.text(state.toast)}`, width);
   const { current } = state;
   const info = current?.info ?? null;
+  // A closed thread on screen says so first, since it takes no messages.
+  const mode = info?.runtimeMode ?? state.runtimeMode;
+  const parts: string[] = current?.status === "closed" ? ["closed", mode] : [mode];
   // Empty while the first run asks which harness to start.
-  const parts: string[] = state.harness ? [state.harness] : [];
+  if (state.harness) parts.push(state.harness);
   if (info) {
     if (state.model) parts.push(state.model);
     if (info.effort) parts.push(info.effort);
@@ -124,20 +132,19 @@ export function statusLine(state: StatusLineState, width: number): string {
   if (cached !== null) parts.push(`cache ${cached}%`);
   // Nothing spent yet, or a subscription that does not count it, shows no cost.
   if (usage?.costUsd) parts.push(formatCost(usage.costUsd));
-  if (state.server) parts.push(`on ${state.server}`);
-  // A closed thread on screen says so first, since it takes no messages.
-  const mode = info?.runtimeMode ?? state.runtimeMode;
-  const shown = current?.status === "closed" ? `closed · ${mode}` : mode;
-  let left = `${style.text(shown)}${parts.length > 0 ? style.muted(` · ${parts.join(" · ")}`) : ""}`;
-  if (info?.interactionMode === "plan") left += `${style.muted(" · ")}${style.strong("plan")}`;
-  // The right edge stays whole as the left is cut, so modes the keys toggle go there.
-  const right =
+  const where = [state.folder, state.server ? `on ${state.server}` : null].filter(Boolean);
+  let left = style.text(where.join(" · "));
+  if (info?.interactionMode === "plan")
+    left += `${where.length > 0 ? style.muted(" · ") : ""}${style.strong("plan")}`;
+  // The right edge stays whole as the left is cut, so modes the keys toggle go there too.
+  const hint =
     state.scroll > 0
-      ? style.muted(`↓ ${state.scroll} more lines · pgdn`)
+      ? `↓ ${state.scroll} more lines · pgdn`
       : state.details
-        ? style.muted("details · ctrl+x")
-        : "";
-  return spread(left, right, width);
+        ? "details · ctrl+x"
+        : null;
+  const right = [hint, parts.join(" · ")].filter(Boolean).join("   ");
+  return spread(left, style.muted(right), width);
 }
 
 /** A panel over the composer, as the footer shows it. */

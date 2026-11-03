@@ -43,6 +43,7 @@ import {
 } from "../protocol.ts";
 import { agentRowOf } from "./agents.ts";
 import { FetchCache } from "./cache.ts";
+import { FolderLabel } from "./folder.ts";
 import { Suggestions, inMenuOrder } from "./completion.ts";
 import { Editor, applyEditingKey } from "./editor.ts";
 import { footerRows, statusLine, type Footer } from "./footer.ts";
@@ -246,6 +247,10 @@ export class App {
   /** The host's run the terminal last caught up with, to tell when it restarted. */
   #instance: string | null = null;
   #server: ServerInfo;
+  #folder = new FolderLabel(
+    (cwd) => this.#client.call("files.branch", { cwd }),
+    () => this.#schedule(),
+  );
   #connect: AppOptions["connect"];
   /** The server /connect moves to once the terminal exits; "" for this machine's. */
   #next: string | undefined = undefined;
@@ -2704,6 +2709,11 @@ export class App {
         exitArmed: this.#exitArmed,
         toast: this.#toastText(),
         harness: this.#harness,
+        folder: this.#folder.label(
+          this.#cwd(),
+          current ? `${current.id}:${current.runCount}:${current.busy}` : "",
+          homedir(),
+        ),
         current,
         // Until the harness names its model, its default's ID, once its list says it.
         model: current ? (current.info.model ?? this.#defaultModel()) : null,

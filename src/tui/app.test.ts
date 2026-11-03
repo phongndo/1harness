@@ -201,7 +201,7 @@ describe("App", () => {
       rowsFrom(screen, "┃ fix the parser"),
       /Ran 1 command[\s\S]*Done with fix the parser/,
     );
-    assert.match(screen, /supervised · scripted/);
+    assert.match(screen, /\S+ {2,}supervised · scripted/);
     assert.equal(await session.quit(), undefined);
     // The terminal gets its own screen back, and the way back to the thread.
     assert.ok(session.terminal.raw.includes("\x1b[?1049l"));

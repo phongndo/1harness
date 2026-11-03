@@ -75,7 +75,7 @@ const AGE_WIDTH = 10;
 const FOLDER_WIDTH = 24;
 
 /** A folder as it reads best: under the home folder as `~/…`, and a long one by its end. */
-function shortPath(path: string, home: string): string {
+export function shortPath(path: string, home: string): string {
   const shown =
     home && path === home
       ? "~"
