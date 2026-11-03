@@ -310,9 +310,7 @@ export class ThreadManager {
         ),
       );
     } catch (error) {
-      this.#grants.get(id)?.revoke();
-      this.#grants.delete(id);
-      this.#servers.delete(id);
+      this.#disconnectServers(id);
       throw error;
     }
     created = thread;
@@ -384,6 +382,12 @@ export class ThreadManager {
     return mcp.servers;
   }
 
+  #disconnectServers(id: string): void {
+    this.#grants.get(id)?.revoke();
+    this.#grants.delete(id);
+    this.#servers.delete(id);
+  }
+
   /** Connects a thread to the manager and the extensions, and lists it. */
   #adopt(managed: ManagedThread, extensions: ExtensionHost): void {
     const thread = managed.thread;
@@ -398,9 +402,7 @@ export class ThreadManager {
     this.#cleanups.set(managed.id, () => {
       unsubscribe();
       detach();
-      this.#grants.get(managed.id)?.revoke();
-      this.#grants.delete(managed.id);
-      this.#servers.delete(managed.id);
+      this.#disconnectServers(managed.id);
       this.#visits.delete(managed.id);
       this.#seenWithoutHandoff.delete(managed.id);
     });
@@ -415,7 +417,8 @@ export class ThreadManager {
     const restored: ManagedThread[] = [];
     for (const entry of saved) {
       if (this.#threads.has(entry.id)) continue;
-      const runs = entry.runs.map((run) =>
+      const { visits, seenWithoutHandoff, extensions: loaded, thread: kept, ...fields } = entry;
+      const runs = fields.runs.map((run) =>
         run.status === "running"
           ? {
               ...run,
@@ -426,30 +429,19 @@ export class ThreadManager {
           : run,
       );
       const managed: ManagedThread = {
-        id: entry.id,
-        title: entry.title,
-        named: entry.named,
-        harness: entry.harness,
-        parentId: entry.parentId,
-        parentCallId: entry.parentCallId,
-        origin: entry.origin,
+        ...fields,
         openedBy: null,
-        forkedFrom: entry.forkedFrom,
-        forkContext: entry.forkContext,
-        thread: new Thread(null, entry.thread),
-        createdAt: entry.createdAt,
+        thread: new Thread(null, kept),
         status: "parked",
         runs,
-        error: entry.error,
       };
       const extensions =
-        entry.extensions ??
+        loaded ??
         (typeof this.#options.extensions === "function" ? undefined : this.#options.extensions);
       if (!extensions) throw new Error(`No extensions loaded for ${entry.id}`);
       this.#adopt(managed, extensions);
-      if (entry.visits.size > 0) this.#visits.set(entry.id, new Map(entry.visits));
-      if (entry.seenWithoutHandoff !== null)
-        this.#seenWithoutHandoff.set(entry.id, entry.seenWithoutHandoff);
+      if (visits.size > 0) this.#visits.set(entry.id, new Map(visits));
+      if (seenWithoutHandoff !== null) this.#seenWithoutHandoff.set(entry.id, seenWithoutHandoff);
       restored.push(managed);
       this.#emit({ type: "thread.created", thread: managed, restored: true });
       this.#refresh(managed);
@@ -524,15 +516,7 @@ export class ThreadManager {
     const thread = managed.thread;
     if (!thread.parked) return null;
     if (this.#switching.has(id)) throw new Error(`${id} is already starting`);
-    const info = thread.info;
-    const own: Visit = {
-      native: info.threadId,
-      runs: this.#seen(managed),
-      model: info.model,
-      effort: info.effort,
-      contextTokens: null,
-      leftAt: Date.now(),
-    };
+    const own = this.#visit(managed, Date.now());
     return this.#move(managed, managed.harness, own.native ? own : undefined, true);
   }
 
@@ -587,6 +571,19 @@ export class ThreadManager {
       : (this.#seenWithoutHandoff.get(managed.id) ?? managed.runs.length);
   }
 
+  /** Where the thread is on its harness now, as it would leave it. */
+  #visit(managed: ManagedThread, at: number): Visit {
+    const thread = managed.thread;
+    return {
+      native: thread.info.threadId,
+      runs: this.#seen(managed),
+      model: thread.info.model,
+      effort: thread.info.effort,
+      contextTokens: thread.usage?.contextTokens ?? null,
+      leftAt: at,
+    };
+  }
+
   /**
    * Moves a thread onto a session of `harness`: resuming `earlier`, that
    * harness's own thread, where given, and a new thread when that fails or
@@ -615,14 +612,7 @@ export class ThreadManager {
     const info = thread.info;
     const same = harness === from;
     const now = Date.now();
-    const leaving: Visit = {
-      native: info.threadId,
-      runs: this.#seen(managed),
-      model: info.model,
-      effort: info.effort,
-      contextTokens: thread.usage?.contextTokens ?? null,
-      leftAt: now,
-    };
+    const leaving = this.#visit(managed, now);
     // As narrow as the thread runs now, which may be narrower than it was asked to.
     const settings: SessionOptions = {
       cwd: info.cwd,

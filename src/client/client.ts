@@ -29,8 +29,6 @@ export class HostClient {
   #connection: HostConnection;
   #hello: Omit<HelloParams, "clientId">;
   #seq = 0;
-  /** The host run its events come from. */
-  #instance = "";
   #listeners = new Set<(event: ClientEvent) => void>();
   #unlisten: (() => void) | null = null;
   #closed = false;
@@ -51,7 +49,10 @@ export class HostClient {
       ...this.#hello,
       clientId: this.id,
     });
-    this.#take(hello);
+    this.#seq = hello.seq;
+    this.threads.clear();
+    for (const thread of hello.threads) this.threads.set(thread.id, thread);
+    this.harnesses = hello.harnesses;
     this.#unlisten = this.#connection.listen(
       hello.seq,
       (event) => this.#event(event),
@@ -74,14 +75,6 @@ export class HostClient {
     this.#closed = true;
     this.#unlisten?.();
     await this.#connection.close();
-  }
-
-  #take(hello: HelloResult): void {
-    this.#seq = hello.seq;
-    this.#instance = hello.instance;
-    this.threads.clear();
-    for (const thread of hello.threads) this.threads.set(thread.id, thread);
-    this.harnesses = hello.harnesses;
   }
 
   #event(event: ConnectionEvent): void {
@@ -117,16 +110,7 @@ export class HostClient {
     this.#unlisten = null;
     if (this.#closed) return;
     try {
-      const hello = await this.#connection.call("client.hello", {
-        ...this.#hello,
-        clientId: this.id,
-      });
-      this.#take(hello);
-      this.#unlisten = this.#connection.listen(
-        hello.seq,
-        (event) => this.#event(event),
-        this.#instance,
-      );
+      const hello = await this.connect();
       this.#tell({ type: "resync", hello });
     } catch (error) {
       this.#tell({
