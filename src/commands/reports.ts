@@ -1,4 +1,5 @@
 import type { McpAction, McpServer, McpServerState } from "../core/events.ts";
+import { plural } from "../core/wording.ts";
 import type { ReportSpan } from "./registry.ts";
 
 const STATES: Record<McpServerState, { label: string; tone: ReportSpan["tone"] }> = {
@@ -14,14 +15,10 @@ function span(text: string, tone: ReportSpan["tone"]): ReportSpan {
   return { text, tone };
 }
 
-function count(tools: readonly string[]): string {
-  return `${tools.length} ${tools.length === 1 ? "tool" : "tools"}`;
-}
-
 /** A server's state and tool count, as completion menus show it. */
 export function describeMcpServer(server: McpServer): string {
   const state = STATES[server.state].label;
-  return server.state === "connected" ? `${state} · ${count(server.tools)}` : state;
+  return server.state === "connected" ? `${state} · ${plural(server.tools.length, "tool")}` : state;
 }
 
 /** `/mcp`: one row per server with its state, tools, and where it is configured. */
@@ -34,11 +31,13 @@ export function mcpListReport(
   if (servers.length === 0) return { title, lines: [[span("No MCP servers", "muted")]] };
   const nameWidth = Math.max(...servers.map((server) => server.name.length));
   const stateWidth = Math.max(...servers.map((server) => STATES[server.state].label.length));
-  const toolsWidth = Math.max(...servers.map((server) => count(server.tools).length));
+  const toolsWidth = Math.max(
+    ...servers.map((server) => plural(server.tools.length, "tool").length),
+  );
   const lines: ReportSpan[][] = [];
   for (const server of servers) {
     const state = STATES[server.state];
-    const tools = server.state === "connected" ? count(server.tools) : "";
+    const tools = server.state === "connected" ? plural(server.tools.length, "tool") : "";
     lines.push([
       span(`${server.name.padEnd(nameWidth)}  `, "strong"),
       span(`${state.label.padEnd(stateWidth)}  `, state.tone),
@@ -65,7 +64,7 @@ export function mcpServerReport(server: McpServer): { title: string; lines: Repo
   if (server.error) fields.push(["error", span(server.error, "bad")]);
   if (server.state === "connected" || server.tools.length > 0) {
     const names = server.tools.length > 0 ? `: ${server.tools.join(", ")}` : "";
-    fields.push(["tools", span(`${count(server.tools)}${names}`, "soft")]);
+    fields.push(["tools", span(`${plural(server.tools.length, "tool")}${names}`, "soft")]);
   }
   const width = Math.max(...fields.map(([key]) => key.length));
   return {
