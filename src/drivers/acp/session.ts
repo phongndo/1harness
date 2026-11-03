@@ -165,9 +165,9 @@ export class AcpSession implements HarnessSession {
       jsonrpc: true,
     });
     this.#rpc = rpc;
-    rpc.onNotification((method, params) => this.#notification(method, params));
-    rpc.onRequest((method, params) => this.#serverRequest(method, params));
-    rpc.onError((error) =>
+    rpc.peer.onNotification((method, params) => this.#notification(method, params));
+    rpc.peer.onRequest((method, params) => this.#serverRequest(method, params));
+    rpc.peer.onError((error) =>
       this.#events.notice(
         "error",
         `1harness could not read a message from ${this.#spec.label}: ${errorMessage(error)}`,
@@ -175,7 +175,7 @@ export class AcpSession implements HarnessSession {
     );
     void rpc.exited.then((reason) => this.#finish(reason));
 
-    const init = await rpc.request<{
+    const init = await rpc.peer.request<{
       agentInfo?: { version?: string } | null;
       agentCapabilities?: {
         loadSession?: boolean;
@@ -206,7 +206,7 @@ export class AcpSession implements HarnessSession {
     let session: SessionResponse;
     if (resume && capabilities.loadSession) {
       // The agent replays the conversation as updates before it answers.
-      session = await rpc.request(
+      session = await rpc.peer.request(
         "session/load",
         { sessionId: resume, cwd: this.info.cwd, mcpServers },
         CONTROL_TIMEOUT_MS,
@@ -219,7 +219,7 @@ export class AcpSession implements HarnessSession {
           "warning",
           `${this.#spec.label} cannot resume sessions; starting a new one`,
         );
-      session = await rpc.request(
+      session = await rpc.peer.request(
         "session/new",
         { cwd: this.info.cwd, mcpServers },
         CONTROL_TIMEOUT_MS,
@@ -294,7 +294,7 @@ export class AcpSession implements HarnessSession {
 
   async interrupt(): Promise<void> {
     if (!this.info.threadId) return;
-    this.#rpc?.notify("session/cancel", { sessionId: this.info.threadId });
+    this.#rpc?.peer.notify("session/cancel", { sessionId: this.info.threadId });
     // ACP has pending permission requests answered as cancelled when a turn is cancelled.
     this.#events.cancelAll();
   }
@@ -525,6 +525,6 @@ export class AcpSession implements HarnessSession {
     timeoutMs: number | null = CONTROL_TIMEOUT_MS,
   ): Promise<T> {
     if (!this.#rpc) return Promise.reject(new Error("The session has not started"));
-    return this.#rpc.request<T>(method, params, timeoutMs ?? undefined);
+    return this.#rpc.peer.request<T>(method, params, timeoutMs ?? undefined);
   }
 }

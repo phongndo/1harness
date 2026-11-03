@@ -42,14 +42,14 @@ for await (const line of createInterface({ input: process.stdin })) {
     );
     try {
       const errors: string[] = [];
-      rpc.onError((error) => errors.push(String(error)));
+      rpc.peer.onError((error) => errors.push(String(error)));
       const answered = new Promise<unknown>((resolve) => {
-        rpc.onNotification((method, params) => {
+        rpc.peer.onNotification((method, params) => {
           if (method === "answered") resolve(params);
           else throw new TypeError("Cannot read properties of undefined (reading 'text')");
         });
       });
-      rpc.onRequest(() => {
+      rpc.peer.onRequest(() => {
         throw new TypeError("Cannot read properties of undefined (reading 'type')");
       });
       const reply = (await answered) as { error: { code: number; message: string } };
@@ -66,7 +66,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   it("refuses a request once the process has exited", async () => {
     const rpc = peer("quitter", "process.exit(3);\n");
     await rpc.exited;
-    const late = rpc.request("ping", {});
+    const late = rpc.peer.request("ping", {});
     const timeout = new Promise((resolve) => setTimeout(resolve, 1_000, "still waiting"));
     const outcome = await Promise.race([
       late.then(

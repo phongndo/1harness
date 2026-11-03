@@ -206,9 +206,9 @@ export class CodexSession implements HarnessSession {
         : process.env,
     });
     this.#rpc = rpc;
-    rpc.onNotification((method, params) => this.#notification(method, params));
-    rpc.onRequest((method, params, id) => this.#serverRequest(method, params, id));
-    rpc.onError((error) =>
+    rpc.peer.onNotification((method, params) => this.#notification(method, params));
+    rpc.peer.onRequest((method, params, id) => this.#serverRequest(method, params, id));
+    rpc.peer.onError((error) =>
       this.#events.notice(
         "error",
         `1harness could not read a message from Codex: ${errorMessage(error)}`,
@@ -216,7 +216,7 @@ export class CodexSession implements HarnessSession {
     );
     void rpc.exited.then((reason) => this.#finish(reason));
 
-    const initialized = await rpc.request<{ userAgent: string }>(
+    const initialized = await rpc.peer.request<{ userAgent: string }>(
       "initialize",
       {
         clientInfo: { name: "1harness", title: "1harness", version: this.#config.version },
@@ -232,7 +232,7 @@ export class CodexSession implements HarnessSession {
       },
       START_TIMEOUT_MS,
     );
-    rpc.notify("initialized");
+    rpc.peer.notify("initialized");
     this.info.version = /\/(\d+\.\d+\.\d+\S*)/.exec(initialized.userAgent)?.[1] ?? null;
 
     const policy = codexRuntimePolicy(this.info.runtimeMode);
@@ -268,7 +268,7 @@ export class CodexSession implements HarnessSession {
     this.#threadParams = params;
     const response = this.#config.resume
       ? await this.#resume(this.#config.resume, params)
-      : await rpc.request<ThreadResponse>("thread/start", params, THREAD_TIMEOUT_MS);
+      : await rpc.peer.request<ThreadResponse>("thread/start", params, THREAD_TIMEOUT_MS);
 
     this.#translator.threadId = response.thread.id;
     this.#sandbox = response.sandbox;
@@ -687,7 +687,7 @@ export class CodexSession implements HarnessSession {
 
   #request<T>(method: string, params: unknown, timeoutMs?: number): Promise<T> {
     if (!this.#rpc) return Promise.reject(new Error("The session has not started"));
-    return this.#rpc.request<T>(method, params, timeoutMs);
+    return this.#rpc.peer.request<T>(method, params, timeoutMs);
   }
 
   /**

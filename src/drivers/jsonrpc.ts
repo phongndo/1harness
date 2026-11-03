@@ -47,7 +47,7 @@ export class JsonRpcPeer {
   #name: string;
   #jsonrpc: boolean;
 
-  /** `write` sends one line; `jsonrpc` sends the `jsonrpc: "2.0"` member, which Codex leaves out. */
+  /** `write` sends one line. */
   constructor(
     input: NodeJS.ReadableStream,
     write: (line: string) => void,
@@ -169,10 +169,12 @@ export class JsonRpcPeer {
  * child never blocks on a full pipe.
  */
 export class JsonRpcProcess {
+  /** The connection; once the process exits, its pending and later requests fail. */
+  readonly peer: JsonRpcPeer;
+  /** Resolves with a description once the process has exited. */
+  readonly exited: Promise<string>;
   #child: ChildProcessWithoutNullStreams;
   #process: HarnessProcess;
-  #peer: JsonRpcPeer;
-  #exited: Promise<string>;
 
   constructor(command: string, args: string[], options: JsonRpcOptions) {
     this.#child = spawn(command, args, { cwd: options.cwd, env: options.env, stdio: "pipe" });
@@ -180,44 +182,17 @@ export class JsonRpcProcess {
     // A write after the process died fails with EPIPE; the exit handler reports it.
     this.#child.stdin.on("error", () => {});
     const stdin = this.#child.stdin;
-    this.#peer = new JsonRpcPeer(
+    this.peer = new JsonRpcPeer(
       this.#child.stdout,
       (line) => {
         if (stdin.writable) stdin.write(line);
       },
       { name: options.name, jsonrpc: options.jsonrpc ?? false },
     );
-    this.#exited = this.#process.exited.then((reason) => {
-      this.#peer.closed(new Error(reason));
+    this.exited = this.#process.exited.then((reason) => {
+      this.peer.closed(new Error(reason));
       return reason;
     });
-  }
-
-  /** Resolves with a description once the process has exited. */
-  get exited(): Promise<string> {
-    return this.#exited;
-  }
-
-  onNotification(handler: NotificationHandler): void {
-    this.#peer.onNotification(handler);
-  }
-
-  onRequest(handler: RequestHandler): void {
-    this.#peer.onRequest(handler);
-  }
-
-  /** Hears what a handler threw, which would otherwise crash the whole process. */
-  onError(handler: ErrorHandler): void {
-    this.#peer.onError(handler);
-  }
-
-  /** Sends a request; with `timeoutMs`, rejects if no reply arrives in time. */
-  request<T>(method: string, params: unknown, timeoutMs?: number): Promise<T> {
-    return this.#peer.request(method, params, timeoutMs);
-  }
-
-  notify(method: string, params?: unknown): void {
-    this.#peer.notify(method, params);
   }
 
   async close(): Promise<void> {
