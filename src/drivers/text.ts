@@ -23,8 +23,11 @@ export function summarizeInput(input: Record<string, unknown>, keys: readonly st
   return json === "{}" ? "" : truncate(json, 120);
 }
 
-/** A tool result's content parts as text: text as it is, anything else by its type, such as `[image]`. */
-export function contentText(content: unknown): string {
+/** A tool result's content parts as text: text as it is, anything else by `other`, else its type, such as `[image]`. */
+export function contentText(
+  content: unknown,
+  other: (part: unknown) => string = (part) => `[${text(record(part)["type"])}]`,
+): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
@@ -33,7 +36,7 @@ export function contentText(content: unknown): string {
       const fields = record(part);
       return fields["type"] === "text" || typeof fields["text"] === "string"
         ? text(fields["text"])
-        : `[${text(fields["type"])}]`;
+        : other(part);
     })
     .join("\n");
 }

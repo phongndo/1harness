@@ -14,12 +14,13 @@ export interface SendOptions {
 /**
  * Sends a thread what was typed, with the images it mentions as `@path` where
  * its harness takes images, the same from a terminal, the CLI, or an agent.
+ * Only a steer waits; a send is queued before this returns.
  */
-export async function sendText(
+export function sendText(
   thread: Thread,
   text: string,
   options: SendOptions = {},
-): Promise<Message> {
+): Message | Promise<Message> {
   const input: UserInput = { text };
   if (thread.capabilities.images && !options.command) {
     const images = mentionedImages(text, thread.info.cwd);

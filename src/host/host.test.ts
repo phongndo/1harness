@@ -293,6 +293,20 @@ describe("Host", () => {
     assert.equal(client.threads.get(thread.id)?.runCount, 1);
   });
 
+  it("sends a message retried before the first send returns once", async () => {
+    newHost();
+    const client = await connect("tui");
+    const thread = await client.call("thread.open", { harness: "scripted", settings });
+    const send = { threadId: thread.id, text: "once", requestId: "r1" };
+    const [first, again] = await Promise.all([
+      client.call("thread.send", send),
+      client.call("thread.send", send),
+    ]);
+    assert.equal(again.messageId, first.messageId);
+    await idle(client, thread.id);
+    assert.equal(client.threads.get(thread.id)?.runCount, 1);
+  });
+
   it("runs session calls on the allowlist, waking a parked thread", async () => {
     newHost();
     const client = await connect("tui");

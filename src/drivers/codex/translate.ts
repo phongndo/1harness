@@ -415,7 +415,11 @@ export function toItem(item: CodexThreadItem, done = true): Item | null {
         server: item.server,
         category: "other",
         summary: compact(item.arguments),
-        output: item.error?.message ?? (item.result ? contentText(item.result.content) : ""),
+        output:
+          item.error?.message ??
+          (item.result
+            ? contentText(item.result.content, (part) => compact(part as JsonValue))
+            : ""),
         status: item.error ? "failed" : itemStatus(item.status),
       };
     case "dynamicToolCall":

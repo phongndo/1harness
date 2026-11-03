@@ -1377,7 +1377,9 @@ export class Host {
           if (sent) return { messageId: sent };
         }
         const thread = this.#open(threadId).thread;
-        const message = await sendText(thread, text, { steer, command, requestId });
+        const sending = sendText(thread, text, { steer, command, requestId });
+        // Awaiting a plain send would let a retry of it pass the check above first.
+        const message = sending instanceof Promise ? await sending : sending;
         if (requestId) {
           client.sent.set(requestId, message.id);
           // Only recent retries matter.
