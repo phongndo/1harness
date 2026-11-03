@@ -327,29 +327,15 @@ export class Host {
     });
     // Reads reach closed threads that have left memory for the store.
     this.#scope = new Scope(this.manager, (id) => {
-      const row = this.#store?.thread(id);
-      if (!row) return null;
-      const { title, harness, parentId, info } = row;
-      const runs = this.#store!.runs(id);
-      return {
-        id,
-        title,
-        harness,
-        parentId,
-        status: "closed",
-        runs,
-        thread: { info, requests: [] },
-      };
+      const row = this.#stored(id);
+      return row && { ...row, status: "closed", thread: { info: row.info, requests: [] } };
     });
     this.orchestrator = new Orchestrator(this.manager, options.env, this.#scope);
     // Through the host, so clients hear of what a delegation's check finds.
     this.orchestrator.checkHarness = async (driver) =>
       (await this.#checkHarnesses(driver.id)).find((harness) => harness.id === driver.id) ??
       harnessInfo(driver, options.env ?? process.env);
-    this.orchestrator.storedTask = (id) => {
-      const row = this.#store?.thread(id);
-      return row ? { ...row, runs: this.#store!.runs(id) } : null;
-    };
+    this.orchestrator.storedTask = (id) => this.#stored(id);
     const toolThread = (thread: Thread) =>
       this.#scope.agent({ kind: "agent", thread, callId: null });
     this.pageTools = pageTools({
@@ -1218,6 +1204,23 @@ export class Host {
     return managed;
   }
 
+  /** A thread in memory, else as the store keeps it. */
+  #find(
+    threadId: string,
+  ): { managed: ManagedThread; row?: undefined } | { managed?: undefined; row: ThreadRow } {
+    const managed = this.manager.get(threadId);
+    if (managed) return { managed };
+    const row = this.#store?.thread(threadId);
+    if (!row) throw new RpcError("thread_not_found", `No thread ${threadId}`);
+    return { row };
+  }
+
+  /** A thread only the store keeps, with its runs. */
+  #stored(id: string): (ThreadRow & { runs: RunRecord[] }) | null {
+    const row = this.#store?.thread(id);
+    return row ? { ...row, runs: this.#store!.runs(id) } : null;
+  }
+
   #open(threadId: string): ManagedThread {
     const managed = this.#managed(threadId);
     if (managed.status === "closed") throw new RpcError("thread_closed", `${threadId} is closed`);
@@ -1468,9 +1471,7 @@ export class Host {
       },
       "thread.attach": async (_client, { threadId: typed, before, limit }) => {
         const threadId = this.#resolveId(typed);
-        const managed = this.manager.get(threadId);
-        const row = managed ? null : this.#store?.thread(threadId);
-        if (!managed && !row) throw new RpcError("thread_not_found", `No thread ${threadId}`);
+        const { managed, row } = this.#find(threadId);
         // A thread not in memory is read where it is kept, without keeping it here.
         const log = managed ? this.#log(threadId) : new ThreadLog(this.#store!.log(threadId));
         const page = log.page(before, Math.min(limit ?? ATTACH_LIMIT, ATTACH_LIMIT));
@@ -1487,7 +1488,7 @@ export class Host {
           if (child) children.set(child.id, this.#storedState(child));
         }
         return {
-          thread: managed ? this.#state(managed) : this.#storedState(row!),
+          thread: managed ? this.#state(managed) : this.#storedState(row),
           entries: page.entries,
           more: page.more,
           cursor: this.#feed.seq,
@@ -1564,20 +1565,14 @@ export class Host {
       "thread.rename": async (_client, { threadId, title }) => {
         const name = title.replace(/\s+/g, " ").trim();
         if (!name) throw new RpcError("invalid_request", "A title cannot be empty");
-        const managed = this.manager.get(threadId);
+        const { managed, row } = this.#find(threadId);
         if (managed) this.manager.rename(threadId, name);
-        else {
-          const row = this.#store?.thread(threadId);
-          if (!row) throw new RpcError("thread_not_found", `No thread ${threadId}`);
-          this.#store!.saveThread({ ...row, title: name, named: true });
-        }
+        else this.#store!.saveThread({ ...row, title: name, named: true });
         return null;
       },
       "thread.flag": async (_client, { threadId, pinned, archived }) => {
-        const managed = this.manager.get(threadId);
-        const row = managed ? null : this.#store?.thread(threadId);
-        if (!managed && !row) throw new RpcError("thread_not_found", `No thread ${threadId}`);
-        const flags = managed ? this.#marksOf(threadId).flags : row!;
+        const { managed, row } = this.#find(threadId);
+        const flags = managed ? this.#marksOf(threadId).flags : row;
         const next = {
           pinned: pinned ?? flags.pinned,
           archived: archived ?? flags.archived,
@@ -1591,31 +1586,15 @@ export class Host {
           this.#writer?.flush();
           return this.#listing(managed);
         }
-        this.#store!.saveThread({ ...row!, ...next });
+        this.#store!.saveThread({ ...row, ...next });
         return this.#rowListing(this.#store!.summary(threadId)!);
       },
       "thread.fork": async (client, { threadId, turn }) => {
         // A stored thread is read where it is kept; forking does not reopen it.
-        const live = this.manager.get(threadId);
-        const row = live ? null : this.#store?.thread(threadId);
+        const { managed: live, row } = this.#find(threadId);
         const source = live
-          ? {
-              id: live.id,
-              title: live.title,
-              harness: live.harness,
-              info: live.thread.info,
-              runs: live.runs,
-            }
-          : row
-            ? {
-                id: row.id,
-                title: row.title,
-                harness: row.harness,
-                info: row.info,
-                runs: this.#store!.runs(row.id),
-              }
-            : null;
-        if (!source) throw new RpcError("thread_not_found", `No thread ${threadId}`);
+          ? { ...live, info: live.thread.info }
+          : { ...row, runs: this.#store!.runs(row.id) };
         const last = turn ?? source.runs.length;
         if (!Number.isInteger(last) || last < 0 || last > source.runs.length)
           throw new RpcError(
@@ -1656,9 +1635,7 @@ export class Host {
         return this.#state(managed);
       },
       "thread.forget": async (_client, { threadId }) => {
-        const managed = this.manager.get(threadId);
-        if (!managed && !this.#store?.thread(threadId))
-          throw new RpcError("thread_not_found", `No thread ${threadId}`);
+        const { managed } = this.#find(threadId);
         const ids = [
           ...new Set([
             threadId,
