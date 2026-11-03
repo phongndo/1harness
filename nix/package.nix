@@ -70,6 +70,7 @@ stdenv.mkDerivation (finalAttrs: {
         lib.optionalString (html2term != null)
           " --set-default HTML2TERM_BIN ${lib.getExe html2term}"
       }
+    ln -s 1harness $out/bin/1h
     runHook postInstall
   '';
 

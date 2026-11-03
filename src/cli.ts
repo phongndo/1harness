@@ -43,7 +43,7 @@ import { Store, StoreLocked } from "./store/store.ts";
 import { App, type ServerInfo } from "./tui/app.ts";
 
 const labels = drivers().map((driver) => driver.label);
-const help = `1harness
+const help = `1harness, or 1h for short
 One terminal UI for ${labels.length > 1 ? `${labels.slice(0, -1).join(", ")}, and ${labels.at(-1)}` : labels.join("")}.
 
 Usage: 1harness [options] [prompt]

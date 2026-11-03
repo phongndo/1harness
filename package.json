@@ -4,6 +4,7 @@
   "private": true,
   "description": "A programmable control surface for agent harnesses, locally and remotely.",
   "bin": {
+    "1h": "./dist/cli.js",
     "1harness": "./dist/cli.js"
   },
   "type": "module",

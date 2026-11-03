@@ -10,6 +10,7 @@ work to each other across harnesses.
 1harness drives the harnesses you already have installed, with their own
 logins and settings: `claude`, `codex`, `opencode`, or `fx` on `PATH`. Each
 signs in through its own CLI, such as `claude auth login` or `codex login`.
+The command also installs as `1h`.
 
 ```sh
 1harness harnesses        # which harnesses are ready, need signing in, or are missing
