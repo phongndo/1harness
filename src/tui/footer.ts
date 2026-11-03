@@ -1,6 +1,6 @@
 import type { RuntimeMode, Usage } from "../core/events.ts";
 import type { Message } from "../core/thread.ts";
-import { contextUsed, formatCost, formatTokens, limitBrief } from "../core/wording.ts";
+import { contextUsed, formatCost, formatTokens, limitBrief, plural } from "../core/wording.ts";
 import type { ThreadState } from "../protocol.ts";
 import { style } from "./theme.ts";
 import { oneLineText, spread, truncate, visibleWidth, wrap } from "./text.ts";
@@ -131,7 +131,7 @@ export function statusLine(state: StatusState, width: number): string {
   const others = threads.filter(
     (thread) => elsewhere(thread) && thread.status !== "idle" && thread.status !== "parked",
   ).length;
-  if (others > 0) parts.push(`${others} other ${others === 1 ? "thread" : "threads"} working`);
+  if (others > 0) parts.push(`${plural(others, "other thread")} working`);
   else {
     // Threads of your own still open, not the agents they started, which ctrl+t lists
     // under them, nor parked ones, which are earlier threads to resume.

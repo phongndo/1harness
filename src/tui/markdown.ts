@@ -380,6 +380,17 @@ export interface MarkdownOptions {
   settled?: (line: number, rows: number) => void;
 }
 
+/** The code blocks Markdown shows, in order, as a click on one copies it. */
+export function codeBlocks(text: string): { code: string; lang: string }[] {
+  const blocks: { code: string; lang: string }[] = [];
+  renderMarkdown(text, 80, "", {
+    region: (region) => {
+      if (region.kind === "code") blocks.push({ code: region.code, lang: region.lang });
+    },
+  });
+  return blocks;
+}
+
 /** A display's delimiters: `$$…$$` and `\[…\]`. */
 const DISPLAYS: [string, string][] = [
   ["$$", "$$"],

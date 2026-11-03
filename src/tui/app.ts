@@ -24,7 +24,7 @@ import type {
 } from "../core/events.ts";
 import { looksLikeThreadId, shortThreadId } from "../core/thread-id.ts";
 import { errorMessage } from "../core/errors.ts";
-import { HARNESS_STATES, contextUsed, formatCost, limitDetail } from "../core/wording.ts";
+import { HARNESS_STATES, contextUsed, formatCost, limitDetail, plural } from "../core/wording.ts";
 import type { ClientEvent, HostClient } from "../client/client.ts";
 import {
   RpcError,
@@ -43,6 +43,7 @@ import { Editor, applyEditingKey } from "./editor.ts";
 import { activityLine, attentionLine, queueRows, statusLine } from "./footer.ts";
 import { CLICK_MS, InputDecoder, WHEEL_ROWS, type InputEvent, type Key } from "./input.ts";
 import { LivePages } from "./live.ts";
+import { codeBlocks } from "./markdown.ts";
 import { ThreadLogs } from "./logs.ts";
 import { Menu, entry, infoPanel, type MenuConfig, type MenuEntry } from "./menu.ts";
 import { listedEntry, ResumeView, type ResumeEntry } from "./resume.ts";
@@ -215,6 +216,12 @@ const COLUMN_WIDTH = 100;
 function columnWidth(): number {
   const set = Number(process.env["ONEHARNESS_COLUMN"]);
   return Number.isInteger(set) && set >= 40 ? set : COLUMN_WIDTH;
+}
+
+/** The message the composer's text sends, `//` making one that starts with `/`; null for a command. */
+function messageText(text: string): string | null {
+  if (text.startsWith("//")) return text.slice(1);
+  return text.startsWith("/") ? null : text;
 }
 
 export class App {
@@ -661,18 +668,12 @@ export class App {
           if (reply?.kind !== "assistant") throw new Error("No reply to copy yet");
           let text = reply.text.trim();
           if (args === "code") {
-            const blocks = [...text.matchAll(/^\s*(`{3,}|~{3,})[^\n]*\n([\s\S]*?)\n\s*\1\s*$/gm)];
-            const last = blocks.at(-1)?.[2];
-            if (last === undefined) throw new Error("The last reply has no code block");
-            text = last;
+            const last = codeBlocks(text).at(-1);
+            if (!last) throw new Error("The last reply has no code block");
+            text = last.code;
           }
-          // OSC 52: the terminal puts it on the clipboard, the one where you sit, over SSH or Rex too.
-          process.stdout.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
-          const lines = text.split("\n").length;
-          this.#notice(
-            "info",
-            `Copied ${args === "code" ? "the code block" : "the reply"} (${lines} ${lines === 1 ? "line" : "lines"}).`,
-          );
+          const lines = plural(text.split("\n").length, "line");
+          this.#copy(text, `Copied ${args === "code" ? "the code block" : "the reply"}, ${lines}`);
         },
       },
       {
@@ -2361,14 +2362,15 @@ export class App {
         if (key.shift) void this.#command("/plan");
         else if (this.#live?.busy && this.#editor.text.trim() !== "") {
           const text = this.#editor.text.trim();
-          // A command runs now, as enter would; `//` sends a message that starts with `/`.
-          if (text.startsWith("/") && !text.startsWith("//")) {
+          const message = messageText(text);
+          // A command runs now, as enter would.
+          if (message === null) {
             this.#submit(text);
             return;
           }
           this.#view.scroll = 0;
           this.#editor.take();
-          this.#send(text.startsWith("//") ? text.slice(1) : text, false);
+          this.#send(message, false);
         }
         return;
       case "escape":
@@ -2485,11 +2487,8 @@ export class App {
       this.#details = !this.#details;
       this.#schedule();
     } else if (target.kind === "code") {
-      const lines = target.code.split("\n").length;
-      this.#copy(
-        target.code,
-        `Copied the ${target.lang ? `${target.lang} ` : ""}code, ${lines} ${lines === 1 ? "line" : "lines"}`,
-      );
+      const lines = plural(target.code.split("\n").length, "line");
+      this.#copy(target.code, `Copied the ${target.lang ? `${target.lang} ` : ""}code, ${lines}`);
     } else this.#openViewer(target);
   }
 
@@ -2581,18 +2580,18 @@ export class App {
   #submit(raw: string): void {
     const text = raw.trim();
     if (text === "") return;
-    const message = !text.startsWith("/") || text.startsWith("//");
+    const message = messageText(text);
     // Behind ones already held too, which a thread shown while it starts must not overtake.
     if (
-      message &&
+      message !== null &&
       (this.#held.length > 0 || (!this.#live && (this.#starting || this.#opening > 0)))
     ) {
       this.#editor.take();
       if (this.#held.length === 0) this.#notice("info", "Sent once the thread opens.");
-      this.#held.push(text.startsWith("//") ? text.slice(1) : text);
+      this.#held.push(message);
       return;
     }
-    if (message && !this.#live) {
+    if (message !== null && !this.#live) {
       // The text stays in the composer for a thread that can take it, wherever it came from.
       if (this.#editor.text.trim() === "") this.#editor.set(raw);
       const current = this.#current;
@@ -2607,11 +2606,11 @@ export class App {
     this.#editor.take();
     this.#suggestions.clear();
     this.#view.scroll = 0;
-    if (text.startsWith("/") && !text.startsWith("//")) {
+    if (message === null) {
       void this.#command(text);
       return;
     }
-    this.#send(text.startsWith("//") ? text.slice(1) : text);
+    this.#send(message);
   }
 
   /** Sends a message; while a turn runs it joins the turn, or queues when `steer` is false. */
