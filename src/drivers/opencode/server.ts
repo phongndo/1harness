@@ -1,12 +1,12 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
+import { HarnessProcess } from "../child.ts";
 import type { OcEvent } from "./translate.ts";
 
 const START_TIMEOUT_MS = 30_000;
 // Every call queues work or reads state; none waits for a turn, so a slow one has hung.
 const REQUEST_TIMEOUT_MS = 120_000;
-const STDERR_TAIL_BYTES = 4_096;
 // The server sends a heartbeat every ten seconds or so, so a minute of silence means it is gone.
 const SILENCE_MS = 60_000;
 
@@ -15,46 +15,35 @@ const SILENCE_MS = 60_000;
  * password only this process knows, in the session's folder.
  */
 export class OpenCodeServer {
-  #child: ChildProcess;
+  #process: HarnessProcess;
   #password = randomBytes(24).toString("base64url");
   #url: Promise<string>;
   #cwd: string;
-  #stderr = "";
-  #exited: Promise<string>;
   #stream: AbortController | null = null;
 
   constructor(command: string, cwd: string, env: NodeJS.ProcessEnv) {
     this.#cwd = cwd;
     // The password variable of OpenCode 1 would take the place of this one.
     const { OPENCODE_SERVER_PASSWORD: _inherited, ...rest } = env;
-    this.#child = spawn(command, ["serve", "--hostname", "127.0.0.1", "--port", "0"], {
+    const child = spawn(command, ["serve", "--hostname", "127.0.0.1", "--port", "0"], {
       cwd,
       env: { ...rest, OPENCODE_PASSWORD: this.#password },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    this.#child.stderr?.setEncoding("utf8");
-    this.#child.stderr?.on("data", (chunk: string) => {
-      this.#stderr = (this.#stderr + chunk).slice(-STDERR_TAIL_BYTES);
-    });
-    this.#exited = new Promise((resolve) => {
-      this.#child.on("error", (error) => resolve(this.#describeExit(error.message)));
-      this.#child.on("exit", (code, signal) =>
-        resolve(this.#describeExit(signal ? `signal ${signal}` : `code ${code}`)),
-      );
-    });
+    this.#process = new HarnessProcess(child, "OpenCode");
     this.#url = new Promise((resolve, reject) => {
       const timer = setTimeout(
         () => reject(new Error("OpenCode did not start its server in time")),
         START_TIMEOUT_MS,
       );
-      const lines = createInterface({ input: this.#child.stdout! });
+      const lines = createInterface({ input: child.stdout });
       lines.on("line", (line) => {
         const url = /listening on (http:\/\/\S+)/.exec(line)?.[1];
         if (!url) return;
         clearTimeout(timer);
         resolve(url.replace(/\/$/, ""));
       });
-      void this.#exited.then((reason) => {
+      void this.exited.then((reason) => {
         clearTimeout(timer);
         reject(new Error(reason));
       });
@@ -65,7 +54,7 @@ export class OpenCodeServer {
 
   /** Resolves with a description once the server has exited. */
   get exited(): Promise<string> {
-    return this.#exited;
+    return this.#process.exited;
   }
 
   ready(): Promise<string> {
@@ -163,11 +152,7 @@ export class OpenCodeServer {
 
   async close(): Promise<void> {
     this.#stream?.abort();
-    if (this.#child.exitCode !== null || this.#child.signalCode !== null) return;
-    this.#child.kill("SIGTERM");
-    const timer = setTimeout(() => this.#child.kill("SIGKILL"), 3_000);
-    await this.#exited;
-    clearTimeout(timer);
+    await this.#process.close();
   }
 
   #headers(): Record<string, string> {
@@ -176,10 +161,5 @@ export class OpenCodeServer {
       // Every request is about the session's folder, sent encoded as OpenCode's clients do.
       "x-opencode-directory": encodeURIComponent(this.#cwd),
     };
-  }
-
-  #describeExit(reason: string): string {
-    const tail = this.#stderr.trim().split("\n").slice(-5).join("\n");
-    return tail ? `OpenCode exited (${reason}): ${tail}` : `OpenCode exited (${reason})`;
   }
 }

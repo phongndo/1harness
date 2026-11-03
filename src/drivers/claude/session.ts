@@ -50,6 +50,7 @@ import {
 import { errorMessage } from "../../core/errors.ts";
 import { policyHookOutput, toolAction } from "../../core/tools.ts";
 import { ANSWER, ASK, PLAN_TITLE, fileName, planOptions } from "../../core/wording.ts";
+import { StderrTail } from "../child.ts";
 import { readImage } from "../images.ts";
 import { SessionEvents } from "../session-events.ts";
 import { summarizeInput } from "../text.ts";
@@ -104,7 +105,6 @@ const TERMINAL_COMMANDS = ["color", "doctor", "focus", "reload-plugins"];
 
 // Resumed sessions show this many recent messages.
 const HISTORY_MESSAGES = 200;
-const STDERR_TAIL_BYTES = 16_384;
 
 export interface ClaudeSessionConfig extends SessionOptions {
   /** The user's own `claude`, never the SDK's bundled copy, so its login and settings apply. */
@@ -143,7 +143,7 @@ export class ClaudeSession implements HarnessSession {
   /** The modes Claude Code's settings leave on. */
   #allowed: RuntimeMode[];
   #generation = 0;
-  #stderr = "";
+  #stderr = new StderrTail();
   #closing = false;
   /**
    * Commands bound to Claude Code's own terminal, which this client cannot run,
@@ -358,9 +358,7 @@ export class ClaudeSession implements HarnessSession {
       canUseTool: (tool, input, context) => this.#canUseTool(tool, input, context),
       // Running agents get a one-line summary of what they are doing.
       agentProgressSummaries: true,
-      stderr: (data) => {
-        this.#stderr = (this.#stderr + data).slice(-STDERR_TAIL_BYTES);
-      },
+      stderr: (data) => this.#stderr.append(data),
       ...(this.#bypassAllowed ? { allowDangerouslySkipPermissions: true } : {}),
       ...(this.info.model ? { model: this.info.model } : {}),
       ...(this.info.effort ? { effort: this.info.effort as EffortLevel } : {}),
@@ -385,7 +383,7 @@ export class ClaudeSession implements HarnessSession {
       }
     } catch (error) {
       failure = errorMessage(error);
-      const tail = this.#stderr.trim().split("\n").slice(-5).join("\n");
+      const tail = this.#stderr.toString();
       if (tail) failure = `${failure}\n${tail}`;
     }
     // A restart replaces the query; only the current one may close the session.

@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
+import { HarnessProcess } from "./child.ts";
 
 export type RequestId = number | string;
 
@@ -20,8 +21,6 @@ interface Pending {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
 }
-
-const STDERR_TAIL_BYTES = 16_384;
 
 export interface JsonRpcOptions {
   cwd: string;
@@ -171,20 +170,15 @@ export class JsonRpcPeer {
  */
 export class JsonRpcProcess {
   #child: ChildProcessWithoutNullStreams;
+  #process: HarnessProcess;
   #peer: JsonRpcPeer;
-  #stderr = "";
   #exited: Promise<string>;
-  #name: string;
 
   constructor(command: string, args: string[], options: JsonRpcOptions) {
-    this.#name = options.name;
     this.#child = spawn(command, args, { cwd: options.cwd, env: options.env, stdio: "pipe" });
+    this.#process = new HarnessProcess(this.#child, options.name);
     // A write after the process died fails with EPIPE; the exit handler reports it.
     this.#child.stdin.on("error", () => {});
-    this.#child.stderr.setEncoding("utf8");
-    this.#child.stderr.on("data", (chunk: string) => {
-      this.#stderr = (this.#stderr + chunk).slice(-STDERR_TAIL_BYTES);
-    });
     const stdin = this.#child.stdin;
     this.#peer = new JsonRpcPeer(
       this.#child.stdout,
@@ -193,16 +187,9 @@ export class JsonRpcProcess {
       },
       { name: options.name, jsonrpc: options.jsonrpc ?? false },
     );
-    this.#exited = new Promise((resolve) => {
-      const finish = (reason: string) => {
-        const error = new Error(this.#describeExit(reason));
-        this.#peer.closed(error);
-        resolve(error.message);
-      };
-      this.#child.on("error", (error) => finish(error.message));
-      this.#child.on("exit", (code, signal) =>
-        finish(signal ? `signal ${signal}` : `code ${code}`),
-      );
+    this.#exited = this.#process.exited.then((reason) => {
+      this.#peer.closed(new Error(reason));
+      return reason;
     });
   }
 
@@ -234,16 +221,7 @@ export class JsonRpcProcess {
   }
 
   async close(): Promise<void> {
-    if (this.#child.exitCode !== null || this.#child.signalCode !== null) return;
     this.#child.stdin.end();
-    this.#child.kill("SIGTERM");
-    const timer = setTimeout(() => this.#child.kill("SIGKILL"), 2_000);
-    await this.#exited;
-    clearTimeout(timer);
-  }
-
-  #describeExit(reason: string): string {
-    const tail = this.#stderr.trim().split("\n").slice(-5).join("\n");
-    return tail ? `${this.#name} exited (${reason}): ${tail}` : `${this.#name} exited (${reason})`;
+    await this.#process.close();
   }
 }
