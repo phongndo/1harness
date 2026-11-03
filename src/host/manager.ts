@@ -157,7 +157,7 @@ export interface RestoredThread {
 /** What a run that was going when its host stopped says; nobody knows how it ended. */
 export const UNKNOWN_OUTCOME = "1harness stopped while this turn ran, so how it ended is unknown";
 
-/** Thirty minutes. */
+/** Long enough for a pause in the work, short enough that idle harnesses do not pile up. */
 export const IDLE_CLOSE_MS = 30 * 60 * 1000;
 
 /** How a thread moved to another harness, for clients to describe. */
@@ -240,7 +240,6 @@ export class ThreadManager {
   #warned = new Set<string>();
   /** Each thread's grant to the tool server, which its sessions use. */
   #grants = new Map<string, ToolGrant>();
-  /** Each thread's extensions. */
   #extensions = new Map<string, ExtensionHost>();
   /** What each thread looked like when last announced. */
   #keys = new Map<string, string>();
@@ -544,7 +543,6 @@ export class ThreadManager {
     this.#refresh(managed);
   }
 
-  /** Renames a thread. */
   rename(id: string, title: string): void {
     const managed = this.#threads.get(id);
     if (!managed) throw new Error(`No thread ${id}`);

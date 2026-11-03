@@ -560,7 +560,6 @@ export class Host {
     return managed;
   }
 
-  /** The newest event's number. */
   get seq(): number {
     return this.#feed.seq;
   }
@@ -631,7 +630,6 @@ export class Host {
     }
   }
 
-  /** Runs one client request. */
   async call<M extends Method>(clientId: string, method: M, params: Params<M>): Promise<Result<M>> {
     const handler = this.#handlers[method] as
       | ((client: Client, params: Params<M>) => Promise<Result<M>>)

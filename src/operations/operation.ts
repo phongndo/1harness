@@ -40,7 +40,6 @@ export interface Operation {
   inputSchema: Record<string, unknown>;
   /** A read changes nothing, so harnesses may run it with fewer prompts. */
   effect: "read" | "act";
-  /** Who may call it. */
   callers: readonly CallerKind[];
   run(input: Record<string, unknown>, context: OperationContext): unknown;
 }
