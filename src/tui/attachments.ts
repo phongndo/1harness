@@ -44,7 +44,8 @@ function shellWords(text: string): string[] {
       quote = char;
       word ??= "";
     } else if (char === "\\" && index + 1 < text.length) word = (word ?? "") + text[++index]!;
-    else if (/\s/.test(char)) {
+    // Only a shell's blanks: macOS puts U+202F in a screenshot's name, before "PM".
+    else if (/[ \t\r\n]/.test(char)) {
       if (word !== null) words.push(word);
       word = null;
     } else word = (word ?? "") + char;

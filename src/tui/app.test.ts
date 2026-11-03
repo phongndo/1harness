@@ -445,6 +445,9 @@ describe("App commands", () => {
       // A `$` that names no skill is a message.
       await session.type("$5 a month\r");
       await session.sees("Done with $5 a month");
+      // So is a path, as an image that is not there leaves.
+      await session.type("/tmp/gone.png\r");
+      await session.sees("Done with /tmp/gone.png");
       // A queued skill comes back as typed.
       await session.type("hold\r");
       await session.sees("Add to the turn");

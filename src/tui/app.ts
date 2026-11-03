@@ -2388,12 +2388,13 @@ export class App {
 
   /**
    * The message the composer's text sends, `//` making one that starts with
-   * `/`; null for a command or a skill. `$` starts a message when no skill has
-   * the name, as in `$5 a month` or `$HOME`.
+   * `/`; null for a command or a skill. A path, as in `/Users/me/shot.png`,
+   * starts a message too, since no command's name has a `/`. `$` starts a
+   * message when no skill has the name, as in `$5 a month` or `$HOME`.
    */
   #messageText(text: string): string | null {
     if (text.startsWith("//")) return text.slice(1);
-    if (text.startsWith("/")) return null;
+    if (text.startsWith("/")) return /^\/[^\s/]+\//.test(text) ? text : null;
     const call = skillCall(text);
     return call && this.#skill(call.name) ? null : text;
   }

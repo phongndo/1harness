@@ -20,7 +20,7 @@ describe("pastedImagePaths", () => {
 
   before(() => {
     root = mkdtempSync(join(tmpdir(), "1harness-paste-"));
-    shot = join(root, "Screenshot 2026-11-02 at 5.48.29 PM.png");
+    shot = join(root, "Screenshot 2026-11-02 at 5.48.29\u202fPM.png");
     photo = join(root, "it's.jpg");
     writeFileSync(shot, "png");
     writeFileSync(photo, "jpg");
