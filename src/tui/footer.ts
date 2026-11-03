@@ -90,7 +90,7 @@ export function usageSummary(usage: Usage): string {
 }
 
 /** What the status line shows, as the terminal has it when it draws. */
-export interface StatusState {
+export interface StatusLineState {
   /** A ctrl+c that one more exits after. */
   exitArmed: boolean;
   /** A word for a moment, such as what was copied. */
@@ -112,7 +112,7 @@ export interface StatusState {
   details: boolean;
 }
 
-export function statusLine(state: StatusState, width: number): string {
+export function statusLine(state: StatusLineState, width: number): string {
   if (state.exitArmed) return style.muted("Press ctrl+c again to exit");
   if (state.toast) return truncate(`${style.added("✓")} ${style.text(state.toast)}`, width);
   const { current } = state;
