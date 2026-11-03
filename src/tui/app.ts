@@ -497,6 +497,9 @@ export class App {
       },
       unqueue: async () =>
         (await this.#client.call("thread.unqueue", { threadId: state.id })) ?? undefined,
+      reload: async () => {
+        await this.#client.call("thread.reload", { threadId: state.id });
+      },
     };
   }
 

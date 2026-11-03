@@ -367,6 +367,8 @@ export interface Methods {
   "thread.seen": { params: { threadId: string; runs: number }; result: null };
   "thread.close": { params: { threadId: string }; result: null };
   "thread.unqueue": { params: { threadId: string }; result: Message | null };
+  /** Starts the thread's harness session over, resuming it, so the harness reads its setup again. */
+  "thread.reload": { params: { threadId: string }; result: null };
   "thread.rename": { params: { threadId: string; title: string }; result: null };
   /** Pins a thread to the top of listings, or archives one out of them; archiving closes it. */
   "thread.flag": {

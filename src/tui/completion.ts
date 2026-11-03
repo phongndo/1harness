@@ -30,6 +30,7 @@ const COMMAND_ORDER = [
   "fork",
   "compact",
   "unqueue",
+  "reload",
   "close",
   "model",
   "effort",

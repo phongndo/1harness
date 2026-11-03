@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -7,7 +7,7 @@ import { after, afterEach, before, describe, it } from "node:test";
 import { HostClient } from "../client/client.ts";
 import { LocalConnection } from "../client/connection.ts";
 import { errorMessage } from "../core/errors.ts";
-import type { UserInput } from "../core/events.ts";
+import type { SessionOptions, UserInput } from "../core/events.ts";
 import { RpcError } from "../protocol.ts";
 import { Host } from "../host/host.ts";
 import { Store } from "../store/store.ts";
@@ -620,6 +620,72 @@ describe("App threads and keys", () => {
     await session.type("\r");
     const screen = await session.sees("Done with look ASK");
     assert.doesNotMatch(screen, /Permission needed/);
+  });
+
+  it("starts the harness's session over with /reload, resuming its thread", async () => {
+    const resumed: (string | null)[] = [];
+    const servers: SessionOptions["mcpServers"][] = [];
+    /** Holds the next session's start, while set. */
+    let starting: Promise<void> | null = null;
+    const mcp = (command: string) =>
+      writeFileSync(
+        join(root, "config", "mcp.json"),
+        JSON.stringify({ mcpServers: { docs: { command } } }),
+      );
+    mkdirSync(join(root, "config"), { recursive: true });
+    mcp("before");
+    const unregisterCounted = registerDriver({
+      id: "counted",
+      label: "Counted",
+      unavailable: () => null,
+      create: (options) => {
+        resumed.push(options.resume);
+        servers.push(options.mcpServers);
+        const scripted = new ScriptedSession(options);
+        const held = starting;
+        return held ? Object.assign(scripted, { start: () => held }) : scripted;
+      },
+    });
+    try {
+      const session = await start({ harness: "counted", prompt: "alpha" });
+      await session.sees("Done with alpha");
+      mcp("after");
+      await session.type("/reload\r");
+      await session.sees("Reloaded the harness's session.");
+      assert.equal(resumed.length, 2);
+      assert.equal(resumed[0], null);
+      assert.match(resumed[1] ?? "", /^native-\d+$/);
+      // It reads the MCP config again too.
+      assert.deepEqual(
+        servers.map((each) => (each?.["docs"] as { command?: string } | undefined)?.command),
+        ["before", "after"],
+      );
+      await session.type("beta\r");
+      await session.sees("Done with beta");
+      // A second /reload while the first starts the session is refused, and
+      // leaves the first's 1harness MCP server working.
+      const hold = Promise.withResolvers<void>();
+      starting = hold.promise;
+      await session.type("/reload\r");
+      while (resumed.length < 3) await settle();
+      await session.type("/reload\r");
+      await session.sees("is already starting");
+      starting = null;
+      hold.resolve();
+      await session.sees(/Reloaded the harness's session\.[\s\S]*Reloaded the harness's session\./);
+      assert.equal(resumed.length, 3);
+      const tools = servers.at(-1)?.["1harness"];
+      assert.ok(tools?.type === "http");
+      const listed = await fetch(tools.url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...tools.headers },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      });
+      assert.equal(listed.status, 200);
+    } finally {
+      rmSync(join(root, "config", "mcp.json"), { force: true });
+      unregisterCounted();
+    }
   });
 
   it("renames the thread with /rename", async () => {

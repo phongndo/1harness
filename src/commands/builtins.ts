@@ -300,6 +300,18 @@ const unqueue: CommandDefinition = {
   },
 };
 
+const reload: CommandDefinition = {
+  name: "reload",
+  description:
+    "restart the harness's session, so it reads new skills, plugins, MCP servers, and config",
+  group: "Threads",
+  available: (context) => context.thread !== null && !context.thread.closed,
+  async run(context) {
+    await context.thread?.reload();
+    context.ui.notify("info", "Reloaded the harness's session.");
+  },
+};
+
 const model: CommandDefinition = {
   name: "model",
   usage: "[id]",
@@ -599,6 +611,7 @@ export const BUILTIN_COMMANDS: readonly CommandDefinition[] = [
   harness,
   compact,
   unqueue,
+  reload,
   model,
   effort,
   mode,

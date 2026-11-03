@@ -79,6 +79,8 @@ export interface CommandThread {
   send(text: string): Promise<void>;
   /** Takes back the message the user queued last. */
   unqueue(): Promise<Message | undefined>;
+  /** Starts its harness session over, resuming it, so the harness reads its setup again. */
+  reload(): Promise<void>;
 }
 
 /**

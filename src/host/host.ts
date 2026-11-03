@@ -942,6 +942,7 @@ export class Host {
         await this.call(client.id, "thread.send", { threadId: managed.id, text });
       },
       unqueue: async () => managed.thread.unqueue(),
+      reload: () => this.manager.reload(managed.id),
     };
   }
 
@@ -1279,6 +1280,7 @@ export class Host {
     | "thread.stop"
     | "thread.close"
     | "thread.unqueue"
+    | "thread.reload"
     | "thread.switchHarness"
     | "thread.call"
     | "thread.command"
@@ -1446,6 +1448,10 @@ export class Host {
       },
       "thread.unqueue": async (_client, { threadId }) =>
         this.#open(threadId).thread.unqueue() ?? null,
+      "thread.reload": async (_client, { threadId }) => {
+        await this.manager.reload(this.#open(threadId).id);
+        return null;
+      },
       "thread.switchHarness": async (_client, { threadId, harness, fresh }) =>
         this.#switch(this.#open(threadId), harness, fresh === true),
       "thread.call": async (_client, { threadId, method, args }) => {

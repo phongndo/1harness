@@ -225,6 +225,8 @@ export class ThreadManager {
   #cleanups = new Map<string, () => void>();
   /** The MCP servers each thread's sessions get, the tool server's grant among them. */
   #servers = new Map<string, Record<string, McpServerConfig>>();
+  /** Threads a /reload is starting over. */
+  #reloading = new Set<string>();
   /** Harnesses each thread ran on before, by harness. */
   #visits = new Map<string, Map<HarnessId, Visit>>();
   /** Threads moving to another harness, and the harness they are moving to. */
@@ -533,6 +535,29 @@ export class ThreadManager {
     await thread.park();
     this.#emit({ type: "thread.parked", thread: managed });
     return true;
+  }
+
+  /**
+   * Starts an idle thread's session over, resuming its harness's own thread,
+   * so the harness reads its skills, plugins, MCP servers, and config again.
+   */
+  async reload(id: string): Promise<void> {
+    const managed = this.#threads.get(id);
+    if (!managed || this.closing(id)) throw new Error(`No open thread ${id}`);
+    if (this.#reloading.has(id) || this.#switching.has(id))
+      throw new Error(`${id} is already starting`);
+    this.#reloading.add(id);
+    try {
+      if (!managed.thread.parked && !(await this.park(id)))
+        throw new Error("The thread is working; reload it once it is idle.");
+      // Woken meanwhile, as by a message: that start stands, and keeps its servers.
+      if (this.#switching.has(id) || !managed.thread.parked) return;
+      // Waking connects them again, from the MCP config as it is now.
+      this.#disconnectServers(id);
+      await this.wake(id);
+    } finally {
+      this.#reloading.delete(id);
+    }
   }
 
   /** Names a thread for what it is doing, as its harness named it, unless it was given a name. */
