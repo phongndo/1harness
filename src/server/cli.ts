@@ -4,7 +4,7 @@ import { serverHello } from "../client/socket.ts";
 import { serverLog, socketFile } from "../core/paths.ts";
 import { answering, markStopped, runServer, spawnServer } from "./lifecycle.ts";
 
-export const SERVER_HELP = `Usage: 1harness server <command>
+const SERVER_HELP = `Usage: 1harness server <command>
 
 Runs the 1harness server, which keeps threads and their harnesses working
 while no terminal is open. Any 1harness command starts one when none is

@@ -26,7 +26,7 @@ import { HostServer } from "./http.ts";
 import { listen, type ListenerOptions } from "./listeners.ts";
 
 /** How long an autostarted server stays once nobody is connected and nothing is working. */
-export const IDLE_EXIT_MS = 10_000;
+const IDLE_EXIT_MS = 10_000;
 /** How long a client waits for a server it started to answer. */
 const START_TIMEOUT_MS = 15_000;
 /** The longest socket path the kernel takes, without its final NUL. */
@@ -248,7 +248,7 @@ export function spawnServer(options: {
 }
 
 /** The mark `server stop` leaves, so clients do not start the server again behind the user's back. */
-export function stoppedMark(socket: string): string {
+function stoppedMark(socket: string): string {
   return `${socket}.stopped`;
 }
 
