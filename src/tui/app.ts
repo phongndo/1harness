@@ -119,6 +119,8 @@ const KEYS: [string, string][] = [
   ["ctrl+o", "open the agent that needs you"],
   ["ctrl+x", "show tool calls whole: commands, output, diffs; in a prompt, all of it"],
   ["alt+↑", "go to the thread that started this one"],
+  ["/", "run a 1harness command"],
+  ["$", "run one of the harness's skills"],
   ["@", "mention a file or folder"],
   ["ctrl+j, ctrl+k", "move in any list, completions included"],
   ["j k, g G, ctrl+d ctrl+u", "move in lists that take no typing"],
@@ -162,10 +164,10 @@ function pickEntry(item: PickEntry): MenuEntry {
   });
 }
 
-/** The message the composer's text sends, `//` making one that starts with `/`; null for a command. */
-function messageText(text: string): string | null {
-  if (text.startsWith("//")) return text.slice(1);
-  return text.startsWith("/") ? null : text;
+/** A skill named as the composer's text starts, `$name args`. */
+function skillCall(text: string): { name: string; args: string } | null {
+  const [, name, args = ""] = /^\$(\S+)\s*([\s\S]*)$/.exec(text) ?? [];
+  return name ? { name, args } : null;
 }
 
 export class App {
@@ -213,8 +215,8 @@ export class App {
   #context: CommandContext;
   #warnings: string[];
   #notes: string[];
-  /** Commands the harness runs itself, shown beside 1harness's own. */
-  #nativeCommands: NativeCommand[] = [];
+  /** The harness's skills, which `$name` runs. */
+  #skills: NativeCommand[] = [];
   /** The commands version of the thread on screen whose commands were last loaded. */
   #commandsSeen = -1;
   /** Whether the host keeps threads, so one can be resumed by its 1harness ID. */
@@ -384,7 +386,7 @@ export class App {
       context: this.#context,
       available: () => this.#available(),
       isAvailable: (command) => this.#isAvailable(command),
-      skills: () => this.#nativeCommands,
+      skills: () => this.#skills,
       cwd: () => this.#cwd(),
       submit: (text) => this.#submit(text),
       notice: (level, text) => this.#notice(level, text),
@@ -1281,7 +1283,7 @@ export class App {
     };
     this.#lookups.clear();
     this.#completions.clear();
-    this.#nativeCommands = [];
+    this.#skills = [];
     void this.#loadCommands();
     void this.#refreshHostCommands();
     this.#schedule();
@@ -1351,7 +1353,7 @@ export class App {
     };
   }
 
-  /** Fetches the harness's own commands for completion and /help. */
+  /** Fetches the harness's skills for completion and /help. */
   async #loadCommands(): Promise<void> {
     const thread = this.#live;
     // A parked thread's harness is not running; its commands load once it wakes.
@@ -1363,21 +1365,13 @@ export class App {
       // A switch keeps the thread but not the session, whose commands no longer apply.
       const now = this.#current;
       if (now?.id !== thread.id || now.commandsVersion !== version) return;
-      const own = new Set(
-        this.#commands.list().flatMap((command) => [command.name, ...(command.aliases ?? [])]),
-      );
-      // 1harness owns the commands; from a harness come only your skills, and
-      // none that would shadow one of 1harness's.
-      this.#nativeCommands = commands.filter(
-        (command) =>
-          command.kind === "skill" &&
-          !own.has(command.name) &&
-          !command.aliases.some((alias) => own.has(alias)),
-      );
+      // 1harness owns the commands; from a harness come only your skills, which
+      // `$` runs, so none of them can shadow a command.
+      this.#skills = commands.filter((command) => command.kind === "skill");
       this.#suggestions.sync();
       this.#schedule();
     } catch {
-      // Completion is a convenience; a harness that cannot list commands still runs them.
+      // Completion is a convenience; `$name` for a skill not listed goes as a message.
     }
   }
 
@@ -2007,7 +2001,7 @@ export class App {
         if (key.shift) void this.#command("/plan");
         else if (this.#live?.busy && this.#editor.text.trim() !== "") {
           const text = this.#editor.text.trim();
-          const message = messageText(text);
+          const message = this.#messageText(text);
           // A command runs now, as enter would.
           if (message === null) {
             this.#submit(text);
@@ -2137,7 +2131,7 @@ export class App {
   #submit(raw: string): void {
     const text = raw.trim();
     if (text === "") return;
-    const message = messageText(text);
+    const message = this.#messageText(text);
     // Behind ones already held too, which a thread shown while it starts must not overtake.
     if (
       message !== null &&
@@ -2202,31 +2196,51 @@ export class App {
 
   // Commands
 
+  /**
+   * The message the composer's text sends, `//` making one that starts with
+   * `/`; null for a command or a skill. `$` starts a message when no skill has
+   * the name, as in `$5 a month` or `$HOME`.
+   */
+  #messageText(text: string): string | null {
+    if (text.startsWith("//")) return text.slice(1);
+    if (text.startsWith("/")) return null;
+    const call = skillCall(text);
+    return call && this.#skill(call.name) ? null : text;
+  }
+
+  /** The harness's skill by name or alias. */
+  #skill(name: string): NativeCommand | undefined {
+    return this.#skills.find((skill) => skill.name === name || skill.aliases.includes(name));
+  }
+
+  /** Runs `/command args` from 1harness, or `$skill args` in the harness. */
   async #command(text: string): Promise<void> {
-    // Arguments keep their lines, since a skill may take a whole prompt.
-    const [, name = "", arg = ""] = /^\/(\S*)\s*([\s\S]*)$/.exec(text) ?? [];
     try {
+      const call = skillCall(text);
+      const skill = call && this.#skill(call.name);
+      if (call && skill) {
+        const thread = this.#live;
+        if (!thread) throw new Error("No session is running.");
+        // Arguments keep their lines, since a skill may take a whole prompt.
+        await this.#client.call("thread.command", {
+          threadId: thread.id,
+          command: skill,
+          args: call.args.trim(),
+        });
+        return;
+      }
+      const [, name = "", arg = ""] = /^\/(\S*)\s*([\s\S]*)$/.exec(text) ?? [];
       const own = this.#commands.find(name);
       if (own) {
         if (!this.#isAvailable(own)) throw new Error(`/${own.name} is not available here`);
         await own.run(this.#context, arg.trim());
         return;
       }
-      const native = this.#nativeCommands.find(
-        (command) => command.name === name || command.aliases.includes(name),
-      );
-      const thread = this.#live;
-      if (native) {
-        // The harness runs your skills, such as /sol-loop; its own commands stay its own.
-        if (!thread) throw new Error("No session is running.");
-        await this.#client.call("thread.command", {
-          threadId: thread.id,
-          command: native,
-          args: arg.trim(),
-        });
-        return;
-      }
-      this.#notice("warning", `Unknown command /${name}. Type /help for commands.`);
+      // Skills answer to `$` alone, so `/` is only ever 1harness's.
+      const hint = this.#skill(name)
+        ? `$${name} runs the skill.`
+        : "Type /help for commands and skills.";
+      this.#notice("warning", `Unknown command /${name}. ${hint}`);
     } catch (error) {
       this.#notice("error", errorMessage(error));
     } finally {
@@ -2243,15 +2257,15 @@ export class App {
         { group: command.group },
       ),
     );
-    // The harness's own commands under a tab named after it, and its skills under their own.
-    const native = [...this.#nativeCommands];
+    // The harness's skills under their own tab, by the `$` that runs them.
+    const native = [...this.#skills];
     for (const command of native) {
       // A hint that is a sentence, as skills' often are, reads as part of the description.
       const hint = command.argumentHint ?? "";
       const short = hint !== "" && hint.length <= HINT_LIMIT;
       entries.push(
         entry(
-          short ? `/${command.name} ${hint}` : `/${command.name}`,
+          short ? `$${command.name} ${hint}` : `$${command.name}`,
           hint && !short ? `${command.description} · takes: ${hint}` : command.description,
           { group: "Skills" },
         ),
@@ -2270,7 +2284,7 @@ export class App {
         const name = ownCommand?.name ?? nativeCommand?.name;
         if (!name) return;
         const takes = ownCommand ? Boolean(ownCommand.usage) : Boolean(nativeCommand?.argumentHint);
-        this.#editor.set(`/${name}${takes ? " " : ""}`);
+        this.#editor.set(`${ownCommand ? "/" : "$"}${name}${takes ? " " : ""}`);
         this.#suggestions.dismissCommands();
         this.#suggestions.sync();
       },

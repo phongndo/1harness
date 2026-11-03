@@ -288,9 +288,9 @@ export interface ModelOption {
 }
 
 /**
- * A command or skill the harness runs itself, typed as `/name args` in the
- * composer. Drivers list what works inside a session and leave out what
- * belongs to the harness's own terminal UI.
+ * A command or skill the harness runs itself, sent to it as `/name args`;
+ * the composer runs skills as `$name args`. Drivers list what works inside a
+ * session and leave out what belongs to the harness's own terminal UI.
  */
 export interface NativeCommand {
   name: string;

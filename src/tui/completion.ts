@@ -15,9 +15,9 @@ import { Menu, entry, lineStep, type MenuEntry } from "./menu.ts";
 import { visibleWidth } from "./text.ts";
 
 // The lists that open under the composer as it is typed in: commands after
-// `/`, the words a command takes after it, and files after `@`. The composer
-// keeps the typing; arrows move in the list, esc closes it until the text
-// changes, and tab or enter takes what is selected.
+// `/`, the words a command takes after it, skills after `$`, and files after
+// `@`. The composer keeps the typing; arrows move in the list, esc closes it
+// until the text changes, and tab or enter takes what is selected.
 
 /**
  * The order the command menu and /help list 1harness's commands in, a group
@@ -43,7 +43,7 @@ const COMMAND_ORDER = [
   "copy",
   "connect",
 ];
-/** Listed last, after commands the harness and extensions add. */
+/** Listed last, after commands extensions add. */
 const LAST_COMMANDS = ["quit"];
 
 /** Where a command goes in menus: by COMMAND_ORDER, then unlisted ones, then LAST_COMMANDS. */
@@ -82,7 +82,7 @@ export interface SuggestionsHost {
   /** 1harness's commands the thread on screen can run, in menu order. */
   available(): CommandDefinition[];
   isAvailable(command: CommandDefinition): boolean;
-  /** The harness's skills, listed after 1harness's commands. */
+  /** The harness's skills, listed after `$`. */
   skills(): readonly NativeCommand[];
   /** The folder files are mentioned from. */
   cwd(): string;
@@ -155,9 +155,10 @@ interface FileList {
 
 export class Suggestions {
   #host: SuggestionsHost;
+  /** Commands after `/`, or skills after `$`, as the composer starts. */
   #slash: Menu | null = null;
   #slashDismissed = new Dismissed();
-  /** Composer text at which the user moved in the slash menu, which keeps their choice. */
+  /** Composer text at which the user moved in the slash or skill menu, which keeps their choice. */
   #slashMoved: string | null = null;
   /** Completion for the words after a command, such as `/mcp login NAME`. */
   #args: WordList | null = null;
@@ -312,47 +313,41 @@ export class Suggestions {
     );
   }
 
-  /** Opens, narrows, or closes the slash menu to match the composer. */
+  /** Opens, narrows, or closes the command or skill menu to match the composer. */
   #syncSlash(): void {
     const text = this.#host.editor.text;
-    if (this.#slashDismissed.holds(text) || !/^\/\S*$/.test(text)) {
+    const sigil = text[0];
+    if (this.#slashDismissed.holds(text) || !/^[/$]\S*$/.test(text)) {
       this.#slash = null;
       return;
     }
     const entries: MenuEntry[] = [];
-    // A command typed in full comes first and is selected, so /mode runs /mode, not /model.
+    // A name typed in full comes first and is selected, so /mode runs /mode, not /model.
     let exact: string | null = null;
     const add = (names: string[], made: MenuEntry) => {
-      if (!names.some((name) => `/${name}`.startsWith(text))) return;
-      if (exact === null && names.some((name) => `/${name}` === text)) {
+      if (!names.some((name) => `${sigil}${name}`.startsWith(text))) return;
+      if (exact === null && names.some((name) => `${sigil}${name}` === text)) {
         exact = made.label;
         entries.unshift(made);
       } else entries.push(made);
     };
-    const own = this.#host.available();
-    const last = own.filter((command) => LAST_COMMANDS.includes(command.name));
-    for (const command of own.filter((candidate) => !last.includes(candidate)))
-      add(
-        [command.name, ...(command.aliases ?? [])],
-        entry(`/${command.name}`, command.description, { tag: command.group }),
-      );
-    for (const command of this.#host.skills())
-      add(
-        [command.name, ...command.aliases],
-        entry(`/${command.name}`, command.description, { tag: "Skills" }),
-      );
-    for (const command of last)
-      add(
-        [command.name, ...(command.aliases ?? [])],
-        entry(`/${command.name}`, command.description, { tag: command.group }),
-      );
+    if (sigil === "$")
+      for (const skill of this.#host.skills())
+        add([skill.name, ...skill.aliases], entry(`$${skill.name}`, skill.description));
+    else
+      for (const command of this.#host.available())
+        add(
+          [command.name, ...(command.aliases ?? [])],
+          entry(`/${command.name}`, command.description, { tag: command.group }),
+        );
     if (entries.length === 0) {
       this.#slash = null;
       return;
     }
-    if (this.#slash) this.#slash.setEntries(entries);
-    else this.#slash = new Menu({ title: "Commands", entries, describe: true });
-    // A command the user moved to stays chosen while the text is the same, as lists refresh.
+    const title = sigil === "$" ? "Skills" : "Commands";
+    if (this.#slash?.config.title === title) this.#slash.setEntries(entries);
+    else this.#slash = new Menu({ title, entries, describe: true });
+    // A name the user moved to stays chosen while the text is the same, as lists refresh.
     if (this.#slashMoved !== text) this.#slashMoved = null;
     if (exact !== null && this.#slashMoved === null) this.#slash.select(exact);
   }

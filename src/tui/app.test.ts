@@ -389,6 +389,44 @@ describe("App commands", () => {
     assert.doesNotMatch(narrowed, /\/new/);
   });
 
+  it("keeps the harness's skills to `$`, apart from the commands `/` lists", async () => {
+    const unregisterSkilled = registerDriver({
+      id: "skilled",
+      label: "Skilled",
+      unavailable: () => null,
+      create: (options) =>
+        Object.assign(new ScriptedSession(options), {
+          listCommands: async () => [
+            {
+              name: "tidy",
+              aliases: [],
+              description: "tidy the docs",
+              argumentHint: "",
+              kind: "skill" as const,
+              startsTurn: true,
+            },
+          ],
+        }),
+    });
+    try {
+      const session = await start({ harness: "skilled" });
+      await session.sees("supervised · skilled · big");
+      await session.type("/");
+      assert.doesNotMatch(await session.sees(/Commands \d+/), /tidy/);
+      await session.type("\x15$");
+      assert.match(await session.sees("Skills 1"), /\$tidy\s+tidy the docs/);
+      await session.type("\x15/tidy\r");
+      await session.sees("Unknown command /tidy. $tidy runs the skill.");
+      await session.type("$tidy the docs\r");
+      await session.sees("Done with /tidy the docs");
+      // A `$` that names no skill is a message.
+      await session.type("$5 a month\r");
+      await session.sees("Done with $5 a month");
+    } finally {
+      unregisterSkilled();
+    }
+  });
+
   it("lists commands with their arguments, and keys, in /help", async () => {
     const session = await start();
     // Some commands are listed only once the thread's session runs.

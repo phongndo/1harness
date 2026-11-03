@@ -234,7 +234,7 @@ export function footerRows(state: FooterState, width: number, height: number): F
     if (state.editor.empty && !panel) {
       const hint = state.busy
         ? "Add to the turn, or tab to queue a message"
-        : "Ask anything · @ files · / commands";
+        : "Ask anything · / commands · $ skills · @ files";
       layout.rows[0] = truncate(`${style.strong("┃")} ${style.faint(hint)}`, width);
     }
     const start = Math.max(0, Math.min(layout.cursor.row - limit + 1, layout.rows.length - limit));
