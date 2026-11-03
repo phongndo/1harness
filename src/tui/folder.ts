@@ -1,8 +1,10 @@
+import { basename } from "node:path";
 import { shortPath } from "./resume.ts";
 
 /**
- * The folder the status line names, with ` · branch` in a repository. The
- * host reads the branch, since the folder is its.
+ * The folder the status line names: in a repository its name and ` · branch`,
+ * since the branch already says where; elsewhere its path. The host reads the
+ * branch, since the folder is its.
  */
 export class FolderLabel {
   #fetch: (cwd: string) => Promise<string | null>;
@@ -33,8 +35,8 @@ export class FolderLabel {
         () => this.#arrived(key, null),
       );
     }
-    const path = shortPath(cwd, home);
-    return this.#branch ? `${path} · ${this.#branch}` : path;
+    if (!this.#branch) return shortPath(cwd, home);
+    return `${basename(cwd) || cwd} · ${this.#branch}`;
   }
 
   #arrived(key: string, branch: string | null): void {

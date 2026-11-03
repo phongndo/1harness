@@ -21,22 +21,22 @@ describe("FolderLabel", () => {
     );
     assert.equal(folder.label("/home/u/app", "t:0", "/home/u"), "~/app", "the path until it hears");
     await settle();
-    assert.equal(folder.label("/home/u/app", "t:0", "/home/u"), "~/app · main");
+    assert.equal(folder.label("/home/u/app", "t:0", "/home/u"), "app · main");
     assert.deepEqual(asked, ["/home/u/app"], "asked once a turn");
 
     branches.set("/home/u/app", "feat");
-    assert.equal(
-      folder.label("/home/u/app", "t:1", "/home/u"),
-      "~/app · main",
-      "the last meanwhile",
-    );
+    assert.equal(folder.label("/home/u/app", "t:1", "/home/u"), "app · main", "the last meanwhile");
     await settle();
-    assert.equal(folder.label("/home/u/app", "t:1", "/home/u"), "~/app · feat");
+    assert.equal(folder.label("/home/u/app", "t:1", "/home/u"), "app · feat");
     assert.equal(changed, 2);
 
     folder.label("/home/u/notes", "t:1", "/home/u");
     await settle();
-    assert.equal(folder.label("/home/u/notes", "t:1", "/home/u"), "~/notes");
+    assert.equal(
+      folder.label("/home/u/notes", "t:1", "/home/u"),
+      "~/notes",
+      "the path outside one",
+    );
   });
 
   it("shows the path alone when the host cannot say", async () => {

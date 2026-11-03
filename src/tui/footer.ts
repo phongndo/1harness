@@ -91,7 +91,7 @@ export interface StatusLineState {
   /** A word for a moment, such as what was copied. */
   toast: string | null;
   harness: string;
-  /** The folder, with ` · branch` in a repository. */
+  /** The folder: its name and ` · branch` in a repository, else its path. */
   folder: string | null;
   /** The thread on screen, as the host last said, once it has. */
   current: ThreadState | undefined;
@@ -108,7 +108,7 @@ export interface StatusLineState {
 }
 
 /**
- * `~/code/app · main` on the left, `full-access · claude · opus · high · ctx
+ * `app · main` on the left, `full-access · claude · opus · high · ctx
  * 12% · cache 87% · $0.42` on the right; /status says the rest.
  */
 export function statusLine(state: StatusLineState, width: number): string {
