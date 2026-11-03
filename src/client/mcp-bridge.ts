@@ -1,5 +1,11 @@
 import { JsonRpcPeer, RpcError } from "../drivers/jsonrpc.ts";
-import { HOSTED_ENV, OUTSIDE_INSTRUCTIONS, mcpReply, type McpEndpoint } from "../operations/mcp.ts";
+import {
+  HOSTED_ENV,
+  OUTSIDE_INSTRUCTIONS,
+  mcpReply,
+  operationsEndpoint,
+  type McpEndpoint,
+} from "../operations/mcp.ts";
 import type { HostClient } from "./client.ts";
 
 export const MCP_HELP = `Usage: 1harness mcp
@@ -32,13 +38,17 @@ export async function mcpBridge(options: BridgeOptions): Promise<void> {
   const hosted = options.env[HOSTED_ENV] === "1";
   const held: { client: Promise<HostClient> | null } = { client: null };
   const connected = () => (held.client ??= options.connect());
-  const endpoint: McpEndpoint = {
-    version: options.version,
-    instructions: hosted ? HOSTED_INSTRUCTIONS : OUTSIDE_INSTRUCTIONS,
-    tools: async () => (hosted ? [] : (await connected()).call("operations.list", {})),
-    call: async (name, input) =>
-      (await (await connected()).call("operations.call", { name, input })).result,
-  };
+  // Serving no tools, it is never called.
+  const endpoint: McpEndpoint = hosted
+    ? {
+        version: options.version,
+        instructions: HOSTED_INSTRUCTIONS,
+        tools: () => [],
+        call: () => null,
+      }
+    : operationsEndpoint(options.version, OUTSIDE_INSTRUCTIONS, async (method, params) =>
+        (await connected()).call(method, params),
+      );
   const peer = new JsonRpcPeer(options.input, (line) => options.output.write(line), {
     name: "MCP client",
     jsonrpc: true,

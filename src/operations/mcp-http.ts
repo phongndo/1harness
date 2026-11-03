@@ -3,8 +3,8 @@ import { errorMessage } from "../core/errors.ts";
 import { mcpReply, rpcError, type JsonRpcMessage, type McpEndpoint } from "./mcp.ts";
 
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
-// A tool call that waits sends a comment this often, so HTTP idle timeouts leave it be.
-const KEEPALIVE_MS = 15_000;
+/** A response that waits sends something this often, so HTTP idle timeouts leave it be. */
+export const KEEPALIVE_MS = 15_000;
 
 /**
  * Answers one MCP request over streamable HTTP. Everything is a reply to a
@@ -21,9 +21,9 @@ export async function serveMcp(
   }
   let body: unknown;
   try {
-    body = JSON.parse(await readBody(request));
+    body = JSON.parse(await readBody(request, MAX_BODY_BYTES));
   } catch (error) {
-    send(response, 400, rpcError(null, -32700, errorMessage(error)));
+    sendJson(response, 400, rpcError(null, -32700, errorMessage(error)));
     return;
   }
   const messages = (Array.isArray(body) ? body : [body]) as JsonRpcMessage[];
@@ -45,7 +45,7 @@ export async function serveMcp(
     response.writeHead(202).end();
     return;
   }
-  send(response, 200, Array.isArray(body) ? replies : replies[0]);
+  sendJson(response, 200, Array.isArray(body) ? replies : replies[0]);
 }
 
 /**
@@ -64,17 +64,18 @@ async function stream(response: ServerResponse, reply: Promise<unknown>): Promis
   }
 }
 
-function send(response: ServerResponse, status: number, body: unknown): void {
+export function sendJson(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { "Content-Type": "application/json" }).end(JSON.stringify(body));
 }
 
-function readBody(request: IncomingMessage): Promise<string> {
+/** A request's body as text, refused past `maxBytes`. */
+export function readBody(request: IncomingMessage, maxBytes: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     request.on("data", (chunk: Buffer) => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > maxBytes) {
         reject(new Error("request too large"));
         request.destroy();
         return;

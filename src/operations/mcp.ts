@@ -1,4 +1,5 @@
 import { errorMessage } from "../core/errors.ts";
+import type { Params, Result } from "../protocol.ts";
 import { mcpContent, type OperationInfo } from "./operation.ts";
 
 // The newest first; a client asking for another gets the newest.
@@ -18,6 +19,26 @@ export interface McpEndpoint {
   tools(): OperationInfo[] | Promise<OperationInfo[]>;
   /** Runs a tool; throwing reports the error to the agent as the tool's result. */
   call(name: string, input: Record<string, unknown>, meta: Record<string, unknown>): unknown;
+}
+
+/** A request to the host, as a client of it makes one. */
+type HostRequest = <M extends "operations.list" | "operations.call">(
+  method: M,
+  params: Params<M>,
+) => Promise<Result<M>>;
+
+/** The operations a client of the host may call, served as an MCP server's tools. */
+export function operationsEndpoint(
+  version: string,
+  instructions: string,
+  request: HostRequest,
+): McpEndpoint {
+  return {
+    version,
+    instructions,
+    tools: () => request("operations.list", {}),
+    call: async (name, input) => (await request("operations.call", { name, input })).result,
+  };
 }
 
 export function mcpTool(operation: OperationInfo) {

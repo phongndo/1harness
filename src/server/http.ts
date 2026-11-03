@@ -2,8 +2,8 @@ import { errorMessage } from "../core/errors.ts";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Host } from "../host/host.ts";
-import { OUTSIDE_INSTRUCTIONS } from "../operations/mcp.ts";
-import { serveMcp } from "../operations/mcp-http.ts";
+import { OUTSIDE_INSTRUCTIONS, operationsEndpoint } from "../operations/mcp.ts";
+import { KEEPALIVE_MS, readBody, sendJson, serveMcp } from "../operations/mcp-http.ts";
 import {
   PROTOCOL_VERSION,
   RpcError,
@@ -18,8 +18,6 @@ export const CLIENT_HEADER = "x-1harness-client";
 export const REQUEST_HEADER = "x-1harness-request";
 
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
-/** An event stream sends a blank line this often, so idle connections stay open. */
-const KEEPALIVE_MS = 15_000;
 /** More than this waiting for a client to read means it is too slow; it reconnects and catches up. */
 const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 /** How long a client may be gone before it counts as having left, its picks dismissed. */
@@ -124,7 +122,7 @@ export class HostServer {
   ): Promise<AddressInfo | string | null> {
     const server = createServer((request, response) => {
       void this.#handle(request, response, authorize).catch((error: unknown) => {
-        if (!response.headersSent) send(response, 500, { error: errorBody(error) });
+        if (!response.headersSent) sendJson(response, 500, { error: errorBody(error) });
         else response.destroy();
       });
     });
@@ -170,14 +168,14 @@ export class HostServer {
     // Only browsers send Origin, and no web page may drive the host: one the owner
     // opens would otherwise act as them on any listener their browser can reach.
     if (request.headers.origin !== undefined) {
-      send(response, 403, {
+      sendJson(response, 403, {
         error: { code: "forbidden", message: "1harness does not answer web pages" },
       });
       return;
     }
     const decision = await authorize(request);
     if ("refused" in decision) {
-      send(response, 403, { error: { code: "forbidden", message: decision.refused } });
+      sendJson(response, 403, { error: { code: "forbidden", message: decision.refused } });
       return;
     }
     const url = new URL(request.url ?? "/", "http://1harness");
@@ -194,7 +192,7 @@ export class HostServer {
         store: this.#host.storePath,
         identity: decision.identity,
       };
-      send(response, 200, hello);
+      sendJson(response, 200, hello);
       return;
     }
     if (url.pathname === "/mcp") {
@@ -203,7 +201,7 @@ export class HostServer {
     }
     const client = header(request, CLIENT_HEADER);
     if (!client || client.length > 128) {
-      send(response, 400, {
+      sendJson(response, 400, {
         error: { code: "invalid_request", message: `${CLIENT_HEADER} names the client` },
       });
       return;
@@ -222,7 +220,7 @@ export class HostServer {
       this.#events(client, stale ? null : Number(url.searchParams.get("after") ?? "0"), response);
       return;
     }
-    send(response, 404, { error: { code: "not_found", message: `No ${url.pathname}` } });
+    sendJson(response, 404, { error: { code: "not_found", message: `No ${url.pathname}` } });
   }
 
   /**
@@ -239,21 +237,21 @@ export class HostServer {
     const client = `mcp:${identity ?? "local"}`;
     this.#host.markAgent(client);
     if (remote) this.#host.markRemote(client);
-    await serveMcp(request, response, {
-      version: this.#options.version,
-      instructions: OUTSIDE_INSTRUCTIONS,
-      tools: () => this.#host.call(client, "operations.list", {}),
-      call: async (name, input) =>
-        (await this.#host.call(client, "operations.call", { name, input })).result,
-    });
+    await serveMcp(
+      request,
+      response,
+      operationsEndpoint(this.#options.version, OUTSIDE_INSTRUCTIONS, (method, params) =>
+        this.#host.call(client, method, params),
+      ),
+    );
   }
 
   async #rpc(client: string, request: IncomingMessage, response: ServerResponse): Promise<void> {
     let body: { method?: unknown; params?: unknown };
     try {
-      body = JSON.parse(await readBody(request)) as typeof body;
+      body = JSON.parse(await readBody(request, MAX_BODY_BYTES)) as typeof body;
     } catch (error) {
-      send(response, 400, {
+      sendJson(response, 400, {
         error: { code: "invalid_request", message: errorBody(error).message },
       });
       return;
@@ -417,26 +415,4 @@ function errorBody(error: unknown): { code: string; message: string } {
     code: error instanceof RpcError ? error.code : "error",
     message: errorMessage(error),
   };
-}
-
-function send(response: ServerResponse, status: number, body: unknown): void {
-  response.writeHead(status, { "Content-Type": "application/json" }).end(JSON.stringify(body));
-}
-
-function readBody(request: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    request.on("data", (chunk: Buffer) => {
-      size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
-        reject(new Error("request too large"));
-        request.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    request.on("error", reject);
-  });
 }
