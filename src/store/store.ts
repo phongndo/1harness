@@ -55,7 +55,7 @@ export interface ThreadSummaryRow extends ThreadRow {
   lastRunStatus: RunRecord["status"] | null;
 }
 
-export type MessageState = "queued" | "dispatched" | "dropped";
+type MessageState = "queued" | "dispatched" | "dropped";
 
 /** A task one thread gave another, as the orchestrator keeps it. */
 export interface TaskRow {
