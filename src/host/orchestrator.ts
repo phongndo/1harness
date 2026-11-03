@@ -1,5 +1,4 @@
 import { isRuntimeMode, modeRank } from "../core/events.ts";
-import type { MessageOrigin } from "../core/thread.ts";
 import {
   checkHarness,
   drivers,
@@ -20,6 +19,7 @@ import {
   type ThreadManager,
 } from "./manager.ts";
 import { Scope, type ThreadSnapshot } from "./scope.ts";
+import { sendText } from "./send.ts";
 
 const ROLES = ["implementation", "research", "review", "design", "test", "general"];
 /** How many delegations deep work may go below a user's thread. */
@@ -124,12 +124,6 @@ export function threadView(thread: ThreadSnapshot) {
         }
       : {}),
   };
-}
-
-/** Where a message from `caller` says it came from; `thread` is an agent's own. */
-function senderOf(caller: Caller, thread: string | null): MessageOrigin {
-  if (caller.kind === "user") return { type: "user" };
-  return { type: "message", from: thread ?? "an agent outside 1harness" };
 }
 
 function runView(run: RunRecord) {
@@ -385,9 +379,10 @@ export class Orchestrator {
           const target = this.#scope.actable(caller, text(input, "threadId") ?? "");
           const message = text(input, "message");
           if (!message) throw new OperationError("invalid_request", "message is empty");
-          const origin = senderOf(caller, caller.kind === "agent" ? agent(caller).id : null);
-          if (input["steer"] === true) await target.thread.steer({ text: message }, origin);
-          else target.thread.send({ text: message }, origin);
+          await sendText(target.thread, message, {
+            origin: this.#scope.sender(caller),
+            steer: input["steer"] === true,
+          });
           return {
             threadId: target.id,
             status: target.status,

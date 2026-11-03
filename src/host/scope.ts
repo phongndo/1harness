@@ -1,5 +1,5 @@
 import { modeRank, type RuntimeMode } from "../core/events.ts";
-import type { Thread } from "../core/thread.ts";
+import type { MessageOrigin, Thread } from "../core/thread.ts";
 import { OperationError, type Caller } from "../operations/operation.ts";
 import type { ManagedThread, ThreadManager } from "./manager.ts";
 
@@ -35,6 +35,15 @@ export class Scope {
         "the calling thread is not managed by 1harness",
       );
     return managed;
+  }
+
+  /** Where a message the caller sends says it came from. */
+  sender(caller: Caller): MessageOrigin {
+    if (caller.kind === "user") return { type: "user" };
+    return {
+      type: "message",
+      from: caller.kind === "agent" ? this.agent(caller).id : "an agent outside 1harness",
+    };
   }
 
   /** The most a thread the caller starts or acts on may be allowed; null for no limit. */

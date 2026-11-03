@@ -12,6 +12,7 @@ import type { HostEvent, LogEntry, Method, Params, Result } from "../protocol.ts
 import type { ThreadManager } from "./manager.ts";
 import { threadView } from "./orchestrator.ts";
 import type { Scope, ThreadSnapshot } from "./scope.ts";
+import { sendText } from "./send.ts";
 
 /** The longest an operation waits for news of a thread. */
 const MAX_WAIT_SECONDS = 3000;
@@ -161,13 +162,7 @@ export function hostOperations(host: HostAccess): Operation[] {
         });
         const message = text(input, "message");
         const thread = host.manager.get(state.id)!;
-        if (message)
-          thread.thread.send(
-            { text: message },
-            caller.kind === "user"
-              ? { type: "user" }
-              : { type: "message", from: "an agent outside 1harness" },
-          );
+        if (message) await sendText(thread.thread, message, { origin: scope.sender(caller) });
         return threadView(thread);
       },
     },

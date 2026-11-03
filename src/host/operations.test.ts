@@ -15,7 +15,9 @@ import { runOperation, type OperationInfo } from "../operations/operation.ts";
 import { HostServer } from "../server/http.ts";
 import type { HostEvent } from "../protocol.ts";
 import { Store } from "../store/store.ts";
-import { registerScripted } from "../testing/scripted.ts";
+import { ScriptedSession, registerScripted } from "../testing/scripted.ts";
+import type { UserInput } from "../core/events.ts";
+import { registerDriver } from "../drivers/index.ts";
 import { Host } from "./host.ts";
 import type { ThreadManager } from "./manager.ts";
 import { hostOperations } from "./operations.ts";
@@ -474,5 +476,43 @@ describe("operations", () => {
     const fork = await call(person, "thread_fork", { threadId });
     assert.notEqual(fork["threadId"], threadId);
     await assert.rejects(call(person, "thread_send", { threadId, message: "x" }), /thread_closed/);
+  });
+
+  it("attaches the images a message mentions, as a terminal's send does", async () => {
+    newHost();
+    writeFileSync(join(root, "shot.png"), "");
+    const sent: (readonly string[] | undefined)[] = [];
+    const undo = registerDriver({
+      id: "seeing",
+      label: "Seeing",
+      unavailable: () => null,
+      create: (options) => {
+        const session = new ScriptedSession(options);
+        Object.assign(session.capabilities, { images: true });
+        const startTurn = session.startTurn.bind(session);
+        return Object.assign(session, {
+          startTurn: async (input: UserInput) => {
+            sent.push(input.images);
+            await startTurn(input);
+          },
+        });
+      },
+    });
+    try {
+      const person = await connect("tui");
+      const outsider = await connect("outside", true);
+      const opened = await call(person, "thread_open", {
+        harness: "seeing",
+        runtimeMode: "supervised",
+        message: "look at @shot.png",
+      });
+      const threadId = String(opened["threadId"]);
+      await call(person, "thread_wait", { threadId, timeoutSeconds: 5 });
+      await call(outsider, "thread_send", { threadId, message: "and @shot.png again" });
+      await call(person, "thread_wait", { threadId, timeoutSeconds: 5 });
+      assert.deepEqual(sent, [[join(root, "shot.png")], [join(root, "shot.png")]]);
+    } finally {
+      undo();
+    }
   });
 });

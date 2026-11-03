@@ -9,10 +9,9 @@ import {
   DEFAULT_RUNTIME_MODE,
   type HarnessId,
   type SessionOptions,
-  type UserInput,
   type NoticeLevel,
 } from "../core/events.ts";
-import { FileIndex, mentionedImages } from "../core/files.ts";
+import { FileIndex } from "../core/files.ts";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join as joinPath, resolve as resolvePath } from "node:path";
@@ -74,6 +73,7 @@ import { ExtensionSets, type ExtensionSet } from "./extension-sets.ts";
 import { hostOperations } from "./operations.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Scope } from "./scope.ts";
+import { sendText } from "./send.ts";
 import { StoreWriter } from "./store-writer.ts";
 import {
   NO_FLAGS,
@@ -1503,18 +1503,8 @@ export class Host {
             client.sent.get(requestId) ?? this.#store?.messageByRequest(threadId, requestId);
           if (sent) return { messageId: sent };
         }
-        const managed = this.#open(threadId);
-        const thread = managed.thread;
-        const input: UserInput = { text };
-        if (thread.capabilities.images && !command) {
-          const images = mentionedImages(text, thread.info.cwd);
-          if (images.length > 0) input.images = images;
-        }
-        const message = command
-          ? thread.send(input, undefined, { command: true, ...(requestId ? { requestId } : {}) })
-          : steer
-            ? await thread.steer(input, undefined, requestId ? { requestId } : {})
-            : thread.send(input, undefined, requestId ? { requestId } : {});
+        const thread = this.#open(threadId).thread;
+        const message = await sendText(thread, text, { steer, command, requestId });
         if (requestId) {
           client.sent.set(requestId, message.id);
           // Only recent retries matter.
