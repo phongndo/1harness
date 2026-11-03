@@ -5,7 +5,12 @@ import {
   type CommandUI,
   type SessionHandle,
 } from "../commands/registry.ts";
-import { type HarnessId, type SessionOptions, type NoticeLevel } from "../core/events.ts";
+import {
+  type HarnessId,
+  type NoticeLevel,
+  type SessionMethod,
+  type SessionOptions,
+} from "../core/events.ts";
 import { FileIndex } from "../core/files.ts";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -40,6 +45,7 @@ import {
   PROTOCOL_VERSION,
   RpcError,
   SESSION_CALLS,
+  type SessionCall,
   type CommandInfo,
   type HarnessInfo,
   type HostEvent,
@@ -193,24 +199,23 @@ export function describeSwitch(result: SwitchResult): { level: "info" | "warning
   return { level: heavy ? "warning" : "info", text: lines.join("\n") };
 }
 
-/**
- * A session that wakes its thread before each call, for commands, which may
- * run while the thread is parked.
- */
+/** Runs one of a thread's session methods, waking the thread first should it be parked. */
+async function callSession(
+  thread: Thread,
+  method: SessionCall | SessionMethod,
+  args: unknown[],
+): Promise<unknown> {
+  const session = await thread.wake();
+  const call = session[method] as ((...rest: unknown[]) => Promise<unknown>) | undefined;
+  if (!call) throw new RpcError("unsupported", `${label(session.info.harness)} cannot ${method}`);
+  return call.apply(session, args);
+}
+
+/** A session for commands, which may run while the thread is parked. */
 function sessionHandle(thread: Thread): SessionHandle {
-  const handle: Record<string, unknown> = {
-    setRuntimeMode: async (mode: unknown) => (await thread.wake()).setRuntimeMode(mode as never),
-    setInteractionMode: async (mode: unknown) =>
-      (await thread.wake()).setInteractionMode(mode as never),
-  };
-  for (const method of thread.methods) {
-    handle[method] = async (...args: unknown[]) => {
-      const session = await thread.wake();
-      const call = session[method] as ((...rest: unknown[]) => Promise<unknown>) | undefined;
-      if (!call) throw new Error(`${label(session.info.harness)} cannot ${method}`);
-      return call.apply(session, args);
-    };
-  }
+  const handle: Record<string, unknown> = {};
+  for (const method of ["setRuntimeMode", "setInteractionMode", ...thread.methods] as const)
+    handle[method] = (...args: unknown[]) => callSession(thread, method, args);
   return Object.defineProperties(handle, {
     capabilities: { get: () => thread.capabilities },
     info: { get: () => thread.info },
@@ -345,12 +350,14 @@ export class Host {
       const row = this.#store?.thread(id);
       return row ? { ...row, runs: this.#store!.runs(id) } : null;
     };
+    const toolThread = (thread: Thread) =>
+      this.#scope.agent({ kind: "agent", thread, callId: null });
     this.pageTools = pageTools({
       media: this.media,
       live: this.live,
-      cwd: (thread) => this.#caller(thread).thread.info.cwd,
+      cwd: (thread) => toolThread(thread).thread.info.cwd,
       show: (thread, title, html) => {
-        const managed = this.#caller(thread);
+        const managed = toolThread(thread);
         const entry = this.#log(managed.id).html(this.#feed.next, title, html, Date.now());
         this.#feed.emit({ type: "entry", threadId: managed.id, entry });
         this.#writer?.schedule();
@@ -940,13 +947,6 @@ export class Host {
     this.#feed.emit({ type: "entry", threadId, entry });
     this.#writer?.schedule();
     return noticeId;
-  }
-
-  /** The thread a tool call came from. */
-  #caller(thread: Thread): ManagedThread {
-    const managed = this.manager.byThread(thread);
-    if (!managed) throw new Error("the calling thread is not managed by 1harness");
-    return managed;
   }
 
   /** A live page's answer, or why it has none, as the client is told. */
@@ -1698,11 +1698,7 @@ export class Host {
       "thread.call": async (_client, { threadId, method, args }) => {
         if (!SESSION_CALLS.includes(method))
           throw new RpcError("invalid_request", `thread.call cannot run ${method}`);
-        const session = await this.#open(threadId).thread.wake();
-        const call = session[method] as ((...rest: unknown[]) => Promise<unknown>) | undefined;
-        if (!call)
-          throw new RpcError("unsupported", `${label(session.info.harness)} cannot ${method}`);
-        return (await call.apply(session, args)) ?? null;
+        return (await callSession(this.#open(threadId).thread, method, args)) ?? null;
       },
       "thread.command": async (_client, { threadId, command, args }) => {
         await this.#open(threadId).thread.command(command, args);
