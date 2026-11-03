@@ -22,7 +22,7 @@ interface Pending {
   reject: (error: Error) => void;
 }
 
-export interface JsonRpcOptions {
+interface JsonRpcOptions {
   cwd: string;
   env: NodeJS.ProcessEnv;
   /** What to call the process in errors, such as `codex app-server`. */
