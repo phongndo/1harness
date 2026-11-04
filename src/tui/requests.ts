@@ -153,6 +153,7 @@ export class Requests {
           ? { where: `in ${basename(action.cwd)}` }
           : {}),
         detail: request.detail ? [request.detail] : [],
+        diff: action.type === "file_change",
         options: options.map((option) => ({
           label: option.label,
           // Refusing bare stops most harnesses' turns; with a reason the agent goes on.

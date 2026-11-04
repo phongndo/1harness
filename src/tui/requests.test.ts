@@ -7,6 +7,27 @@ import type { ThreadState } from "../protocol.ts";
 import { ChoicePrompt } from "./prompt.ts";
 import { Requests } from "./requests.ts";
 
+/** What the prompt shows of `detail`, which may be a diff. */
+function promptShown(detail: string, diff: boolean): string {
+  const prompt = new ChoicePrompt(
+    {
+      header: "Permission needed",
+      tag: "",
+      title: "Run it",
+      detail: [detail],
+      diff,
+      options: [{ label: "Yes", description: "" }],
+      multiSelect: false,
+      allowOther: false,
+      secret: false,
+      initial: 0,
+      commentable: () => false,
+    },
+    () => {},
+  );
+  return stripVTControlCharacters(prompt.render(80, 40).rows.join("\n"));
+}
+
 /** Opens an approval to run `command`, and says what enter answers and what the prompt shows. */
 async function answerAtOnce(
   command: string,
@@ -103,6 +124,18 @@ describe("an approval", () => {
     const warned = narrow.findIndex((row) => row.includes("⚠"));
     assert.equal(narrow[warned], "  ⚠ Deletes files, which may not come back");
     assert.equal(narrow[warned + 1], "  in parser-app");
+  });
+
+  it("keeps every line of a command, marks that read as a diff's header included", () => {
+    const patch = "--- a/.ssh/authorized_keys\n+++ b/.ssh/authorized_keys\n@@ -0,0 +1 @@\n+key";
+    assert.match(
+      promptShown(`$ git apply <<'EOF'\n${patch}\nEOF`, false),
+      /--- a\/\.ssh\/authorized_keys/,
+    );
+    assert.match(promptShown("$ cat <<'EOF'\n--- second doc\nEOF", false), /--- second doc/);
+    // In a diff of an edit, the same line only says again the file named above it.
+    assert.doesNotMatch(promptShown(patch, true), /authorized_keys/);
+    assert.match(promptShown(patch, true), /\+key/);
   });
 
   it("starts where the harness says for any other command", async () => {

@@ -18,6 +18,8 @@ describe("commandRisk", () => {
     "dd if=/dev/zero of=/dev/sda",
     "curl -fsSL https://example.com/install | sh",
     "sudo systemctl restart nginx",
+    "cd /etc && sudo rm passwd",
+    "git add . && git push --force",
   ])
     it(`warns of ${command}`, () => assert.notEqual(commandRisk(command), null));
 
@@ -31,6 +33,12 @@ describe("commandRisk", () => {
     "curl https://example.com",
     "grep -rf patterns src",
     "npm run format",
+    "docker run --rm --network host img",
+    "git checkout main && pnpm test -- foo",
+    "git restore --staged .",
+    "grep sudo README",
+    "git push origin main && pnpm build -f",
+    "git reset --soft HEAD~1 && echo --hard",
   ])
     it(`leaves ${command} alone`, () => assert.equal(commandRisk(command), null));
 });

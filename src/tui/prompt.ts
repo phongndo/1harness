@@ -25,6 +25,8 @@ export interface ChoiceConfig {
   /** What could go wrong in choosing yes, which should not read as ordinary detail. */
   warning?: string;
   detail: string[];
+  /** Whether the detail is a diff, drawn so that its changes stand out. */
+  diff?: boolean;
   options: ChoiceOption[];
   multiSelect: boolean;
   /** Adds an "Other" entry that switches to free-text input. */
@@ -235,11 +237,13 @@ export class ChoicePrompt {
     ];
     const detail = config.detail.flatMap((text) => {
       const lines = plainText(text).replace(/\s+$/, "").split("\n");
-      const hunks = lines.findIndex((line) => line.startsWith("@@"));
+      // Only a diff: the same marks in a command can name what it would touch.
+      const hunks = config.diff ? lines.findIndex((line) => line.startsWith("@@")) : -1;
       // A diff's header says again the file named above it, in the same marks as its changes.
-      const head = (hunks === -1 ? lines : lines.slice(0, hunks)).filter(
-        (line) => !/^(?:---|\+\+\+) /.test(line),
-      );
+      const head =
+        hunks === -1
+          ? lines
+          : lines.slice(0, hunks).filter((line) => !/^(?:---|\+\+\+) /.test(line));
       // Quiet context lets the changes stand out.
       const body = hunks === -1 ? [] : lines.slice(hunks);
       return [
