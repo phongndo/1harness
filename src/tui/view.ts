@@ -243,6 +243,12 @@ export class ThreadView {
     return block;
   }
 
+  /** Takes back a line of the terminal's own that no longer holds. */
+  unsay(block: Block): void {
+    this.transcript.remove(block);
+    this.#locals = this.#locals.filter((local) => local.block !== block);
+  }
+
   /** A notice of the terminal's own. */
   say(level: NoticeLevel, text: string): Extract<Block, { kind: "notice" }> {
     return this.local({ kind: "notice", level, text });

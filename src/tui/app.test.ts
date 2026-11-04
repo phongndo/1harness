@@ -359,6 +359,73 @@ describe("App", () => {
     }
   });
 
+  it("holds a message typed once a slow thread shows, until its harness can take it", async () => {
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => (open = resolve));
+    const unregisterSlow = registerDriver({
+      id: "slow",
+      label: "Slow",
+      unavailable: () => null,
+      create: (options) => {
+        const made = new ScriptedSession(options);
+        let started = false;
+        const play = made.startTurn.bind(made);
+        made.start = async () => {
+          await opened;
+          started = true;
+        };
+        // As real drivers do when asked too soon.
+        made.startTurn = async (input) => {
+          if (!started) throw new Error("The session has not started");
+          return play(input);
+        };
+        return made;
+      },
+    });
+    try {
+      const session = await start({ harness: "slow" });
+      while (session.client.threads.size === 0) await settle();
+      await session.type("eager\r");
+      await session.sees("Sent once the thread opens");
+      open();
+      const screen = await session.sees("Done with eager");
+      assert.doesNotMatch(screen, /has not started|Sent once/);
+    } finally {
+      unregisterSlow();
+    }
+  });
+
+  it("does not send what was held for a thread that failed to open to the one before it", async () => {
+    let fail!: (error: Error) => void;
+    const failing = new Promise<void>((_, reject) => (fail = reject));
+    const made: ScriptedSession[] = [];
+    const unregisterTwice = registerDriver({
+      id: "twice",
+      label: "Twice",
+      unavailable: () => null,
+      create: (options) => {
+        const one = new ScriptedSession(options);
+        if (made.length > 0) one.start = () => failing;
+        made.push(one);
+        return one;
+      },
+    });
+    try {
+      const session = await start({ harness: "twice", prompt: "first" });
+      await session.sees("Done with first");
+      await session.type("/new\r");
+      while (made.length < 2) await settle();
+      await settle(50);
+      await session.type("for the new one\r");
+      await session.sees("Sent once the thread opens");
+      fail(new Error("no way in"));
+      await session.sees(/^for the new one/m);
+      assert.deepEqual(made[0]?.prompts, ["first"]);
+    } finally {
+      unregisterTwice();
+    }
+  });
+
   it("hands what it held back to the composer, with the draft, when no thread opens", async () => {
     let fail!: (error: Error) => void;
     const failed = new Promise<void>((_, reject) => (fail = reject));

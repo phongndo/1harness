@@ -340,6 +340,10 @@ export class App {
   #starting = true;
   /** Messages sent while a thread was still opening, for it once it opens. */
   #held: string[] = [];
+  /** Takes back the line saying they wait, which reads as stale once they have gone. */
+  #heldNote: (() => void) | null = null;
+  /** The thread on screen when they were typed, which they were meant for; null for none yet. */
+  #heldFor: string | null = null;
   /** Images pasted into the composer, by the `[Image #N]` that stands for each until it is sent. */
   #images = new Map<string, PastedImage>();
   #imageCount = 0;
@@ -1039,7 +1043,12 @@ export class App {
   #releaseHeld(): void {
     if (this.#starting || this.#opening > 0 || this.#held.length === 0) return;
     const held = this.#held.splice(0);
-    if (this.#live) {
+    this.#heldNote?.();
+    this.#heldNote = null;
+    // Gone elsewhere, or the thread never opened: they were not meant for what is there now.
+    const meant = this.#heldFor === null || this.#heldFor === this.#live?.id;
+    this.#heldFor = null;
+    if (this.#live && meant) {
       // Queued rather than steered, so each is its own turn, as typed.
       for (const text of held) this.#send(text, false);
     } else
@@ -2241,10 +2250,20 @@ export class App {
     // Behind ones already held too, which a thread shown while it starts must not overtake.
     if (
       message !== null &&
-      (this.#held.length > 0 || (!this.#live && (this.#starting || this.#opening > 0)))
+      (this.#held.length > 0 ||
+        // A thread can be on screen before its harness can take anything; a slow one
+        // would turn the message away.
+        ((!this.#live || this.#live.status === "starting") &&
+          (this.#starting || this.#opening > 0)))
     ) {
       this.#editor.take();
-      if (this.#held.length === 0) this.#notice("info", "Sent once the thread opens.");
+      if (this.#held.length === 0) {
+        const view = this.#view;
+        const said = view.say("info", "Sent once the thread opens.");
+        this.#heldNote = () => view.unsay(said);
+        this.#heldFor = this.#live?.id ?? null;
+        this.#schedule();
+      }
       this.#held.push(message);
       return;
     }
