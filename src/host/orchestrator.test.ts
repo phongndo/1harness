@@ -1053,7 +1053,7 @@ describe("Orchestrator", () => {
     const parent = await manager.create({ harness: "fake", settings: settings() });
     const task = await call("delegate_task", parent, { task: `first line\n${"x".repeat(200)}` });
     const title = manager.get(String(task["threadId"]))?.title ?? "";
-    assert.ok(title.startsWith("first line x") && title.length <= 48, title);
+    assert.ok(title.startsWith("first line x") && title.length <= 72, title);
   });
 
   it("reports a task whose turn could not start", async () => {

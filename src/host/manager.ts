@@ -213,7 +213,7 @@ export class ModeError extends Error {
   }
 }
 
-const TITLE_LENGTH = 48;
+const TITLE_LENGTH = 72;
 
 /** A one-line title from the start of a message. */
 export function titleFrom(text: string): string {

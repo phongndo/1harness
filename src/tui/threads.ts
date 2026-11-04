@@ -97,7 +97,10 @@ export function threadEntries(
   const roots = [...nodes.values()]
     .filter((node) => node.parentId === null)
     .toSorted((a, b) => b.entry.updatedAt - a.entry.updatedAt);
-  const entries = flattenTree(nodes.values(), roots);
+  // Going back to where you already are would do nothing, so the list says which that is.
+  const entries = flattenTree(nodes.values(), roots).map((entry) =>
+    entry.id === currentId ? { ...entry, on: `${entry.on} · current` } : entry,
+  );
   // Archived threads, which tab shows on their own.
   for (const thread of archived)
     if (thread.parentId === null) entries.push({ ...listedEntry(thread), archived: true });
