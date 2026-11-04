@@ -16,6 +16,8 @@ describe("FileIndex", () => {
       assert.deepEqual(files.search("app", 5), [], "nothing before loading");
       await files.load();
       assert.equal(files.search("tuiapp", 5)[0]?.path, "src/tui/app.ts");
+      // Paths that say what was typed crowd out what only fuzzily matches.
+      assert.ok(files.search("src/tui/a", 10).every((match) => match.path.startsWith("src/tui/a")));
       assert.ok(
         files.search("tui", 10).some((match) => match.path === "src/tui/" && match.directory),
       );
