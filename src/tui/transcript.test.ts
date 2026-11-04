@@ -697,7 +697,7 @@ describe("loading earlier turns", () => {
       rows.join("\n"),
     );
     assert.ok(
-      rows.some((shown) => shown.startsWith("  ■ Interrupted · 5s · 1 tokens in, 2 out")),
+      rows.some((shown) => shown.startsWith("  ■ Interrupted · 5s")),
       rows.join("\n"),
     );
   });
@@ -931,6 +931,18 @@ describe("a failed turn", () => {
       ),
     )[0];
     assert.equal(heading, "● Ran 1 command");
+  });
+
+  it("keeps the way to the work over the counts in a narrow pane", () => {
+    const block = {
+      kind: "summary",
+      outcome: "completed",
+      text: "Done · 4s · 18 tokens in, 127 out · ctrl+x shows the work",
+    } as const;
+    const at = (width: number) => plain(renderBlock(block, { ...context, width }))[0];
+    assert.equal(at(80), "  ✓ Done · 4s · 18 tokens in, 127 out · ctrl+x shows the work");
+    assert.equal(at(50), "  ✓ Done · 4s · ctrl+x shows the work");
+    assert.equal(at(20), "  ✓ Done · 4s");
   });
 
   it("names the first test a runner marks as failing", () => {

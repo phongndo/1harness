@@ -533,10 +533,15 @@ function summaryRow(block: Extract<Block, { kind: "summary" }>, width: number): 
   if (!outcome) return style.muted(`  ${text}`);
   const at = text.indexOf(" · ");
   const label = at === -1 ? text : text.slice(0, at);
-  const all = at === -1 ? "" : text.slice(at);
-  // A narrow pane gives up what it says last, whole, not cut mid-word.
+  // A narrow pane gives up whole parts, not words: counts first, as what can be done
+  // next matters more there, then that.
+  const parts = (at === -1 ? "" : text.slice(at + 3)).split(" · ").filter(Boolean);
   const room = width - visibleWidth(label) - 4;
-  const rest = visibleWidth(all) <= room ? all : all.slice(0, Math.max(0, all.lastIndexOf(" · ")));
+  const without = parts.filter((part) => !part.includes("tokens"));
+  const rest =
+    [parts, without, without.slice(0, 1)]
+      .map((kept) => kept.map((part) => ` · ${part}`).join(""))
+      .find((kept) => visibleWidth(kept) <= room) ?? "";
   const said =
     outcome === "failed"
       ? style.removed(`✗ ${label}`)
