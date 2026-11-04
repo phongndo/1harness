@@ -260,7 +260,11 @@ export function footerRows(state: FooterState, width: number, height: number): F
     if (state.editor.empty && !panel) {
       const hint = state.busy
         ? "Add to the turn, or tab to queue a message"
-        : "Ask anything · / commands · $ skills · @ files";
+        : ([
+            "Ask anything · / commands · $ skills · @ files",
+            "Ask anything · / commands · @ files",
+            "Ask anything · / commands",
+          ].find((text) => visibleWidth(text) <= width) ?? "Ask anything");
       layout.rows[0] = truncate(style.faint(hint), width);
     }
     const start = Math.max(0, Math.min(layout.cursor.row - limit + 1, layout.rows.length - limit));

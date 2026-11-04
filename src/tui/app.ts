@@ -48,6 +48,7 @@ import { FolderLabel } from "./folder.ts";
 import { Suggestions, inMenuOrder } from "./completion.ts";
 import { Editor, applyEditingKey } from "./editor.ts";
 import { footerRows, statusLine, type Footer } from "./footer.ts";
+import { welcomeRows } from "./welcome.ts";
 import { InputDecoder, WHEEL_ROWS, type InputEvent, type Key } from "./input.ts";
 import { LivePages } from "./live.ts";
 import { codeBlocks } from "./markdown.ts";
@@ -2818,11 +2819,25 @@ export class App {
     const transcript = selection
       ? paintSelection(view.rows, selection, view.top, width)
       : view.rows;
+    // Nothing said yet: say what this thread will do, and how to begin.
+    const current = this.#current;
+    const opening =
+      transcript.length === 0 && current
+        ? welcomeRows(
+            {
+              harness: this.#harnessLabel(current.harness),
+              model: current.info.model ?? this.#defaultModel(),
+              mode: current.info.runtimeMode,
+            },
+            width,
+            room,
+          )
+        : transcript;
     // The composer sits on the screen's last rows from the first frame to the
     // last; the transcript reads down from the top, and the rows between stay blank.
     const above = [
-      ...transcript,
-      ...Array.from({ length: Math.max(0, room - transcript.length) }, () => ""),
+      ...opening,
+      ...Array.from({ length: Math.max(0, room - opening.length) }, () => ""),
     ];
     this.#listAt = footer.list
       ? { menu: footer.list.menu, row: above.length + footer.list.row }
