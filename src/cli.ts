@@ -15,8 +15,8 @@ import {
 } from "./core/events.ts";
 import { HostClient } from "./client/client.ts";
 import { LocalConnection, newClientId } from "./client/connection.ts";
-import { SocketConnection } from "./client/socket.ts";
-import { configDir, socketFile, stateDir, storeFile } from "./core/paths.ts";
+import { connectClient, reach, socketClient } from "./client/connect.ts";
+import { configDir, stateDir, storeFile } from "./core/paths.ts";
 import {
   defaultHarness,
   defaultMode,
@@ -28,12 +28,10 @@ import {
 } from "./core/settings.ts";
 import { drivers, registerConfiguredAgents } from "./drivers/index.ts";
 import { Host } from "./host/host.ts";
-import { PROTOCOL_VERSION } from "./protocol.ts";
 import { serverCommand } from "./server/cli.ts";
-import { ensureServer } from "./server/lifecycle.ts";
 import { harnessesCommand } from "./client/harnesses-cli.ts";
 import { hostsCommand, whoami } from "./client/hosts-cli.ts";
-import { loadHosts, resolveServer } from "./client/hosts.ts";
+import { loadHosts } from "./client/hosts.ts";
 import { threadsCommand } from "./client/threads-cli.ts";
 import { ACP_HELP, serveAcp } from "./client/acp-agent.ts";
 import { MCP_HELP, mcpBridge } from "./client/mcp-bridge.ts";
@@ -83,6 +81,8 @@ Options:
                          .1harness/extensions
   -p, --print            run the prompt once without the UI and print the reply;
                          approvals are declined unless the mode allows the action
+      --json             with --print, write every event as a JSON line instead,
+                         ending with a line of type "result"
   -h, --help             show this help
   -v, --version          show the version
 
@@ -115,10 +115,16 @@ process.emitWarning = ((warning: string | Error, ...rest: unknown[]) => {
   (emitWarning as (...args: unknown[]) => void)(warning, ...rest);
 }) as typeof process.emitWarning;
 
+/** One JSON value a line, so a program can follow a run as it goes. */
+function jsonLine(value: unknown): void {
+  process.stdout.write(`${JSON.stringify(value)}\n`);
+}
+
 /**
  * Runs one prompt without the UI and prints the reply. Agents can delegate
  * here too; their tasks run in the background of this one prompt. Nobody can
- * answer approvals, so they are declined, whichever thread asks.
+ * answer approvals, so they are declined, whichever thread asks. With `json`,
+ * stdout has every event instead, as the server's feed gives them.
  */
 async function print(
   harness: HarnessId,
@@ -126,6 +132,7 @@ async function print(
   prompt: string,
   version: string,
   extensions: string[],
+  json: boolean,
 ): Promise<number> {
   // Modules named on the command line are where the shell is, not the thread's folder.
   const host = new Host({
@@ -138,9 +145,13 @@ async function print(
   let rootId: string | null = null;
   let status = 1;
   let wrote = false;
+  let reply: string | null = null;
+  let error: string | null = null;
   const declined = new Set<string>();
   const finished = new Promise<void>((done) => {
     host.subscribe((event) => {
+      if (json && (event.type === "entry" || event.type === "thread" || event.type === "notice"))
+        jsonLine(event);
       if (event.type === "notice" && event.level !== "info")
         process.stderr.write(`1harness: ${event.text}\n`);
       if (event.type === "thread") {
@@ -164,7 +175,8 @@ async function print(
         case "item":
           if (!entry.done) break;
           if (entry.item.kind === "assistant_message" && entry.item.text.trim() !== "") {
-            process.stdout.write(`${wrote ? "\n" : ""}${entry.item.text.trim()}\n`);
+            reply = entry.item.text.trim();
+            if (!json) process.stdout.write(`${wrote ? "\n" : ""}${reply}\n`);
             wrote = true;
           } else if (entry.item.kind === "notice" && entry.item.level !== "info") {
             process.stderr.write(`1harness: ${entry.item.text}\n`);
@@ -174,10 +186,12 @@ async function print(
           break;
         case "turn.ended":
           status = entry.status === "completed" ? 0 : 1;
+          error = entry.error;
           if (entry.error) process.stderr.write(`1harness: ${entry.error}\n`);
           done();
           break;
         case "session.ended":
+          error ??= entry.error;
           if (entry.error) process.stderr.write(`1harness: ${entry.error}\n`);
           done();
           break;
@@ -194,58 +208,9 @@ async function print(
   } finally {
     await host.shutdown();
   }
+  // After shutting down, which has events of its own, so a program can stop at this line.
+  if (json) jsonLine({ type: "result", threadId: rootId, ok: status === 0, reply, error });
   return status;
-}
-
-/**
- * Finds the server `spec` names, the local one when it names none, starting
- * a local one in the background when none answers.
- */
-async function reach(spec: string | undefined) {
-  const { target, label, local } = resolveServer(spec);
-  // Only the local socket's server is started on demand; another machine's runs there.
-  const autostart = local && "socket" in target && target.socket === socketFile();
-  const hello = await ensureServer({ target, autostart });
-  if (hello.minProtocol > PROTOCOL_VERSION || hello.protocol < PROTOCOL_VERSION)
-    throw new Error(
-      `${label} runs 1harness ${hello.version}, which this one cannot talk to${local ? "; stop it with `1harness server stop`" : ""}`,
-    );
-  // A local server that dies is started again, and picks up its threads parked.
-  const revive = autostart ? () => ensureServer({ target, autostart: true, revive: true }) : null;
-  return { target, label, local, hello, revive };
-}
-
-/**
- * A client of a server `reach` found. Extension modules are this machine's
- * files, so only a local server is given them.
- */
-function socketClient(
-  server: Awaited<ReturnType<typeof reach>>,
-  options: { cwd: string; version: string; extensions: string[]; agent?: boolean },
-): HostClient {
-  const id = newClientId();
-  return new HostClient(
-    new SocketConnection(server.target, id, server.revive ? { revive: server.revive } : {}),
-    { ...options, extensions: server.local ? options.extensions : [] },
-    id,
-  );
-}
-
-/** A client of the server `spec` names; it says hello when connected. */
-async function connectClient(
-  version: string,
-  extensions: string[],
-  spec: string | undefined,
-  options: { agent?: boolean } = {},
-): Promise<HostClient> {
-  const server = await reach(spec);
-  // On another machine, this folder is not there; threads start in its home.
-  return socketClient(server, {
-    cwd: server.local ? process.cwd() : "~",
-    version,
-    extensions,
-    ...options,
-  });
 }
 
 interface TerminalOptions {
@@ -523,6 +488,7 @@ async function main(argv: string[], server: string | undefined, version: string)
       resume: { type: "string", short: "r" },
       extension: { type: "string", short: "x", multiple: true },
       print: { type: "boolean", short: "p" },
+      json: { type: "boolean" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
     },
@@ -553,13 +519,21 @@ async function main(argv: string[], server: string | undefined, version: string)
     // The terminal UI shows these itself; its screen would hide them on stderr.
     if (values.print || !process.stdin.isTTY || !process.stdout.isTTY)
       for (const warning of warnings) process.stderr.write(`1harness: ${warning}\n`);
+    if (values.json && !values.print) throw new Error("--json goes with --print");
     if (values.print) {
       if (!prompt) throw new Error("--print needs a prompt");
       if (!harness)
         throw new Error(
           "--print needs a harness: -H names one, and `1harness harnesses` says which are ready",
         );
-      process.exitCode = await print(harness, session, prompt, version, extensions);
+      process.exitCode = await print(
+        harness,
+        session,
+        prompt,
+        version,
+        extensions,
+        values.json ?? false,
+      );
     } else if (!process.stdin.isTTY || !process.stdout.isTTY) {
       throw new Error(
         "the interactive UI needs a terminal; use --print to run a prompt without one",

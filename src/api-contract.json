@@ -1,0 +1,324 @@
+{
+  "protocolVersion": 1,
+  "packageExports": ["./client", "./extension"],
+  "clientExports": ["PROTOCOL_VERSION", "RpcError", "connect"],
+  "methods": [
+    "client.bye",
+    "client.hello",
+    "client.show",
+    "commands.complete",
+    "commands.list",
+    "commands.run",
+    "files.branch",
+    "files.image",
+    "files.search",
+    "harnesses.list",
+    "media.html",
+    "operations.call",
+    "operations.list",
+    "page.close",
+    "page.frame",
+    "page.input",
+    "page.open",
+    "page.resize",
+    "skills.list",
+    "thread.attach",
+    "thread.call",
+    "thread.close",
+    "thread.command",
+    "thread.flag",
+    "thread.forget",
+    "thread.fork",
+    "thread.open",
+    "thread.reload",
+    "thread.rename",
+    "thread.respond",
+    "thread.resume",
+    "thread.seen",
+    "thread.send",
+    "thread.stop",
+    "thread.switchHarness",
+    "thread.unqueue",
+    "threads.list",
+    "threads.search",
+    "ui.reply"
+  ],
+  "events": ["entry", "harnesses", "notice", "removed", "thread", "ui", "ui.done"],
+  "logEntries": [
+    "agent",
+    "decision",
+    "delta",
+    "html",
+    "item",
+    "session.ended",
+    "turn.ended",
+    "turn.started"
+  ],
+  "uiRequests": [
+    "exit",
+    "notify",
+    "panel",
+    "pick",
+    "progress",
+    "report",
+    "setInput",
+    "settle",
+    "show",
+    "status"
+  ],
+  "items": [
+    "agent",
+    "assistant_message",
+    "command",
+    "file_change",
+    "notice",
+    "plan",
+    "reasoning",
+    "todo_list",
+    "tool_call",
+    "user_message",
+    "web_search"
+  ],
+  "threadEvents": [
+    "commands.updated",
+    "error",
+    "item.completed",
+    "item.delta",
+    "item.started",
+    "item.updated",
+    "message.dispatched",
+    "message.dropped",
+    "message.recorded",
+    "queue.changed",
+    "request.opened",
+    "request.resolved",
+    "session.closed",
+    "session.replaced",
+    "session.updated",
+    "turn.ended",
+    "turn.started",
+    "usage.updated"
+  ],
+  "extensionApi": [
+    "acpAgent",
+    "choose",
+    "name",
+    "on",
+    "onInput",
+    "onRequest",
+    "onToolCall",
+    "onUnload",
+    "operations",
+    "registerCommand",
+    "registerDriver",
+    "registerOperation",
+    "registerTool",
+    "registerToolRenderer",
+    "runOperation",
+    "storage"
+  ],
+  "operations": [
+    {
+      "name": "delegate_task",
+      "effect": "act",
+      "callers": ["agent"],
+      "input": [
+        "effort",
+        "harness",
+        "isolation",
+        "model",
+        "plan",
+        "requestId",
+        "role",
+        "runtimeMode",
+        "task",
+        "timeoutSeconds",
+        "title",
+        "wait"
+      ],
+      "required": ["task"]
+    },
+    {
+      "name": "harness_list",
+      "effect": "read",
+      "callers": ["agent", "external", "user"],
+      "input": ["harness"],
+      "required": []
+    },
+    {
+      "name": "html_preview",
+      "effect": "read",
+      "callers": ["agent"],
+      "input": ["dark", "html", "path", "width"],
+      "required": []
+    },
+    {
+      "name": "html_render",
+      "effect": "act",
+      "callers": ["agent"],
+      "input": ["html", "path", "title"],
+      "required": []
+    },
+    {
+      "name": "orchestrator_capabilities",
+      "effect": "read",
+      "callers": ["agent"],
+      "input": [],
+      "required": []
+    },
+    {
+      "name": "task_cancel",
+      "effect": "act",
+      "callers": ["agent"],
+      "input": ["taskId"],
+      "required": ["taskId"]
+    },
+    {
+      "name": "task_status",
+      "effect": "read",
+      "callers": ["agent"],
+      "input": ["taskId", "timeoutSeconds", "wait"],
+      "required": ["taskId"]
+    },
+    {
+      "name": "thread_close",
+      "effect": "act",
+      "callers": ["external", "user"],
+      "input": ["threadId"],
+      "required": ["threadId"]
+    },
+    {
+      "name": "thread_compact",
+      "effect": "act",
+      "callers": ["agent", "external", "user"],
+      "input": ["threadId"],
+      "required": ["threadId"]
+    },
+    {
+      "name": "thread_context",
+      "effect": "read",
+      "callers": ["external", "user"],
+      "input": ["threadId"],
+      "required": ["threadId"]
+    },
+    {
+      "name": "thread_events",
+      "effect": "read",
+      "callers": ["agent", "external", "user"],
+      "input": ["after", "threadId", "timeoutSeconds"],
+      "required": ["threadId"]
+    },
+    {
+      "name": "thread_forget",
+      "effect": "act",
+      "callers": ["user"],
+      "input": ["threadId"],
+      "required": ["threadId"]
+    },
+    {
+      "name": "thread_fork",
+      "effect": "act",
+      "callers": ["external", "user"],
+      "input": ["threadId", "turn"],
+      "required": ["threadId"]
+    },
+    {
+      "name": "thread_interrupt",
+      "effect": "act",
+      "callers": ["agent", "external", "user"],
+      "input": ["threadId"],
+      "required": ["threadId"]
+    },
+    {
+      "name": "thread_list",
+      "effect": "read",
+      "callers": ["agent", "external", "user"],
+      "input": [],
+      "required": []
+    },
+    {
+      "name": "thread_mcp_servers",
+      "effect": "read",
+      "callers": ["agent", "external", "user"],
+      "input": ["threadId"],
+      "required": ["threadId"]
+    },
+    {
+      "name": "thread_models",
+      "effect": "read",
+      "callers": ["agent", "external", "user"],
+      "input": ["threadId"],
+      "required": ["threadId"]
+    },
+    {
+      "name": "thread_open",
+      "effect": "act",
+      "callers": ["external", "user"],
+      "input": ["cwd", "effort", "harness", "message", "model", "plan", "runtimeMode", "title"],
+      "required": []
+    },
+    {
+      "name": "thread_read",
+      "effect": "read",
+      "callers": ["agent", "external", "user"],
+      "input": ["detail", "fromRun", "maxCharsPerRun", "offset", "runs", "threadId", "toRun"],
+      "required": ["threadId"]
+    },
+    {
+      "name": "thread_respond",
+      "effect": "act",
+      "callers": ["user"],
+      "input": ["answers", "decline", "optionId", "requestId", "threadId"],
+      "required": ["requestId", "threadId"]
+    },
+    {
+      "name": "thread_search",
+      "effect": "read",
+      "callers": ["agent", "external", "user"],
+      "input": ["limit", "query"],
+      "required": ["query"]
+    },
+    {
+      "name": "thread_send",
+      "effect": "act",
+      "callers": ["agent", "external", "user"],
+      "input": ["message", "steer", "threadId"],
+      "required": ["message", "threadId"]
+    },
+    {
+      "name": "thread_set_mode",
+      "effect": "act",
+      "callers": ["user"],
+      "input": ["plan", "runtimeMode", "threadId"],
+      "required": ["threadId"]
+    },
+    {
+      "name": "thread_set_model",
+      "effect": "act",
+      "callers": ["agent", "external", "user"],
+      "input": ["effort", "model", "threadId"],
+      "required": ["threadId"]
+    },
+    {
+      "name": "thread_switch_harness",
+      "effect": "act",
+      "callers": ["agent", "external", "user"],
+      "input": ["fresh", "harness", "threadId"],
+      "required": ["harness", "threadId"]
+    },
+    {
+      "name": "thread_wait",
+      "effect": "read",
+      "callers": ["agent", "external", "user"],
+      "input": ["threadId", "timeoutSeconds"],
+      "required": ["threadId"]
+    },
+    {
+      "name": "tools_set",
+      "effect": "act",
+      "callers": ["user"],
+      "input": ["enabled", "tool"],
+      "required": ["enabled"]
+    }
+  ]
+}
