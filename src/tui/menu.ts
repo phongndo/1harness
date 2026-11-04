@@ -372,7 +372,20 @@ export class Menu {
       // An entry its row shows whole would only be said twice.
       const whole =
         chosen && !cut(chosen) && visibleWidth(chosen.label) <= labelWidth - 3 && !chosen.inert;
-      const text = chosen && !chosen.inert && !whole ? `${chosen.label}  ${chosen.detail}` : "";
+      // Its row shows the detail whole where only the label is cut.
+      const detailFits =
+        chosen &&
+        2 +
+          labelWidth +
+          visibleWidth(chosen.detail) +
+          (chosen.tag ? visibleWidth(chosen.tag) + 2 : 0) <=
+          width;
+      const text =
+        chosen && !chosen.inert && !whole
+          ? detailFits
+            ? chosen.label
+            : `${chosen.label}  ${chosen.detail}`
+          : "";
       const lines = text ? wrap(`  ${style.soft(text)}`, width, "  ") : [];
       // A third row's worth is cut, with an ellipsis.
       const second = lines.length > 2 ? truncate(`${lines[1]} ${lines[2]}`, width) : lines[1];
@@ -389,7 +402,10 @@ export class Menu {
     // A list that says nothing of what lies past its last row reads as all there is.
     // Group headings are rows but nothing to count, as the title's count knows.
     const before = visible.slice(0, this.#index + 1).filter(({ entry: item }) => !item.inert);
-    const position = visible.length > shown ? `${before.length} / ${count}` : "";
+    const below = visible.slice(start + shown).filter(({ entry: item }) => !item.inert).length;
+    const place = `${before.length} / ${count}`;
+    const position =
+      visible.length > shown ? (below > 0 ? `↓ ${below} more · ${place}` : place) : "";
     rows.push(rule(width, position), hints(keys, width));
     return rows;
   }

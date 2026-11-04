@@ -143,7 +143,7 @@ describe("Menu layout", () => {
     list.move(2);
     const rows = list.render(80, 5).map((row) => stripVTControlCharacters(row));
     assert.ok(rows.some((row) => row.startsWith("› /command2")));
-    assert.ok(rows.some((row) => row.endsWith(" 3 / 20 ─")));
+    assert.ok(rows.some((row) => row.endsWith(" ↓ 15 more · 3 / 20 ─")));
   });
 
   it("counts as the title does, leaving out rows that are only headings", () => {
