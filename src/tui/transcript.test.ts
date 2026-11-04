@@ -7,7 +7,7 @@ import { plainLine, type AgentRow } from "./agents.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { visibleWidth, wrap } from "./text.ts";
 import { Transcript, failureText, renderBlock, type Block, type ToolItem } from "./transcript.ts";
-import { ThreadView } from "./view.ts";
+import { ThreadView, sessionEnded } from "./view.ts";
 
 const plain = (rows: string[]) => rows.map((row) => stripVTControlCharacters(row));
 const context = { width: 60, cwd: "/work", blink: true, now: 100_000 };
@@ -56,6 +56,7 @@ describe("Transcript", () => {
     assert.deepEqual(plain(all.rows), ["┃ one", "", "  two", "", "  three", "", "  1s (↑1 ↓2)"]);
     assert.equal(all.total, 7);
     assert.deepEqual(plain(transcript.view(context, 3, 0).rows), ["  three", "", "  1s (↑1 ↓2)"]);
+    assert.equal(transcript.askedAbove(context, 4), "one");
     assert.deepEqual(plain(transcript.view(context, 3, 2).rows), ["  two", "", "  three"]);
   });
 
@@ -140,7 +141,7 @@ describe("tool groups", () => {
   it("sums the group up in a sentence over a tree of past-tense rows", () => {
     const rows = renderBlock({ kind: "tools", items, settled: true }, { ...context, width: 80 });
     assert.deepEqual(plain(rows), [
-      "● Changed 1 file, ran 1 command, and performed 1 other action",
+      "● Changed 1 file, ran 1 command, and read 1 file",
       "├ Ran ls -la && echo done",
       "├ Read notes.txt",
       "└ Edited notes.txt +2 / -1",
@@ -220,6 +221,60 @@ describe("agents", () => {
 /** The last bold heading in reasoning, read whole. */
 const lastHeading = (text: string) =>
   [...text.matchAll(/\*\*([^*\n]{2,80})\*\*/g)].at(-1)?.[1]?.trim() ?? null;
+
+function asked(view: ThreadView, text: string): void {
+  view.startTurn(1000);
+  view.transcript.add({ kind: "user", text });
+}
+
+describe("after a failure", () => {
+  it("offers the failed message again, and when the failure says that can work", () => {
+    const view = new ThreadView("t1");
+    asked(view, "run the suite");
+    view.endTurn("failed", "429: try again in 42s", { at: 5000, up: 1, down: 1 });
+    assert.deepEqual(view.retry, { text: "run the suite", at: 47_000 });
+    view.startTurn();
+    assert.equal(view.retry, null);
+  });
+
+  it("offers nothing after a turn that went well, or a message whose pictures are gone", () => {
+    const view = new ThreadView("t1");
+    asked(view, "fine");
+    view.endTurn("completed", null);
+    assert.equal(view.retry, null);
+    view.startTurn();
+    view.transcript.add({ kind: "user", text: "see", images: [{} as never] });
+    view.endTurn("failed", "boom");
+    assert.equal(view.retry, null);
+  });
+
+  it("does not offer a message from a turn already over, or set off by a report", () => {
+    const view = new ThreadView("t1");
+    view.startTurn(1000);
+    view.transcript.add({ kind: "user", text: "delete the build dir" });
+    view.endTurn("completed", null, { at: 2000, up: 1, down: 1 });
+    view.startTurn(3000);
+    view.endTurn("failed", "compaction failed", { at: 4000, up: 0, down: 0 });
+    assert.equal(view.retry, null);
+    view.transcript.add({ kind: "user", text: "go on" });
+    view.transcript.add({ kind: "result", from: "agent", status: "failed", text: "no" });
+    view.startTurn(5000);
+    view.endTurn("failed", "boom", { at: 6000, up: 0, down: 0 });
+    assert.equal(view.retry, null);
+  });
+
+  it("puts a command a dead session names on its own line", () => {
+    assert.equal(
+      sessionEnded("demo exited (code 1): login expired; run `demo auth login`"),
+      "Session ended: demo exited (code 1): login expired\nIn a shell, run:\n$ demo auth login\n" +
+        "Then press enter to try again; the thread picks up where it left off.",
+    );
+    assert.match(
+      sessionEnded("demo exited (code 1)"),
+      /^Session ended: demo exited \(code 1\)\nTo start/,
+    );
+  });
+});
 
 describe("ThreadView", () => {
   it("heads the turn with the latest bold heading of its reasoning as it streams", () => {
@@ -656,7 +711,10 @@ describe("loading earlier turns", () => {
       rows.some((line) => line.includes("Stopped read a.ts")),
       rows.join("\n"),
     );
-    assert.ok(rows.includes("  Interrupted · 5s (↑1 ↓2 tokens)"), rows.join("\n"));
+    assert.ok(
+      rows.some((shown) => shown.startsWith("  ■ Interrupted · 5s")),
+      rows.join("\n"),
+    );
   });
 });
 
@@ -788,7 +846,7 @@ describe("finished turns", () => {
       "",
       "  Fixed it.",
       "",
-      "  Done · 4s (↑1 ↓2 tokens)",
+      "  ✓ Done · 4s · 1 tokens in, 2 out · ctrl+x shows the work",
     ]);
     const detailed = plain(view.transcript.view({ ...context, details: true }, 30, 0).rows);
     // The line the work folds into would only say what the work under it says.
@@ -867,7 +925,46 @@ describe("a failed turn", () => {
         context,
       ),
     );
-    assert.deepEqual(rows, ["● Ran 1 command · 1 failed", "└ ✗ pnpm test · exit 1: 1 of 3 failed"]);
+    assert.deepEqual(rows, [
+      "● Ran 1 command · 1 failed · ctrl+x shows output",
+      "└ ✗ pnpm test · exit 1: 1 of 3 failed",
+    ]);
+  });
+
+  it("does not tell a command still running as already run", () => {
+    const heading = plain(
+      renderBlock(
+        {
+          kind: "tools",
+          settled: false,
+          items: [
+            { ...failing, id: "done", status: "completed", exitCode: 0 },
+            { ...failing, id: "going", command: "pnpm build", status: "running", exitCode: null },
+          ],
+        },
+        context,
+      ),
+    )[0];
+    assert.equal(heading, "● Ran 1 command");
+  });
+
+  it("keeps the way to the work over the counts in a narrow pane", () => {
+    const block = {
+      kind: "summary",
+      outcome: "completed",
+      text: "Done · 4s · 18 tokens in, 127 out · ctrl+x shows the work",
+    } as const;
+    const at = (width: number) => plain(renderBlock(block, { ...context, width }))[0];
+    assert.equal(at(80), "  ✓ Done · 4s · 18 tokens in, 127 out · ctrl+x shows the work");
+    assert.equal(at(50), "  ✓ Done · 4s · ctrl+x shows the work");
+    assert.equal(at(20), "  ✓ Done · 4s");
+  });
+
+  it("names the first test a runner marks as failing", () => {
+    assert.equal(
+      failureText({ ...failing, output: "✔ one\n✖ handles no newline\n  boom\n1 of 3 failed\n" }),
+      "pnpm test · exit 1: 1 of 3 failed · first: ✖ handles no newline",
+    );
   });
 });
 

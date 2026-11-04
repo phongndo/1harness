@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ThreadState } from "../protocol.ts";
-import { footerRows, statusLine, type FooterState, type StatusLineState } from "./footer.ts";
+import {
+  contextRow,
+  footerRows,
+  retryHint,
+  statusLine,
+  type FooterState,
+  type StatusLineState,
+} from "./footer.ts";
 import { plainText } from "./text.ts";
 
 const current = {
@@ -27,12 +34,42 @@ const state: StatusLineState = {
   runtimeMode: "supervised",
   server: null,
   scroll: 0,
-  above: 0,
   details: false,
 };
 
 const line = (width: number, more: Partial<StatusLineState> = {}) =>
   plainText(statusLine({ ...state, ...more }, width));
+
+describe("the hint after a failed turn", () => {
+  it("offers enter, after any wait the failure named", () => {
+    assert.equal(retryHint(null, 80), "enter tries again · or type a message · / commands");
+    assert.equal(
+      retryHint(Date.now() - 1, 80),
+      "enter tries again · or type a message · / commands",
+    );
+    assert.match(retryHint(Date.now() + 41_500, 80), /^wait 42s, then enter tries again · or/);
+    assert.equal(retryHint(null, 30), "enter tries again");
+  });
+});
+
+describe("the context row", () => {
+  it("says what was asked, whole where it fits, and how much lies above", () => {
+    assert.match(
+      plainText(contextRow("fix the\nparser", 15, 50)),
+      /^┃ fix the parser +↑ 15 more lines · pgup$/,
+    );
+  });
+
+  it("gives up the question before the way back", () => {
+    const row = plainText(contextRow("x".repeat(80), 1, 40));
+    assert.match(row, /^┃ x+… +↑ 1 more line · pgup$/);
+    assert.ok(row.length <= 40);
+  });
+
+  it("says only how much lies above when nothing was asked", () => {
+    assert.match(plainText(contextRow(null, 2, 30)), /^ +↑ 2 more lines · pgup$/);
+  });
+});
 
 describe("the status line", () => {
   it("shows all it knows where there is room", () => {
@@ -45,18 +82,14 @@ describe("the status line", () => {
     assert.match(line(30), /^parser-app · main +supervised$/);
   });
 
-  it("says when more of the transcript lies above the view", () => {
-    assert.match(line(100, { above: 19 }), /↑ 19 more lines · pgup/);
-    assert.match(
-      line(60, { above: 19 }),
-      /^parser-app · main +↑ 19 more lines · pgup {3}supervised$/,
-    );
-    assert.match(line(40, { above: 19 }), /^parser-app · main +supervised$/);
+  it("says how the turn ended when that is scrolled out of view", () => {
+    assert.match(line(100, { scroll: 3, outcome: "✓ Done" }), /↓ 3 more lines to ✓ Done · pgdn/);
+    assert.doesNotMatch(line(100, { outcome: "✓ Done" }), /Done/);
   });
 
   it("keeps the way back from details and a scroll beside the rest", () => {
     const shown = line(100, { scroll: 12, details: true });
-    assert.match(shown, /↓ 12 more lines · pgdn {3}details · ctrl\+x {3}supervised/);
+    assert.match(shown, /↓ 12 more lines · pgdn {3}ctrl\+x hides details {3}supervised/);
     assert.match(shown, /^parser-app · main/);
   });
 });
@@ -78,6 +111,7 @@ describe("the line that says another thread needs the user", () => {
         panel: null,
         editor: editor as unknown as FooterState["editor"],
         busy: false,
+        retry: null,
         suggestions: null,
         status: "",
       },

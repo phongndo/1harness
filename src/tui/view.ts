@@ -14,9 +14,9 @@ import {
   type Block,
 } from "./transcript.ts";
 
-/** A turn's tokens up and down, as its activity line and summary say them: `(↑1.2k ↓350 tokens)`. */
+/** A turn's tokens each way, as its activity line and summary say them. */
 export function tokenCounts(up: number, down: number): string {
-  return `(↑${formatTokens(up)} ↓${formatTokens(down)} tokens)`;
+  return `${formatTokens(up)} tokens in, ${formatTokens(down)} out`;
 }
 
 /** What the view needs from the client to show an entry. */
@@ -98,6 +98,19 @@ function messageBlock(echo: string, message: Message | undefined): Block {
   }
 }
 
+/**
+ * Why a session ended and how to go on, with a command the harness names on a
+ * line of its own, where it can be read and copied whole.
+ */
+export function sessionEnded(error: string): string {
+  const named = /^(.*?)[;:,.]?\s*\brun\s+`([^`]+)`\.?\s*$/is.exec(error);
+  const [, why, command] = named ?? [];
+  const next = "press enter to try again; the thread picks up where it left off.";
+  return why && command
+    ? `Session ended: ${why}\nIn a shell, run:\n$ ${command}\nThen ${next}`
+    : `Session ended: ${error}\nTo start it again, ${next}`;
+}
+
 /** A queued message in one line: the user's own text, or who sent it. */
 export function queuedText(message: Message): string {
   const { origin } = message;
@@ -124,6 +137,13 @@ export class ThreadView {
   /** Item ID to the block that shows it. */
   readonly blocks = new Map<string, Block>();
   turn: TurnState | null = null;
+  /**
+   * What a failed turn was asked, which a key sends again, and when the failure
+   * says doing so can work. Absent where nothing can be sent again as it was.
+   */
+  retry: { text: string; at: number | null } | null = null;
+  /** How the last turn ended, in a word and its mark, while none runs. */
+  outcome: string | null = null;
   /** Rows the view sits above the bottom of the transcript; 0 follows new output. */
   scroll = 0;
   total = 0;
@@ -175,13 +195,10 @@ export class ThreadView {
         this.transcript.add({ kind: "html", title: entry.title, html: entry.html });
         break;
       case "session.ended":
+        if (entry.error && this.turn) this.#offerRetry(null);
         this.endTurn(null, null);
         this.settle();
-        if (entry.error)
-          this.notice(
-            "error",
-            `Session ended: ${entry.error}\nRun any command it names in a shell first; your next message starts it again.`,
-          );
+        if (entry.error) this.notice("error", sessionEnded(entry.error));
         break;
       case "decision":
         this.transcript.add({
@@ -307,6 +324,8 @@ export class ThreadView {
   }
 
   startTurn(at: number = Date.now()): void {
+    this.retry = null;
+    this.outcome = null;
     if (this.turn) return;
     this.turn = { startedAt: at, up: 0, down: 0, phase: "Thinking", heading: null };
     this.#turnStart = this.transcript.size;
@@ -383,14 +402,39 @@ export class ThreadView {
     const down = ended?.down ?? Math.ceil(turn.down);
     const tokens = tokenCounts(up, down);
     const label =
-      status === "interrupted" ? "Interrupted · " : status === "failed" ? "Failed · " : "Done · ";
-    const next = status === "failed" ? " · send a message to try again" : "";
+      status === "interrupted" ? "Interrupted" : status === "failed" ? "Failed" : "Done";
+    const work = this.transcript
+      .since(this.#turnStart)
+      .some((block) => block.kind === "worked" && !block.failures?.length);
     // A harness that reported the failure as it happened already said why.
     const said = this.transcript
       .since(this.#turnStart)
       .some((block) => block.kind === "notice" && block.level === "error");
-    this.transcript.add({ kind: "summary", text: `${label}${seconds}s ${tokens}${next}` });
+    // Before this turn's own summary, which would end the search for what it was asked.
+    if (status === "failed") {
+      const wait = /try again in (\d+)\s*s/i.exec(error ?? "")?.[1];
+      this.#offerRetry(wait ? (ended?.at ?? Date.now()) + Number(wait) * 1000 : null);
+    }
+    this.outcome = `${status === "failed" ? "✗" : status === "interrupted" ? "■" : "✓"} ${label}`;
+    this.transcript.add({
+      kind: "summary",
+      outcome: status,
+      text: `${label} · ${seconds}s · ${tokens}${work ? " · ctrl+x shows the work" : ""}`,
+    });
     if (status === "failed" && error && !said) this.notice("error", error);
+  }
+
+  #offerRetry(at: number | null): void {
+    // Only what started this turn: one with no message of its own, as a compaction or
+    // an agent's report sets off, would otherwise repeat work already done.
+    const asked = this.transcript.last(
+      (block) => block.kind !== "user" && block.kind !== "result" && block.kind !== "summary",
+    );
+    // A picture left the composer with the message, so sending the words alone would differ.
+    this.retry =
+      asked?.kind === "user" && !asked.label && !asked.images?.length
+        ? { text: asked.text, at }
+        : null;
   }
 
   /**

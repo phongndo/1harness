@@ -75,7 +75,7 @@ export type Block =
   /** The agents a turn started: one row each, with its status and how it ended. */
   | { kind: "agents"; rows: AgentRow[] }
   /** The muted line that closes a turn: duration and token estimate. */
-  | { kind: "summary"; text: string }
+  | { kind: "summary"; text: string; outcome?: "completed" | "interrupted" | "failed" }
   /**
    * An image, with a caption under it; with its file's `path`, drawn again
    * from the file for other cells.
@@ -298,6 +298,21 @@ export class Transcript {
     return row;
   }
 
+  /** What the user last said at or above `row`, which rows under it answer. */
+  askedAbove(context: RenderContext, row: number): string | null {
+    let total = 0;
+    let asked: string | null = null;
+    for (const entry of this.#entries) {
+      const { rows } = this.#rows(entry, context);
+      if (rows.length === 0) continue;
+      if (total > 0) total += 1;
+      if (total > row) break;
+      if (entry.block.kind === "user") asked = entry.block.text;
+      total += rows.length;
+    }
+    return asked;
+  }
+
   /**
    * The rows in view, `height` of them ending `scroll` rows above the last,
    * with the pictures they show and what each does when clicked; `top` is
@@ -502,7 +517,7 @@ export function renderBlock(block: Block, context: RenderContext): string[] {
     case "agents":
       return agentRows(block, context);
     case "summary":
-      return [truncate(style.muted(`  ${block.text}`), width)];
+      return [truncate(summaryRow(block, width), width)];
     case "decision":
       return decisionRows(block, width);
     case "image":
@@ -510,6 +525,30 @@ export function renderBlock(block: Block, context: RenderContext): string[] {
     case "html":
       return htmlRows(block, context);
   }
+}
+
+/** How the turn went stands apart from its counts: it is what a glance at the end looks for. */
+function summaryRow(block: Extract<Block, { kind: "summary" }>, width: number): string {
+  const { outcome, text } = block;
+  if (!outcome) return style.muted(`  ${text}`);
+  const at = text.indexOf(" · ");
+  const label = at === -1 ? text : text.slice(0, at);
+  // A narrow pane gives up whole parts, not words: counts first, as what can be done
+  // next matters more there, then that.
+  const parts = (at === -1 ? "" : text.slice(at + 3)).split(" · ").filter(Boolean);
+  const room = width - visibleWidth(label) - 4;
+  const without = parts.filter((part) => !part.includes("tokens"));
+  const rest =
+    [parts, without, without.slice(0, 1)]
+      .map((kept) => kept.map((part) => ` · ${part}`).join(""))
+      .find((kept) => visibleWidth(kept) <= room) ?? "";
+  const said =
+    outcome === "failed"
+      ? style.removed(`✗ ${label}`)
+      : outcome === "interrupted"
+        ? style.attention(`■ ${label}`)
+        : `${style.added("✓")} ${label}`;
+  return `  ${style.bold(said)}${style.muted(rest)}`;
 }
 
 /** Lines of a page's text shown where it is not drawn, until ctrl+x shows them all. */
@@ -564,10 +603,13 @@ const WORKED_FILES = 6;
 
 /** A finished turn's work in a line, over the files it changed. */
 function workedRows(block: Extract<Block, { kind: "worked" }>, context: RenderContext): string[] {
-  const rows = [truncate(`${style.strong("●")} ${style.muted(block.text)}`, context.width)];
+  const failures = block.failures ?? [];
+  const detail = failures.length > 0 ? " · ctrl+x shows output" : "";
+  const rows = [
+    truncate(`${style.strong("●")} ${style.muted(`${block.text}${detail}`)}`, context.width),
+  ];
   const files = block.files.slice(0, WORKED_FILES);
   const more = block.files.length - files.length;
-  const failures = block.failures ?? [];
   failures.forEach((failure, index) => {
     const last = index === failures.length - 1 && files.length === 0 && more === 0;
     rows.push(
@@ -818,6 +860,9 @@ function resultRows(block: Extract<Block, { kind: "result" }>, context: RenderCo
 export function failureText(item: ToolItem): string {
   const lines = "output" in item ? plainText(item.output).trim().split("\n") : [];
   const last = oneLineText(lines.at(-1) ?? "");
+  // The count a test runner ends on says how many; this says which.
+  const named = lines.find((line) => /^\s*(?:✖|✗|×|FAIL\b|not ok\b)/.test(line))?.trim();
+  const first = named && named !== lines.at(-1)?.trim() ? ` · first: ${oneLineText(named)}` : "";
   const what =
     item.kind === "command"
       ? `${oneLineText(item.command)}${item.exitCode ? ` · exit ${item.exitCode}` : ""}`
@@ -828,7 +873,7 @@ export function failureText(item: ToolItem): string {
           : item.kind === "web_search"
             ? "Web search"
             : "Tool call";
-  return last ? `${what}: ${last}` : what;
+  return last ? `${what}: ${last}${first}` : what;
 }
 
 function noticeRows(block: Extract<Block, { kind: "notice" }>, width: number): string[] {
@@ -839,7 +884,8 @@ function noticeRows(block: Extract<Block, { kind: "notice" }>, width: number): s
     .split("\n")
     .flatMap((line, index) =>
       wrap(
-        `  ${index === 0 && label ? style.bold(paint(label)) : ""}${style.soft(line)}`,
+        // A command to run stands out from the words around it.
+        `  ${index === 0 && label ? style.bold(paint(label)) : ""}${(line.startsWith("$ ") ? style.bold : style.soft)(line)}`,
         width,
         "  ",
       ),
@@ -956,8 +1002,8 @@ export function groupSummary(items: readonly ToolItem[]): string {
     } else counts.set(category(item), (counts.get(category(item)) ?? 0) + 1);
   }
   const present = (Object.keys(PHRASES) as Category[]).filter((name) => counts.has(name));
-  const phrases = present.slice(0, 2).map((name) => PHRASES[name](counts.get(name) ?? 0));
-  const rest = present.slice(2).reduce((sum, name) => sum + (counts.get(name) ?? 0), 0);
+  const phrases = present.slice(0, 3).map((name) => PHRASES[name](counts.get(name) ?? 0));
+  const rest = present.slice(3).reduce((sum, name) => sum + (counts.get(name) ?? 0), 0);
   if (rest > 0) phrases.push(`performed ${plural(rest, "other action")}`);
   const sentence =
     phrases.length <= 2
@@ -992,7 +1038,10 @@ function toolRows(block: Extract<Block, { kind: "tools" }>, context: RenderConte
     if (context.details) return detailedItem(only, `${marker} `, "  ", context, line(only));
     return [truncate(`${marker} ${line(only)}`, context.width), ...tail(only, "  ")];
   }
-  const rows = [truncate(`${marker} ${style.muted(groupSummary(items))}`, context.width)];
+  // What is still running has its own row, so it is not told as already done.
+  const finished = running ? items.filter((item) => item.status !== "running") : items;
+  const heading = finished.length > 0 ? groupSummary(finished) : `Running ${items.length} calls`;
+  const rows = [truncate(`${marker} ${style.muted(heading)}`, context.width)];
   items.forEach((item, index) => {
     const last = index === items.length - 1;
     const branch = style.muted(last ? "└ " : "├ ");
@@ -1027,6 +1076,8 @@ function detailedItem(
 ): string[] {
   const { width } = context;
   const body: string[] = [];
+  // Headings for the faint output under them, so the eye can find where each call starts.
+  const heading = item.status === "failed" ? line : style.text(plainText(line));
   const tail = (text: string, limit: number, paint: (line: string) => string) => {
     const lines = outputText(text).replace(/\s+$/, "").split("\n");
     if (lines.length === 1 && lines[0] === "") return;
@@ -1060,7 +1111,7 @@ function detailedItem(
     case "web_search":
       break;
   }
-  const rows = wrap(lead + line, width, hang, true);
+  const rows = wrap(lead + heading, width, hang, true);
   for (const text of body) rows.push(...wrap(`${hang}${text}`, width, hang, true));
   return rows;
 }
@@ -1208,7 +1259,10 @@ function toolLine(item: ToolItem, settled: boolean, cwd: string, waiting = false
       const exited = item.exitCode !== null && item.exitCode !== 0;
       const word = exited && !running ? "Ran" : verb("Ran", "Running", "");
       const exit = exited ? style.muted(` · exit ${item.exitCode}`) : "";
-      return `${style.muted(`${word} `)}${highlightCommand(item.command)}${exit}`;
+      // What is running now is the one row of the group to read.
+      const live = running && !settled;
+      const shown = live ? style.text(oneLineText(item.command)) : highlightCommand(item.command);
+      return `${style.muted(`${word} `)}${shown}${exit}`;
     }
     case "file_change": {
       const [change] = item.changes;

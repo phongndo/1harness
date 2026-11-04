@@ -332,6 +332,122 @@ describe("App", () => {
     assert.match(screen, /^Ask anything/m);
   });
 
+  it("sends a failed turn's message again on enter in the empty composer", async () => {
+    const flaky: ScriptedSession[] = [];
+    const unregisterFlaky = registerDriver({
+      id: "flaky",
+      label: "Flaky",
+      unavailable: () => null,
+      create: (options) => {
+        const made = new ScriptedSession(options);
+        const play = made.startTurn.bind(made);
+        made.startTurn = async (input) => {
+          if (made.prompts.length > 0) return play(input);
+          made.prompts.push(input.text);
+          made.events.push({ type: "turn.started", turnId: "failing" });
+          made.events.push({
+            type: "item.completed",
+            item: { kind: "user_message", id: "asked", text: input.text, inputId: input.id! },
+          });
+          made.events.push({
+            type: "turn.ended",
+            turnId: "failing",
+            status: "failed",
+            error: "overloaded",
+          });
+        };
+        flaky.push(made);
+        return made;
+      },
+    });
+    try {
+      const session = await start({ harness: "flaky" });
+      await session.sees("Ask anything");
+      // With nothing failed, enter in the empty composer does nothing.
+      await session.type("\r");
+      await session.type("try this\r");
+      await session.sees("enter tries again");
+      await session.type("\r");
+      await session.sees("Done with try this");
+      assert.deepEqual(flaky[0]?.prompts, ["try this", "try this"]);
+    } finally {
+      unregisterFlaky();
+    }
+  });
+
+  it("sends a failed message again once for each press, and not before a wait is over", async () => {
+    const flaky: ScriptedSession[] = [];
+    let error = "overloaded";
+    const unregisterFlaky = registerDriver({
+      id: "flaky",
+      label: "Flaky",
+      unavailable: () => null,
+      create: (options) => {
+        const made = new ScriptedSession(options);
+        const play = made.startTurn.bind(made);
+        made.startTurn = async (input) => {
+          if (made.prompts.length > 0 && error === "") return play(input);
+          made.prompts.push(input.text);
+          const turnId = `failing-${made.prompts.length}`;
+          made.events.push({ type: "turn.started", turnId });
+          made.events.push({
+            type: "item.completed",
+            item: {
+              kind: "user_message",
+              id: `asked-${turnId}`,
+              text: input.text,
+              inputId: input.id!,
+            },
+          });
+          made.events.push({ type: "turn.ended", turnId, status: "failed", error });
+        };
+        flaky.push(made);
+        return made;
+      },
+    });
+    try {
+      const session = await start({ harness: "flaky" });
+      await session.sees("Ask anything");
+      error = "Rate limited, try again in 60s";
+      await session.type("wait for it\r");
+      await session.sees(/wait \d+s, then enter/);
+      await session.type("\r");
+      await settle(100);
+      assert.deepEqual(flaky[0]?.prompts, ["wait for it"]);
+
+      error = "overloaded";
+      await session.type("try this\r");
+      await session.sees("enter tries again");
+      // Spaces in the composer hide the hint, so enter should not act on it.
+      await session.type("  \r");
+      await settle(100);
+      assert.deepEqual(flaky[0]?.prompts, ["wait for it", "try this"]);
+      await session.type("\x7f\x7f");
+
+      error = "";
+      await session.type("\r\r");
+      await session.sees("Done with try this");
+      await settle(100);
+      assert.deepEqual(flaky[0]?.prompts, ["wait for it", "try this", "try this"]);
+    } finally {
+      unregisterFlaky();
+    }
+  });
+
+  it("keeps the frame to the screen when there is no room for the transcript", async () => {
+    const session = await start({ prompt: "alpha" });
+    await session.sees("Done with alpha");
+    for (const rows of [4, 5, 6]) {
+      session.terminal.raw = "";
+      session.terminal.rows = rows;
+      session.terminal.emit("resize");
+      await settle(50);
+      // oxlint-disable-next-line no-control-regex
+      const moves = [...session.terminal.raw.matchAll(/\x1b\[(\d+);\d+H/g)];
+      assert.ok(Math.max(...moves.map((move) => Number(move[1]))) <= rows, `${rows} rows`);
+    }
+  });
+
   it("sends a message typed while the first thread is still starting once it opens", async () => {
     let open!: () => void;
     const opened = new Promise<void>((resolve) => (open = resolve));
@@ -624,7 +740,7 @@ describe("App commands", () => {
       await session.sees("Done with /tmp/gone.png");
       // A queued skill comes back as typed.
       await session.type("hold\r");
-      await session.sees("Add to the turn");
+      await session.sees("enter queues for after this turn");
       await session.type("$tidy later\r");
       await session.sees("queued: /tidy later");
       await session.type("/unqueue\r");
@@ -923,10 +1039,10 @@ describe("App threads and keys", () => {
     session.terminal.emit("resize");
     await settle(30);
     await session.type("\x18");
-    const whole = await session.sees("details · ctrl+x");
+    const whole = await session.sees("ctrl+x hides details");
     assert.match(whole, /┃ go/);
     assert.match(whole, /Reading the parser/);
-    assert.match(whole, /more lines · pgdn/);
+    assert.match(whole, /more lines to ✓ Done · pgdn/);
     await session.type("\x18");
     await session.sees("Done with go");
     assert.doesNotMatch(session.terminal.text(), /more lines/);
@@ -938,11 +1054,11 @@ describe("App threads and keys", () => {
     assert.match(brief, /Ran 1 command/);
     assert.doesNotMatch(brief, /ok 1/);
     await session.type("\x18");
-    const whole = await session.sees("details · ctrl+x");
+    const whole = await session.sees("ctrl+x hides details");
     assert.match(whole, /Ran pnpm test\n+\s+ok 1/);
     await session.type("\x18");
     await session.sees("Ran 1 command");
-    assert.doesNotMatch(session.terminal.text(), /details · ctrl\+x/);
+    assert.doesNotMatch(session.terminal.text(), /ctrl\+x hides details/);
   });
 
   it("clears the composer with ctrl+c, then exits on ctrl+c twice", async () => {

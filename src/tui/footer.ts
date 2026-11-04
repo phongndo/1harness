@@ -28,7 +28,8 @@ function queueRows(queue: readonly Message[], held: boolean, width: number): str
     const when = held
       ? `your next message runs ${queue.length === 1 ? "it" : "these"} first`
       : "runs when this turn ends";
-    rows.push(...wrap(style.muted(`    ${when} · /unqueue takes one back`), width, "    "));
+    // When it goes and how to take it back are why this row is here, so not faint.
+    rows.push(...wrap(style.text(`    ${when} · /unqueue takes one back`), width, "    "));
   }
   return rows;
 }
@@ -71,12 +72,11 @@ function attentionLine(
 
 /**
  * fx's activity line: a blinking dot, the phase and elapsed time, then the
- * token estimate. `running` is whether a tool runs; `steer` whether a
- * message joins the turn.
+ * token estimate. `running` is whether a tool runs.
  */
 function activityLine(
   turn: TurnState,
-  state: { running: boolean; blink: boolean; steer: boolean },
+  state: { running: boolean; blink: boolean },
   width: number,
 ): string {
   const seconds = Math.floor((Date.now() - turn.startedAt) / 1000);
@@ -89,10 +89,8 @@ function activityLine(
         : (turn.heading ?? turn.phase);
   const dot = state.blink ? style.text("•") : " ";
   const tokens = tokenCounts(Math.ceil(turn.up), Math.ceil(turn.down));
-  const hint = state.steer
-    ? "esc stop · ctrl+x details · enter adds to turn · tab queues"
-    : "esc stop · ctrl+x details · enter queues";
-  const left = `${dot} ${style.text(`${phase} (${seconds}s)`)} ${style.muted(tokens)}`;
+  const hint = "esc stop · ctrl+x details";
+  const left = `${dot} ${style.text(`${phase} · ${seconds}s`)} ${style.muted(`· ${tokens}`)}`;
   // A narrow screen keeps what the turn is doing and drops the keys.
   if (visibleWidth(left) + visibleWidth(hint) + 2 > width) return truncate(left, width);
   return spread(left, style.muted(hint), width);
@@ -100,6 +98,22 @@ function activityLine(
 
 function moreLines(count: number): string {
   return `${count} more ${count === 1 ? "line" : "lines"}`;
+}
+
+/**
+ * The row over a transcript cut off at the top: what was asked that the rows
+ * under it answer, since a reply can otherwise open mid-sentence with nothing to
+ * say what it is about, and how much more lies above.
+ */
+export function contextRow(asked: string | null, above: number, width: number): string {
+  const more = style.muted(`↑ ${moreLines(above)} · pgup`);
+  if (asked === null) return spread("", more, width);
+  const room = Math.max(0, width - visibleWidth(more) - 2);
+  return spread(
+    truncate(`${style.prompt("┃")} ${style.muted(oneLineText(asked))}`, room),
+    more,
+    width,
+  );
 }
 
 /** What the status line shows, as the terminal has it when it draws. */
@@ -123,10 +137,10 @@ export interface StatusLineState {
   notes?: readonly string[];
   /** Rows the view is scrolled up. */
   scroll: number;
-  /** Rows of the transcript above the top of the view. */
-  above: number;
   /** Whether tool calls show whole. */
   details: boolean;
+  /** How the last turn ended, in a word and its mark, while none runs. */
+  outcome?: string | null;
 }
 
 /**
@@ -159,17 +173,13 @@ export function statusLine(state: StatusLineState, width: number): string {
   for (const note of state.notes ?? [])
     left += `${left === "" ? "" : style.muted(" · ")}${style.text(oneLineText(note))}`;
   // The right edge stays whole as the left is cut, so modes the keys toggle go there too.
-  // At the bottom, a reply can open mid-sentence with nothing to say more lies above it.
-  let scrolled =
-    state.scroll > 0
-      ? `↓ ${moreLines(state.scroll)} · pgdn`
-      : state.above > 0
-        ? `↑ ${moreLines(state.above)} · pgup`
-        : null;
-  let details = state.details ? "details · ctrl+x" : null;
+  // How the turn ended sits at the bottom, out of view, so say it is there.
+  let end = state.outcome ? ` to ${state.outcome}` : "";
+  let scrolled = state.scroll > 0 ? () => `↓ ${moreLines(state.scroll)}${end} · pgdn` : null;
+  let details = state.details ? "ctrl+x hides details" : null;
   const right = () =>
     [
-      scrolled,
+      scrolled?.(),
       details,
       [closed, mode, harness, model, effort, context, cache, cost].filter(Boolean).join(" · "),
     ]
@@ -181,9 +191,10 @@ export function statusLine(state: StatusLineState, width: number): string {
     () => (cost = null),
     () => (context = null),
     () => (model = null),
-    () => (details = null),
     () => (harness = null),
+    () => (end = ""),
     () => (scrolled = null),
+    () => (details = null),
   ];
   const leftWidth = visibleWidth(left);
   for (const drop of shed) {
@@ -191,6 +202,18 @@ export function statusLine(state: StatusLineState, width: number): string {
     drop();
   }
   return spread(left, style.muted(right()), width);
+}
+
+/** The empty composer's hint after a failed turn: a wait the failure named counts down. */
+export function retryHint(at: number | null, width: number): string {
+  const left = at === null ? 0 : Math.ceil((at - Date.now()) / 1000);
+  const wait = left > 0 ? `wait ${left}s, then ` : "";
+  return (
+    [
+      `${wait}enter tries again · or type a message · / commands`,
+      `${wait}enter tries again · or type a message`,
+    ].find((text) => visibleWidth(text) <= width) ?? `${wait}enter tries again`
+  );
 }
 
 /** A panel over the composer, as the footer shows it. */
@@ -220,6 +243,8 @@ export interface FooterState {
   editor: Pick<Editor, "layout" | "empty">;
   /** Whether the thread on screen is working, which the empty composer's hint says. */
   busy: boolean;
+  /** A failed turn enter can send again, and when the failure says that can work. */
+  retry: { at: number | null } | null;
   /** The list open under the composer, such as commands or files. */
   suggestions: Menu | null;
   status: string;
@@ -259,12 +284,16 @@ export function footerRows(state: FooterState, width: number, height: number): F
     // An empty composer says what it takes.
     if (state.editor.empty && !panel) {
       const hint = state.busy
-        ? "Add to the turn, or tab to queue a message"
-        : ([
-            "Ask anything · / commands · $ skills · @ files",
-            "Ask anything · / commands · @ files",
-            "Ask anything · / commands",
-          ].find((text) => visibleWidth(text) <= width) ?? "Ask anything");
+        ? state.steer
+          ? "enter adds to this turn · tab queues for after it"
+          : "enter queues for after this turn"
+        : state.retry
+          ? retryHint(state.retry.at, width)
+          : ([
+              "Ask anything · / commands · $ skills · @ files",
+              "Ask anything · / commands · @ files",
+              "Ask anything · / commands",
+            ].find((text) => visibleWidth(text) <= width) ?? "Ask anything");
       layout.rows[0] = truncate(style.faint(hint), width);
     }
     const start = Math.max(0, Math.min(layout.cursor.row - limit + 1, layout.rows.length - limit));
