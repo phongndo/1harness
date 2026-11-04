@@ -33,7 +33,9 @@ function fake(name: string, stdout: string, code = 0): { dir: string; path: stri
   const dir = join(root, String(++made));
   mkdirSync(dir);
   const path = join(dir, name);
-  writeFileSync(path, `#!/bin/sh\ncat <<'EOF'\n${stdout}\nEOF\nexit ${code}\n`);
+  // A shell builtin, since not every system keeps `cat` on this PATH.
+  const quoted = stdout.replaceAll("'", `'\\''`);
+  writeFileSync(path, `#!/bin/sh\nprintf '%s\\n' '${quoted}'\nexit ${code}\n`);
   chmodSync(path, 0o755);
   return { dir, path };
 }
