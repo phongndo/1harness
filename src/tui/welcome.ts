@@ -19,14 +19,19 @@ export function welcomeRows(
   const who = [thread.harness, thread.model].filter(Boolean).join(" · ");
   const name = `${MODE_NAMES[thread.mode]}: ${MODE_DESCRIPTIONS[thread.mode]}`;
   // What never asks is the one thing here worth reading before the first message.
-  const mode = thread.mode === "full-access" ? style.attention(name) : style.muted(name);
+  const mode = thread.mode === "full-access" ? style.attention(name) : style.text(name);
   const rows = [
     "",
     truncate(`  ${style.strong("●")} ${style.bold(who)}`, width),
     "",
     ...wrap(`  ${mode}${style.muted(" · /mode changes it")}`, width, "  "),
+    // A narrow pane keeps to a line, not a paragraph broken mid-phrase.
     ...wrap(
-      style.muted("  Describe a task to begin · /resume picks up a thread · /help lists it all"),
+      style.text(
+        width < 80
+          ? "  Describe a task · /resume · /help"
+          : "  Describe a task to begin · /resume picks up a thread · /help lists it all",
+      ),
       width,
       "  ",
     ),

@@ -21,6 +21,10 @@ describe("a thread with nothing in it", () => {
     assert.match(text(100, 20, { mode: "full-access" }), /Full access: never ask/);
   });
 
+  it("keeps to a line of first steps in a narrow pane", () => {
+    assert.match(text(40, 20), /^ {2}Describe a task · \/resume · \/help$/m);
+  });
+
   it("fits a short pane", () => {
     assert.equal(welcomeRows(thread, 40, 3).length, 3);
     assert.match(text(40, 3), /^  ● Codex/);

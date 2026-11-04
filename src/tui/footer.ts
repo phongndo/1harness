@@ -20,7 +20,7 @@ import { queuedText, tokenCounts, type TurnState } from "./view.ts";
 function queueRows(queue: readonly Message[], held: boolean, width: number): string[] {
   const rows = queue.map((queued) =>
     truncate(
-      style.muted(`  ↳ ${held ? "held" : "queued"}: ${oneLineText(queuedText(queued))}`),
+      `  ${style.muted(`↳ ${held ? "held" : "queued"}:`)} ${style.text(oneLineText(queuedText(queued)))}`,
       width,
     ),
   );

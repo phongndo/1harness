@@ -871,7 +871,36 @@ describe("a failed turn", () => {
   });
 });
 
+/** The row under a running command, as painted, for what it last printed. */
+function runningTail(output: string): string {
+  return (
+    renderBlock(
+      {
+        kind: "tools",
+        settled: false,
+        items: [
+          {
+            kind: "command",
+            id: "run",
+            command: "pnpm test",
+            output,
+            exitCode: null,
+            status: "running",
+          },
+        ],
+      },
+      context,
+    ).at(-1) ?? ""
+  );
+}
+
 describe("a running command", () => {
+  it("shows a failure going by in red, and other output quietly", () => {
+    const red = "\x1b[31m";
+    assert.ok(runningTail("✖ handles no newline\n").includes(red));
+    assert.ok(!runningTail("ok 1\n").includes(red));
+  });
+
   it("takes its output as it arrives", () => {
     const view = new ThreadView("t1");
     view.startTurn();
