@@ -3,7 +3,7 @@ import type { Message } from "../core/thread.ts";
 import { cacheHit, contextUsed, formatCost } from "../core/wording.ts";
 import type { ThreadState } from "../protocol.ts";
 import type { Editor } from "./editor.ts";
-import { infoPanel, type Menu } from "./menu.ts";
+import { infoPanel, keyHint, type Menu } from "./menu.ts";
 import type { ResumeView } from "./resume.ts";
 import { commandRisk } from "./risk.ts";
 import type { CursorPosition } from "./screen.ts";
@@ -67,7 +67,7 @@ function attentionLine(
   const whose = room - who.length >= 12 ? style.muted(who) : "";
   const title = truncate(thread.title || "New thread", Math.max(8, room - visibleWidth(whose)));
   const left = `${style.attention("◆")} ${whose}${style.strong(title)}  ${what}${more}`;
-  return spread(truncate(left, Math.max(0, width - 14)), style.muted("ctrl+o open"), width);
+  return spread(truncate(left, Math.max(0, width - 14)), keyHint("ctrl+o open"), width);
 }
 
 /**
@@ -89,11 +89,12 @@ function activityLine(
         : (turn.heading ?? turn.phase);
   const dot = state.blink ? style.text("•") : " ";
   const tokens = tokenCounts(Math.ceil(turn.up), Math.ceil(turn.down));
-  const hint = "esc stop · ctrl+x details";
+  const hints = ["esc stop", "ctrl+x details"];
+  const hint = hints.map(keyHint).join(style.muted(" · "));
   const left = `${dot} ${style.text(`${phase} · ${seconds}s`)} ${style.muted(`· ${tokens}`)}`;
   // A narrow screen keeps what the turn is doing and drops the keys.
   if (visibleWidth(left) + visibleWidth(hint) + 2 > width) return truncate(left, width);
-  return spread(left, style.muted(hint), width);
+  return spread(left, hint, width);
 }
 
 function moreLines(count: number): string {
@@ -216,6 +217,14 @@ export function retryHint(at: number | null, width: number): string {
   );
 }
 
+/** The empty composer's words, faint so they do not read as typed, with the keys standing out. */
+function composerHint(hint: string): string {
+  return hint
+    .split(/(?<=^|\s)(enter|tab|[/$@])(?=\s)/)
+    .map((part, index) => (index % 2 === 1 ? style.text(part) : style.faint(part)))
+    .join("");
+}
+
 /** A panel over the composer, as the footer shows it. */
 type FooterPanel =
   | { kind: "info"; title: string; rows: [string, string][] }
@@ -290,11 +299,13 @@ export function footerRows(state: FooterState, width: number, height: number): F
         : state.retry
           ? retryHint(state.retry.at, width)
           : ([
-              "Ask anything · / commands · $ skills · @ files",
-              "Ask anything · / commands · @ files",
-              "Ask anything · / commands",
+              "Ask anything · enter sends · / commands · $ skills · @ files",
+              "Ask anything · enter sends · / commands · @ files",
+              "Ask · enter sends · / commands · @ files",
+              "Ask anything · enter sends · / commands",
+              "Ask anything · enter sends",
             ].find((text) => visibleWidth(text) <= width) ?? "Ask anything");
-      layout.rows[0] = truncate(style.faint(hint), width);
+      layout.rows[0] = truncate(composerHint(hint), width);
     }
     const start = Math.max(0, Math.min(layout.cursor.row - limit + 1, layout.rows.length - limit));
     const composer = layout.rows.slice(start, start + limit);
