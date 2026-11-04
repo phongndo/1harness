@@ -368,7 +368,7 @@ export class Menu {
       const second = lines.length > 2 ? truncate(`${lines[1]} ${lines[2]}`, width) : lines[1];
       rows.push("", lines[0] ?? "", second ?? "");
     }
-    const keys = ["↑↓ navigate"];
+    const keys = ["↑↓ move"];
     if (this.#tabs.length > 0) keys.push("tab category");
     if (visible.some(({ entry: item }) => !item.inert)) {
       keys.push(`enter ${this.config.action}`);
