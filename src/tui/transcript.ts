@@ -976,9 +976,15 @@ function toolRows(block: Extract<Block, { kind: "tools" }>, context: RenderConte
   const settled = (item: ToolItem) => block.settled || (block.cut?.includes(item.id) ?? false);
   const line = (item: ToolItem) => toolLine(item, settled(item), context.cwd, waiting(item));
   const [only] = items;
+  // A long command is otherwise a silent row, with no sign whether it is getting anywhere.
+  const tail = (item: ToolItem, hang: string): string[] => {
+    if (item.kind !== "command" || item.status !== "running" || settled(item)) return [];
+    const last = plainText(item.output).trimEnd().split("\n").at(-1)?.trim();
+    return last ? [truncate(`${hang}${style.muted(last)}`, context.width)] : [];
+  };
   if (only && items.length === 1) {
     if (context.details) return detailedItem(only, `${marker} `, "  ", context, line(only));
-    return [truncate(`${marker} ${line(only)}`, context.width)];
+    return [truncate(`${marker} ${line(only)}`, context.width), ...tail(only, "  ")];
   }
   const rows = [truncate(`${marker} ${style.muted(groupSummary(items))}`, context.width)];
   items.forEach((item, index) => {
@@ -988,7 +994,11 @@ function toolRows(block: Extract<Block, { kind: "tools" }>, context: RenderConte
       rows.push(
         ...detailedItem(item, branch, style.muted(last ? "  " : "│ "), context, line(item)),
       );
-    else rows.push(truncate(branch + line(item), context.width));
+    else
+      rows.push(
+        truncate(branch + line(item), context.width),
+        ...tail(item, style.muted(last ? "  " : "│ ")),
+      );
   });
   return rows;
 }

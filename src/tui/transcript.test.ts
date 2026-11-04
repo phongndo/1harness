@@ -864,3 +864,50 @@ describe("a failed turn", () => {
     assert.deepEqual(rows, ["● Ran 1 command · 1 failed", "└ ✗ pnpm test · exit 1: 1 of 3 failed"]);
   });
 });
+
+describe("a running command", () => {
+  it("takes its output as it arrives", () => {
+    const view = new ThreadView("t1");
+    view.startTurn();
+    view.item(
+      {
+        kind: "command",
+        id: "run",
+        command: "pnpm test",
+        output: "",
+        exitCode: null,
+        status: "running",
+      },
+      false,
+      true,
+    );
+    view.delta("run", "ok 1\n");
+    assert.deepEqual(plain(view.transcript.view(context, 10, 0).rows), [
+      "● Running pnpm test",
+      "  ok 1",
+    ]);
+  });
+
+  it("shows the last line of its output, so a long one is not a silent row", () => {
+    const rows = plain(
+      renderBlock(
+        {
+          kind: "tools",
+          settled: false,
+          items: [
+            {
+              kind: "command",
+              id: "run",
+              command: "pnpm test",
+              output: "ok 1\nok 2\n",
+              exitCode: null,
+              status: "running",
+            },
+          ],
+        },
+        context,
+      ),
+    );
+    assert.equal(rows.at(-1), "  ok 2");
+  });
+});

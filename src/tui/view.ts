@@ -468,6 +468,13 @@ export class ThreadView {
   item(item: Item, completed: boolean, busy: boolean, message?: Message): void {
     if (busy && item.kind !== "notice") this.startTurn();
     const existing = this.blocks.get(item.id);
+    // A thought from a step ago would read as what the agent is doing now.
+    if (this.turn && !existing && (isToolItem(item) || item.kind === "assistant_message"))
+      for (const block of this.transcript.since(this.#turnStart))
+        if (block.kind === "thinking" && !block.folded) {
+          block.folded = true;
+          this.transcript.touch(block);
+        }
     switch (item.kind) {
       case "user_message": {
         const shown = messageBlock(item.text, message);
@@ -575,6 +582,15 @@ export class ThreadView {
       block.text += chunk;
       this.transcript.touch(block);
       if (this.turn) this.turn.phase = "Generating";
+      return;
+    }
+    if (block?.kind === "tools") {
+      const index = block.items.findIndex((item) => item.id === itemId);
+      const item = block.items[index];
+      if (item?.kind === "command") {
+        block.items[index] = { ...item, output: item.output + chunk };
+        this.transcript.touch(block);
+      }
       return;
     }
     const known = this.#reasoning.get(itemId);

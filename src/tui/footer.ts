@@ -23,16 +23,12 @@ function queueRows(queue: readonly Message[], held: boolean, width: number): str
       width,
     ),
   );
-  if (held && queue.length > 0)
-    rows.push(
-      ...wrap(
-        style.muted(
-          `    your next message runs ${queue.length === 1 ? "it" : "these"} first · /unqueue takes one back`,
-        ),
-        width,
-        "    ",
-      ),
-    );
+  if (queue.length > 0) {
+    const when = held
+      ? `your next message runs ${queue.length === 1 ? "it" : "these"} first`
+      : "runs when this turn ends";
+    rows.push(...wrap(style.muted(`    ${when} · /unqueue takes one back`), width, "    "));
+  }
   return rows;
 }
 
@@ -76,8 +72,8 @@ function activityLine(
   const dot = state.blink ? style.text("•") : " ";
   const tokens = tokenCounts(Math.ceil(turn.up), Math.ceil(turn.down));
   const hint = state.steer
-    ? "esc stop · enter adds to turn · tab queues"
-    : "esc stop · enter queues";
+    ? "esc stop · ctrl+x details · enter adds to turn · tab queues"
+    : "esc stop · ctrl+x details · enter queues";
   const left = `${dot} ${style.text(`${phase} (${seconds}s)`)} ${style.muted(tokens)}`;
   // A narrow screen keeps what the turn is doing and drops the keys.
   if (visibleWidth(left) + visibleWidth(hint) + 2 > width) return truncate(left, width);
