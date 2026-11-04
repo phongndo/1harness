@@ -995,7 +995,16 @@ export function groupSummary(items: readonly ToolItem[]): string {
   const counts = new Map<Category, number>();
   // The sentence counts files changed, however many edits it took.
   const files = new Set<string>();
+  // What was refused did not happen, so it is not told as done.
+  const refused = items.filter((item) => item.status === "declined").length;
+  if (refused === items.length) {
+    const [only] = items;
+    return refused === 1 && only?.kind === "command"
+      ? `Refused ${oneLineText(only.command)}`
+      : `Refused ${plural(refused, "call")}`;
+  }
   for (const item of items) {
+    if (item.status === "declined") continue;
     if (item.kind === "file_change") {
       for (const change of item.changes) files.add(change.path);
       counts.set("edit", files.size);
@@ -1011,7 +1020,8 @@ export function groupSummary(items: readonly ToolItem[]): string {
       : `${phrases.slice(0, -1).join(", ")}, and ${phrases.at(-1)}`;
   const failed = items.filter((item) => item.status === "failed").length;
   const capital = sentence.charAt(0).toUpperCase() + sentence.slice(1);
-  return failed > 0 ? `${capital} · ${failed} failed` : capital;
+  const marks = [failed > 0 ? `${failed} failed` : "", refused > 0 ? `${refused} refused` : ""];
+  return [capital, ...marks.filter(Boolean)].join(" · ");
 }
 
 /** A group of one is a single row; more get a sentence over a tree. */
@@ -1257,8 +1267,9 @@ function toolLine(item: ToolItem, settled: boolean, cwd: string, waiting = false
         return style.muted(actions.map((action) => describeAction(action, done, cwd)).join(", "));
       }
       const exited = item.exitCode !== null && item.exitCode !== 0;
-      const word = exited && !running ? "Ran" : verb("Ran", "Running", "");
-      const exit = exited ? style.muted(` · exit ${item.exitCode}`) : "";
+      const declined = item.status === "declined";
+      const word = declined ? "Refused" : exited && !running ? "Ran" : verb("Ran", "Running", "");
+      const exit = exited && !declined ? style.muted(` · exit ${item.exitCode}`) : "";
       // What is running now is the one row of the group to read.
       const live = running && !settled;
       const shown = live ? style.text(oneLineText(item.command)) : highlightCommand(item.command);

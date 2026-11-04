@@ -227,6 +227,157 @@ function asked(view: ThreadView, text: string): void {
   view.transcript.add({ kind: "user", text });
 }
 
+function refusedCall(status: "running" | "failed") {
+  return {
+    kind: "command",
+    id: "rm",
+    command: "rm -rf dist",
+    output: status === "failed" ? "The user doesn't want to proceed\n" : "",
+    exitCode: status === "failed" ? 1 : null,
+    status,
+  } as const;
+}
+
+function runningCall(id: string, command: string) {
+  return { kind: "command", id, command, output: "", exitCode: null, status: "running" } as const;
+}
+
+function statuses(view: ThreadView) {
+  return view.transcript
+    .since(0)
+    .flatMap((block) => (block.kind === "tools" ? block.items : []))
+    .map((item) => item.status);
+}
+
+function approvalDecision(outcome: string) {
+  return { type: "decision", kind: "approval", title: "Run?", answer: "", outcome } as never;
+}
+
+describe("a refused call", () => {
+  const context2 = { width: 80, cwd: "/work", blink: true } as never;
+
+  it("is not told as having failed, whatever the harness then reports", () => {
+    const view = new ThreadView("t1");
+    const live = { busy: true, agent: () => null };
+    view.startTurn(1000);
+    view.item(refusedCall("running"), false, true);
+    view.apply(
+      {
+        type: "decision",
+        kind: "approval",
+        title: "Run?",
+        answer: "No",
+        outcome: "declined",
+      } as never,
+      live,
+    );
+    view.item(refusedCall("failed"), true, true);
+    view.endTurn("interrupted", null, { at: 2000, up: 1, down: 1 });
+    const rows = view.transcript
+      .since(0)
+      .flatMap((block) => plain(renderBlock(block, context2)))
+      .join("\n");
+    assert.match(rows, /Refused rm -rf dist/);
+    assert.doesNotMatch(rows, /failed|Ran 1 command|doesn't want/);
+  });
+
+  it("marks the call whose approval closed, among calls running together", () => {
+    const view = new ThreadView("t1");
+    const live = { busy: true, agent: () => null };
+    view.startTurn(1000);
+    view.item(runningCall("a", "first-cmd"), false, true);
+    view.item(runningCall("b", "second-cmd"), false, true);
+    const request = {
+      kind: "approval",
+      id: "ask",
+      title: "Run?",
+      detail: "",
+      action: { type: "command", command: "first-cmd", cwd: null },
+      options: [],
+      defaultOptionId: null,
+    } as never;
+    view.awaiting([request]);
+    view.awaiting([]);
+    view.apply(approvalDecision("declined"), live);
+    assert.deepEqual(statuses(view), ["declined", "running"]);
+    // With two left to choose from, and nothing closed, it does not guess.
+    view.item(runningCall("c", "third-cmd"), false, true);
+    view.apply(approvalDecision("declined"), live);
+    assert.deepEqual(statuses(view), ["declined", "running", "running"]);
+  });
+
+  it("leaves a call alone that an approval seen open did not match", () => {
+    const view = new ThreadView("t1");
+    view.startTurn(1000);
+    view.item(runningCall("dev", "npm run dev"), false, true);
+    view.awaiting([
+      {
+        kind: "approval",
+        id: "ask",
+        title: "Plan?",
+        detail: "",
+        action: { type: "tool", tool: "ExitPlanMode", server: null },
+        options: [],
+        defaultOptionId: null,
+      } as never,
+    ]);
+    view.awaiting([]);
+    view.apply(approvalDecision("declined"), { busy: true, agent: () => null });
+    assert.deepEqual(statuses(view), ["running"]);
+  });
+
+  it("does not take a call that went on to succeed for refused", () => {
+    const view = new ThreadView("t1");
+    view.startTurn(1000);
+    view.item(runningCall("a", "npm test"), false, true);
+    view.apply(approvalDecision("declined"), { busy: true, agent: () => null });
+    assert.deepEqual(statuses(view), ["declined"]);
+    view.item({ ...runningCall("a", "npm test"), exitCode: 0, status: "completed" }, true, true);
+    assert.deepEqual(statuses(view), ["completed"]);
+  });
+
+  it("forgets an approval that closed with no decision once a new turn starts", () => {
+    const view = new ThreadView("t1");
+    view.startTurn(1000);
+    view.item(runningCall("old", "first-cmd"), false, true);
+    const request = {
+      kind: "approval",
+      id: "ask",
+      title: "Run?",
+      detail: "",
+      action: { type: "command", command: "first-cmd", cwd: null },
+      options: [],
+      defaultOptionId: null,
+    } as never;
+    view.awaiting([request]);
+    view.awaiting([]);
+    view.endTurn("interrupted", null, { at: 2000, up: 0, down: 0 });
+    view.settle();
+    view.startTurn(3000);
+    view.item(runningCall("new", "second-cmd"), false, true);
+    view.apply(approvalDecision("declined"), { busy: true, agent: () => null });
+    assert.notEqual(statuses(view).at(0), "declined");
+  });
+
+  it("does not take an answer that is no refusal for one", () => {
+    const view = new ThreadView("t1");
+    view.startTurn(1000);
+    view.item(refusedCall("running"), false, true);
+    view.apply(
+      {
+        type: "decision",
+        kind: "approval",
+        title: "Plan?",
+        answer: "Keep",
+        outcome: "answered",
+      } as never,
+      { busy: true, agent: () => null },
+    );
+    const [block] = view.transcript.since(0).filter((one) => one.kind === "tools");
+    assert.equal(block?.kind === "tools" && block.items[0]?.status, "running");
+  });
+});
+
 describe("after a failure", () => {
   it("offers the failed message again, and when the failure says that can work", () => {
     const view = new ThreadView("t1");
