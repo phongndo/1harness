@@ -227,6 +227,46 @@ function asked(view: ThreadView, text: string): void {
   view.transcript.add({ kind: "user", text });
 }
 
+function refusedCall(status: "running" | "failed") {
+  return {
+    kind: "command",
+    id: "rm",
+    command: "rm -rf dist",
+    output: status === "failed" ? "The user doesn't want to proceed\n" : "",
+    exitCode: status === "failed" ? 1 : null,
+    status,
+  } as const;
+}
+
+describe("a refused call", () => {
+  const context2 = { width: 80, cwd: "/work", blink: true } as never;
+
+  it("is not told as having failed, whatever the harness then reports", () => {
+    const view = new ThreadView("t1");
+    const live = { busy: true, agent: () => null };
+    view.startTurn(1000);
+    view.item(refusedCall("running"), false, true);
+    view.apply(
+      {
+        type: "decision",
+        kind: "approval",
+        title: "Run?",
+        answer: "No",
+        outcome: "declined",
+      } as never,
+      live,
+    );
+    view.item(refusedCall("failed"), true, true);
+    view.endTurn("interrupted", null, { at: 2000, up: 1, down: 1 });
+    const rows = view.transcript
+      .since(0)
+      .flatMap((block) => plain(renderBlock(block, context2)))
+      .join("\n");
+    assert.match(rows, /Refused rm -rf dist/);
+    assert.doesNotMatch(rows, /failed|Ran 1 command|doesn't want/);
+  });
+});
+
 describe("after a failure", () => {
   it("offers the failed message again, and when the failure says that can work", () => {
     const view = new ThreadView("t1");

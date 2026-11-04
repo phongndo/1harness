@@ -160,6 +160,8 @@ export class ThreadView {
   #reasoning = new Map<string, Reasoning>();
   /** Tool groups with calls an open approval is for. */
   #waiting = new Set<Extract<Block, { kind: "tools" }>>();
+  /** Calls the user refused, which harnesses go on to report as having failed. */
+  #refused = new Set<string>();
   /** Log entries applied, which the terminal's own lines are placed among. */
   #applied = 0;
   /** The terminal's own lines, and how many entries had been applied when each came. */
@@ -204,6 +206,7 @@ export class ThreadView {
         if (entry.error) this.notice("error", sessionEnded(entry.error, this.retry !== null));
         break;
       case "decision":
+        if (entry.kind === "approval" && entry.outcome !== "allowed") this.#refuse();
         this.transcript.add({
           kind: "decision",
           request: entry.kind,
@@ -213,6 +216,23 @@ export class ThreadView {
         });
         break;
     }
+  }
+
+  /** Marks the call just refused, the one the approval waited on or else the latest running. */
+  #refuse(): void {
+    const block = this.transcript.last(
+      (candidate) =>
+        candidate.kind !== "tools" || !candidate.items.some((item) => item.status === "running"),
+    );
+    if (block?.kind !== "tools") return;
+    const waited = block.awaiting ?? [];
+    const running = block.items.filter((item) => item.status === "running");
+    const refused = waited.length > 0 ? waited : running.slice(-1).map((item) => item.id);
+    for (const id of refused) this.#refused.add(id);
+    block.items = block.items.map((item) =>
+      refused.includes(item.id) ? { ...item, status: "declined" } : item,
+    );
+    this.transcript.touch(block);
   }
 
   /**
@@ -515,7 +535,11 @@ export class ThreadView {
   }
 
   /** Shows an item; `message` is the one a `user_message` echoes, when the thread knows it. */
-  item(item: Item, completed: boolean, busy: boolean, message?: Message): void {
+  item(arrived: Item, completed: boolean, busy: boolean, message?: Message): void {
+    const item =
+      this.#refused.has(arrived.id) && "status" in arrived
+        ? ({ ...arrived, status: "declined" } as Item)
+        : arrived;
     if (busy && item.kind !== "notice") this.startTurn();
     const existing = this.blocks.get(item.id);
     // A thought from a step ago would read as what the agent is doing now.
