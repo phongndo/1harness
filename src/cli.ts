@@ -40,6 +40,7 @@ import { MCP_HELP, mcpBridge } from "./client/mcp-bridge.ts";
 import { opCommand } from "./client/ops-cli.ts";
 import { packagesCommand } from "./client/packages-cli.ts";
 import { watch } from "./client/watch.ts";
+import { MODE_DESCRIPTIONS } from "./core/wording.ts";
 import { Store, StoreLocked } from "./store/store.ts";
 import { App, type ServerInfo } from "./tui/app.ts";
 
@@ -62,6 +63,26 @@ Usage: 1harness [options] [prompt]
 Threads run in the 1harness server, which keeps them working after the
 terminal quits; it starts in the background when none is running.
 
+Examples:
+  1harness                          start in this folder
+  1harness "fix the failing test"   start on a task
+  1harness --mode supervised        ask before edits and commands
+  1harness -p "summarize this repo" answer once, with no UI, and exit
+  1harness -r 3f9c2a1b              come back to a thread
+
+What the agent may do without asking (--mode):
+${RUNTIME_MODES.map(
+  (mode) =>
+    `  ${mode.padEnd(13)}${MODE_DESCRIPTIONS[mode]}${mode === DEFAULT_RUNTIME_MODE ? " (default, unless settings.json says otherwise)" : ""}`,
+).join("\n")}
+${
+  DEFAULT_RUNTIME_MODE === "full-access"
+    ? `
+By default agents run commands and change files without asking. Use --mode
+supervised, or "mode" in ~/.config/1harness/settings.json, to be asked first.
+`
+    : ""
+}
 Options:
   -H, --harness <name>   ${drivers()
     .map((driver) => driver.id)
@@ -70,8 +91,7 @@ Options:
                          sets, else the one used last; the first run asks)
   -m, --model <id>       model to use (default: the harness's default)
   -e, --effort <level>   reasoning effort
-      --mode <mode>      supervised, auto-edit, auto, or full-access (default: "mode"
-                         in ~/.config/1harness/settings.json, else ${DEFAULT_RUNTIME_MODE})
+      --mode <mode>      what the agent may do without asking; see above
       --plan             start in plan mode
   -C, --cwd <dir>        working folder (default: current folder; on another
                          machine's server, its home)
