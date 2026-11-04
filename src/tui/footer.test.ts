@@ -82,9 +82,14 @@ describe("the status line", () => {
     assert.match(line(30), /^parser-app · main +supervised$/);
   });
 
+  it("says how the turn ended when that is scrolled out of view", () => {
+    assert.match(line(100, { scroll: 3, outcome: "✓ Done" }), /↓ 3 more lines to ✓ Done · pgdn/);
+    assert.doesNotMatch(line(100, { outcome: "✓ Done" }), /Done/);
+  });
+
   it("keeps the way back from details and a scroll beside the rest", () => {
     const shown = line(100, { scroll: 12, details: true });
-    assert.match(shown, /↓ 12 more lines · pgdn {3}details · ctrl\+x {3}supervised/);
+    assert.match(shown, /↓ 12 more lines · pgdn {3}ctrl\+x hides details {3}supervised/);
     assert.match(shown, /^parser-app · main/);
   });
 });

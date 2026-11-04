@@ -1071,6 +1071,8 @@ function detailedItem(
 ): string[] {
   const { width } = context;
   const body: string[] = [];
+  // Headings for the faint output under them, so the eye can find where each call starts.
+  const heading = item.status === "failed" ? line : style.text(plainText(line));
   const tail = (text: string, limit: number, paint: (line: string) => string) => {
     const lines = outputText(text).replace(/\s+$/, "").split("\n");
     if (lines.length === 1 && lines[0] === "") return;
@@ -1104,7 +1106,7 @@ function detailedItem(
     case "web_search":
       break;
   }
-  const rows = wrap(lead + line, width, hang, true);
+  const rows = wrap(lead + heading, width, hang, true);
   for (const text of body) rows.push(...wrap(`${hang}${text}`, width, hang, true));
   return rows;
 }

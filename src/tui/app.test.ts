@@ -966,10 +966,10 @@ describe("App threads and keys", () => {
     session.terminal.emit("resize");
     await settle(30);
     await session.type("\x18");
-    const whole = await session.sees("details · ctrl+x");
+    const whole = await session.sees("ctrl+x hides details");
     assert.match(whole, /┃ go/);
     assert.match(whole, /Reading the parser/);
-    assert.match(whole, /more lines · pgdn/);
+    assert.match(whole, /more lines to ✓ Done · pgdn/);
     await session.type("\x18");
     await session.sees("Done with go");
     assert.doesNotMatch(session.terminal.text(), /more lines/);
@@ -981,11 +981,11 @@ describe("App threads and keys", () => {
     assert.match(brief, /Ran 1 command/);
     assert.doesNotMatch(brief, /ok 1/);
     await session.type("\x18");
-    const whole = await session.sees("details · ctrl+x");
+    const whole = await session.sees("ctrl+x hides details");
     assert.match(whole, /Ran pnpm test\n+\s+ok 1/);
     await session.type("\x18");
     await session.sees("Ran 1 command");
-    assert.doesNotMatch(session.terminal.text(), /details · ctrl\+x/);
+    assert.doesNotMatch(session.terminal.text(), /ctrl\+x hides details/);
   });
 
   it("clears the composer with ctrl+c, then exits on ctrl+c twice", async () => {

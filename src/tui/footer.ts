@@ -139,6 +139,8 @@ export interface StatusLineState {
   scroll: number;
   /** Whether tool calls show whole. */
   details: boolean;
+  /** How the last turn ended, in a word and its mark, while none runs. */
+  outcome?: string | null;
 }
 
 /**
@@ -171,11 +173,13 @@ export function statusLine(state: StatusLineState, width: number): string {
   for (const note of state.notes ?? [])
     left += `${left === "" ? "" : style.muted(" · ")}${style.text(oneLineText(note))}`;
   // The right edge stays whole as the left is cut, so modes the keys toggle go there too.
-  let scrolled = state.scroll > 0 ? `↓ ${moreLines(state.scroll)} · pgdn` : null;
-  let details = state.details ? "details · ctrl+x" : null;
+  // How the turn ended sits at the bottom, out of view, so say it is there.
+  let end = state.outcome ? ` to ${state.outcome}` : "";
+  let scrolled = state.scroll > 0 ? () => `↓ ${moreLines(state.scroll)}${end} · pgdn` : null;
+  let details = state.details ? "ctrl+x hides details" : null;
   const right = () =>
     [
-      scrolled,
+      scrolled?.(),
       details,
       [closed, mode, harness, model, effort, context, cache, cost].filter(Boolean).join(" · "),
     ]
@@ -187,9 +191,10 @@ export function statusLine(state: StatusLineState, width: number): string {
     () => (cost = null),
     () => (context = null),
     () => (model = null),
-    () => (details = null),
     () => (harness = null),
+    () => (end = ""),
     () => (scrolled = null),
+    () => (details = null),
   ];
   const leftWidth = visibleWidth(left);
   for (const drop of shed) {

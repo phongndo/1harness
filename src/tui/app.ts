@@ -2918,6 +2918,7 @@ export class App {
         server: this.#server.local ? null : this.#server.label,
         scroll: this.#view.scroll,
         details: this.#details,
+        outcome: this.#view.outcome,
         notes: [...this.#statusNotes.values()],
       },
       width,

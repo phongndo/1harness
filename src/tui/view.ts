@@ -142,6 +142,8 @@ export class ThreadView {
    * says doing so can work. Absent where nothing can be sent again as it was.
    */
   retry: { text: string; at: number | null } | null = null;
+  /** How the last turn ended, in a word and its mark, while none runs. */
+  outcome: string | null = null;
   /** Rows the view sits above the bottom of the transcript; 0 follows new output. */
   scroll = 0;
   total = 0;
@@ -323,6 +325,7 @@ export class ThreadView {
 
   startTurn(at: number = Date.now()): void {
     this.retry = null;
+    this.outcome = null;
     if (this.turn) return;
     this.turn = { startedAt: at, up: 0, down: 0, phase: "Thinking", heading: null };
     this.#turnStart = this.transcript.size;
@@ -407,6 +410,7 @@ export class ThreadView {
     const said = this.transcript
       .since(this.#turnStart)
       .some((block) => block.kind === "notice" && block.level === "error");
+    this.outcome = `${status === "failed" ? "✗" : status === "interrupted" ? "■" : "✓"} ${label}`;
     this.transcript.add({
       kind: "summary",
       outcome: status,
