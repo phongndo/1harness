@@ -352,12 +352,17 @@ export class Menu {
           ? pad(item.label, own)
           : pad(truncate(item.label, labelWidth - 3), labelWidth);
       const detail = item.inert ? style.muted(item.detail) : paint(item.detail);
-      rows.push(spread(`  ${paint(label)}${detail}`, style.muted(item.tag), width));
+      // Bold alone is lost on a terminal or a pair of eyes that shows it faintly.
+      const gutter = current ? style.strong("› ") : "  ";
+      rows.push(spread(`${gutter}${paint(label)}${detail}`, style.muted(item.tag), width));
     }
     if (visible.length === 0) rows.push(truncate(style.muted("  No matches"), width));
     const chosen = this.selected();
     if (describing) {
-      const text = chosen && !chosen.inert ? `${chosen.label}  ${chosen.detail}` : "";
+      // An entry its row shows whole would only be said twice.
+      const whole =
+        chosen && !cut(chosen) && visibleWidth(chosen.label) <= labelWidth - 3 && !chosen.inert;
+      const text = chosen && !chosen.inert && !whole ? `${chosen.label}  ${chosen.detail}` : "";
       const lines = text ? wrap(`  ${style.soft(text)}`, width, "  ") : [];
       // A third row's worth is cut, with an ellipsis.
       const second = lines.length > 2 ? truncate(`${lines[1]} ${lines[2]}`, width) : lines[1];
@@ -370,7 +375,11 @@ export class Menu {
       if (this.config.save) keys.push(`ctrl+s ${this.config.save}`);
     }
     keys.push("esc close");
-    rows.push(rule(width), hints(keys, width));
+    // A list that says nothing of what lies past its last row reads as all there is.
+    // Group headings are rows but nothing to count, as the title's count knows.
+    const before = visible.slice(0, this.#index + 1).filter(({ entry: item }) => !item.inert);
+    const position = visible.length > shown ? `${before.length} / ${count}` : "";
+    rows.push(rule(width, position), hints(keys, width));
     return rows;
   }
 

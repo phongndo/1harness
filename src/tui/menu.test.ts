@@ -131,6 +131,41 @@ describe("Menu layout", () => {
     assert.deepEqual(moved.slice(6, 8), ["  short", `  ${"x".repeat(117)}…`]);
   });
 
+  it("marks the selected row, and says where it is in a list too long to show", () => {
+    const entries = Array.from({ length: 20 }, (_, index) => entry(`/command${index}`));
+    const list = new Menu({ title: "Commands", entries });
+    list.move(2);
+    const rows = list.render(80, 5).map((row) => stripVTControlCharacters(row));
+    assert.ok(rows.some((row) => row.startsWith("› /command2")));
+    assert.ok(rows.some((row) => row.endsWith(" 3 / 20 ─")));
+  });
+
+  it("counts as the title does, leaving out rows that are only headings", () => {
+    const entries = [
+      entry("Group", "", { inert: true }),
+      ...Array.from({ length: 20 }, (_, index) => entry(`/command${index}`)),
+    ];
+    const list = new Menu({ title: "Commands", entries });
+    const rows = list.render(80, 5).map((row) => stripVTControlCharacters(row));
+    assert.ok(rows.some((row) => row.endsWith(" 1 / 20 ─")));
+  });
+
+  it("does not count a list it shows whole", () => {
+    const list = new Menu({ title: "Commands", entries: [entry("/one"), entry("/two")] });
+    const rows = list.render(80, 5).map((row) => stripVTControlCharacters(row));
+    assert.ok(!rows.some((row) => /\d \/ \d/.test(row)));
+  });
+
+  it("does not say twice an entry its row shows whole", () => {
+    const list = new Menu({
+      title: "Commands",
+      entries: [entry("/one", "short"), entry("/two", "x".repeat(120))],
+      describe: true,
+    });
+    const rows = list.render(80, 8).map((row) => stripVTControlCharacters(row));
+    assert.equal(rows.filter((row) => row.includes("short")).length, 1);
+  });
+
   it("fits its rows, the whole-entry rows included, in the rows allowed", () => {
     const entries = Array.from({ length: 20 }, (_, index) =>
       entry(`/command${index}`, "x".repeat(90)),

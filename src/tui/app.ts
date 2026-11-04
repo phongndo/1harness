@@ -2580,6 +2580,7 @@ export class App {
           harnesses.findIndex((harness) => harness.state === "ready"),
         ),
         filter: true,
+        count: false,
         ...(this.#setDefault ? { save: "use and make default", onSave: () => (saved = true) } : {}),
       },
     );
