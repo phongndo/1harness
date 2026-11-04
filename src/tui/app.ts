@@ -2537,7 +2537,7 @@ export class App {
       entries.push(entry(key, `/${name}`, { group: "Keys", inert: true }));
     this.#panel = {
       kind: "menu",
-      menu: new Menu({ title: "Commands", entries, tabs: true, action: "insert", describe: true }),
+      menu: new Menu({ title: "Help", entries, tabs: true, action: "insert", describe: true }),
       onDone: (index) => {
         if (index === null) return;
         // Into the composer, to add to or send; a command that does something now waits for enter.
@@ -2560,28 +2560,34 @@ export class App {
   async #chooseHarness(): Promise<HarnessId | null> {
     const line = this.#view.say("info", "Checking which harnesses are installed and signed in…");
     this.#renderNow();
-    let harnesses: HarnessInfo[];
+    let listed: HarnessInfo[];
+    let tally = "";
     try {
-      harnesses = await this.#client.call("harnesses.list", {});
-      const ready = harnesses.filter((harness) => harness.state === "ready").length;
-      line.text = `${ready} of ${harnesses.length} harnesses are ready.`;
+      listed = await this.#client.call("harnesses.list", {});
+      const ready = listed.filter((harness) => harness.state === "ready").length;
+      tally = ` · ${ready} of ${listed.length} ready`;
+      this.#view.transcript.remove(line);
     } catch (error) {
-      harnesses = this.#client.harnesses;
+      listed = this.#client.harnesses;
       line.level = "warning";
       line.text = `Could not check the harnesses: ${errorMessage(error)}`;
+      this.#view.transcript.touch(line);
     }
-    this.#view.transcript.touch(line);
+    // What can start now comes first, ahead of what would need signing in or installing.
+    const order = ["ready", "unchecked", "signed-out"];
+    const rank = (harness: HarnessInfo) => {
+      const at = order.indexOf(harness.state);
+      return at === -1 ? order.length : at;
+    };
+    const harnesses = listed.toSorted((a, b) => rank(a) - rank(b));
     let saved = false;
     const index = await this.#pick(
-      "Which harness should 1harness start?",
+      `Which harness should 1harness start?${tally}`,
       harnesses.map((harness) => pickEntry(harnessEntry(harness, null, this.#defaultHarness))),
       {
-        initial: Math.max(
-          0,
-          harnesses.findIndex((harness) => harness.state === "ready"),
-        ),
         filter: true,
         count: false,
+        leave: "quit",
         ...(this.#setDefault ? { save: "use and make default", onSave: () => (saved = true) } : {}),
       },
     );

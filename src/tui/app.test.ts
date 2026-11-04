@@ -258,7 +258,7 @@ describe("extensions on screen", () => {
     await session.sees(/scripted/);
     await settle(50);
     await session.type("/help\r");
-    await session.sees("Commands");
+    await session.sees("Help");
     await session.type("\x1by");
     await settle(30);
     assert.doesNotMatch(session.terminal.text(), /ran ping/);

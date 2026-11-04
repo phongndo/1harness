@@ -31,6 +31,12 @@ export interface MenuConfig {
   describe: boolean;
   /** Counts the entries after the title; a question with a few answers leaves it out. */
   count: boolean;
+  /** Says that typing narrows it, where what is typed goes elsewhere, as to the composer. */
+  narrows: boolean;
+  /** What esc does, for the hint line. */
+  leave: string;
+  /** Tags name the group a row is in, so one says it for the rows that follow it. */
+  headings: boolean;
 }
 
 export type MenuResult = { kind: "choose"; index: number; save?: true } | { kind: "close" } | null;
@@ -142,6 +148,9 @@ export class Menu {
       bare: false,
       describe: false,
       count: true,
+      narrows: false,
+      leave: "close",
+      headings: false,
       ...config,
     };
     this.#entries = this.config.entries;
@@ -312,7 +321,10 @@ export class Menu {
         ? floor
         : Math.max(floor, Math.min(spare, Math.floor(width * LABEL_SHARE)));
     // Sized for most labels; a rare long one is cut, and shows whole when selected.
-    const labelWidth = Math.min(limit, most(widths((item) => item.label))) + 3;
+    // A short label past the rest would otherwise knock its row's detail out of line.
+    const longest = Math.max(0, ...widths((item) => item.label));
+    const sized = longest <= LABEL_LIMIT ? longest : most(widths((item) => item.label));
+    const labelWidth = Math.min(limit, sized) + 3;
     const cut = (item: MenuEntry) =>
       (visibleWidth(item.label) > labelWidth - 3 &&
         visibleWidth(item.label) + 3 >
@@ -335,12 +347,7 @@ export class Menu {
     this.#drawn = { row: rows.length, start, count: Math.min(shown, visible.length - start) };
     for (const [offset, { entry: item }] of visible.slice(start, start + shown).entries()) {
       const current = start + offset === this.#index && !item.inert;
-      const paint = (text: string) =>
-        current
-          ? style.bold(style.strong(text))
-          : item.inert
-            ? style.text(text)
-            : style.muted(text);
+      const paint = (text: string) => (current ? style.bold(style.strong(text)) : style.text(text));
       // A label longer than its column still shows whole where its row has room.
       const room =
         width - 2 - visibleWidth(item.detail) - (item.tag ? visibleWidth(item.tag) + 2 : 0);
@@ -351,10 +358,13 @@ export class Menu {
         own > labelWidth && own <= room && !describing
           ? pad(item.label, own)
           : pad(truncate(item.label, labelWidth - 3), labelWidth);
-      const detail = item.inert ? style.muted(item.detail) : paint(item.detail);
+      const detail = current ? paint(item.detail) : style.muted(item.detail);
+      // Under one heading, the rows after the first would only say it again.
+      const previous = visible[start + offset - 1]?.entry;
+      const tag = this.config.headings && previous?.tag === item.tag ? "" : item.tag;
       // Bold alone is lost on a terminal or a pair of eyes that shows it faintly.
       const gutter = current ? style.strong("› ") : "  ";
-      rows.push(spread(`${gutter}${paint(label)}${detail}`, style.muted(item.tag), width));
+      rows.push(spread(`${gutter}${paint(label)}${detail}`, style.muted(tag), width));
     }
     if (visible.length === 0) rows.push(truncate(style.muted("  No matches"), width));
     const chosen = this.selected();
@@ -369,12 +379,13 @@ export class Menu {
       rows.push("", lines[0] ?? "", second ?? "");
     }
     const keys = ["↑↓ move"];
+    if (this.config.filter || this.config.narrows) keys.push("type to filter");
     if (this.#tabs.length > 0) keys.push("tab category");
     if (visible.some(({ entry: item }) => !item.inert)) {
       keys.push(`enter ${this.config.action}`);
       if (this.config.save) keys.push(`ctrl+s ${this.config.save}`);
     }
-    keys.push("esc close");
+    keys.push(`esc ${this.config.leave}`);
     // A list that says nothing of what lies past its last row reads as all there is.
     // Group headings are rows but nothing to count, as the title's count knows.
     const before = visible.slice(0, this.#index + 1).filter(({ entry: item }) => !item.inert);

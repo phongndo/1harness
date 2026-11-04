@@ -306,8 +306,7 @@ const unqueue: CommandDefinition = {
 
 const reload: CommandDefinition = {
   name: "reload",
-  description:
-    "restart the harness's session, so it reads new skills, plugins, MCP servers, and config",
+  description: "restart the session, so it reads new skills, plugins, and MCP servers",
   group: "Threads",
   available: (context) => context.thread !== null && !context.thread.closed,
   async run(context) {

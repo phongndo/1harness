@@ -28,6 +28,12 @@ function press(target: Menu, ...specs: string[]): string | undefined {
   return target.selected()?.label;
 }
 
+function hintLine(config: { filter?: boolean; narrows?: boolean; leave?: string }): string {
+  return stripVTControlCharacters(
+    new Menu({ title: "List", entries: [entry("/one")], ...config }).render(80, 5).at(-1) ?? "",
+  );
+}
+
 describe("Menu keys", () => {
   it("takes vim keys when it has no filter", () => {
     const list = menu(false);
@@ -148,6 +154,28 @@ describe("Menu layout", () => {
     const list = new Menu({ title: "Commands", entries });
     const rows = list.render(80, 5).map((row) => stripVTControlCharacters(row));
     assert.ok(rows.some((row) => row.endsWith(" 1 / 20 ─")));
+  });
+
+  it("says a heading once, for the first of the rows under it", () => {
+    const list = new Menu({
+      title: "Commands",
+      headings: true,
+      entries: [
+        entry("/one", "", { tag: "Threads" }),
+        entry("/two", "", { tag: "Threads" }),
+        entry("/three", "", { tag: "Model" }),
+      ],
+    });
+    const rows = list.render(60, 5).map((row) => stripVTControlCharacters(row));
+    assert.match(rows.find((row) => row.includes("/one")) ?? "", /Threads$/);
+    assert.doesNotMatch(rows.find((row) => row.includes("/two")) ?? "", /Threads/);
+    assert.match(rows.find((row) => row.includes("/three")) ?? "", /Model$/);
+  });
+
+  it("says typing narrows it, and what esc does", () => {
+    assert.doesNotMatch(hintLine({}), /type to filter/);
+    assert.match(hintLine({ narrows: true }), /type to filter/);
+    assert.match(hintLine({ filter: true, leave: "quit" }), /type to filter.*esc quit$/);
   });
 
   it("does not count a list it shows whole", () => {
