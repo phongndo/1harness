@@ -165,6 +165,17 @@ export interface ExtensionAPI {
    */
   runOperation(name: string, input?: Record<string, unknown>): Promise<unknown>;
   /**
+   * Starts a task as `delegate_task` does for the agent in `thread`, optionally
+   * in a folder the extension chose, such as one it prepared. Only an extension
+   * can choose: a sandboxed agent could otherwise start a child outside its
+   * sandbox. Pass the `callId` of the tool call this serves to tie the task to it.
+   */
+  delegate(
+    thread: Thread,
+    input: Record<string, unknown>,
+    options?: { cwd?: string; callId?: string },
+  ): Promise<unknown>;
+  /**
    * Chooses the line tool calls show as, returning it, or undefined to leave a
    * call to the next renderer. It runs on the server, on each change to a call,
    * so it should be quick.

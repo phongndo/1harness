@@ -1,7 +1,5 @@
-import { join } from "node:path";
 import { RUNTIME_MODES, isRuntimeMode, modeRank } from "../core/events.ts";
-import { stateDir } from "../core/paths.ts";
-import { newThreadId, shortThreadId } from "../core/thread-id.ts";
+import type { Thread } from "../core/thread.ts";
 import { safeCut } from "../core/wording.ts";
 import {
   checkHarness,
@@ -30,10 +28,8 @@ import {
 } from "./manager.ts";
 import { Scope, type ThreadSnapshot } from "./scope.ts";
 import { sendText } from "./send.ts";
-import { addWorktree, gitRepository, releaseWorktree, type Worktree } from "./worktree.ts";
 
 const ROLES = ["implementation", "research", "review", "design", "test", "general"];
-const ISOLATIONS = ["shared", "worktree"];
 /** How many delegations deep work may go below a user's thread. */
 export const MAX_DEPTH = 3;
 /** How many threads may work at once, so delegation cannot run away. */
@@ -102,11 +98,6 @@ function countInput(
   return value;
 }
 
-/** What a parent needs of a worktree to review and merge it, and nothing without one. */
-function worktreeView(worktree: Worktree | null | undefined) {
-  return worktree ? { worktree: { path: worktree.path, branch: worktree.branch } } : {};
-}
-
 /** A thread in brief, with what it waits on the user for. */
 export function threadView(thread: ThreadSnapshot) {
   const info = thread.thread.info;
@@ -118,11 +109,11 @@ export function threadView(thread: ThreadSnapshot) {
     harness: thread.harness,
     status: thread.status,
     parentId: thread.parentId,
+    cwd: info.cwd,
     runtimeMode: info.runtimeMode,
     plan: info.interactionMode === "plan",
     runs: thread.runs.length,
     lastResult: last?.result ? clip(last.result.slice(0, safeCut(last.result, 400))) : null,
-    ...worktreeView(thread.worktree),
     ...(requests.length > 0
       ? {
           waitingOn: requests.map((request) =>
@@ -216,7 +207,6 @@ export class Orchestrator {
   #manager: ThreadManager;
   #scope: Scope;
   #env: NodeJS.ProcessEnv;
-  #stateDir: string;
   #tasks = new Map<string, Task>();
   /** Tasks by caller and request ID, set before the task starts so retries find it. */
   #byRequest = new Map<string, Promise<Task>>();
@@ -226,20 +216,17 @@ export class Orchestrator {
   checkHarness: (driver: DriverDefinition) => Promise<HarnessInfo> = (driver) =>
     checkHarness(driver, this.#env);
   /** A finished task's thread once it has left memory for the store. */
-  storedTask: (
-    id: string,
-  ) => Pick<ManagedThread, "harness" | "title" | "runs" | "error" | "worktree"> | null = () => null;
+  storedTask: (id: string) => Pick<ManagedThread, "harness" | "title" | "runs" | "error"> | null =
+    () => null;
 
   constructor(
     manager: ThreadManager,
     env: NodeJS.ProcessEnv = process.env,
     scope: Scope = new Scope(manager),
-    state: string = stateDir(env),
   ) {
     this.#manager = manager;
     this.#scope = scope;
     this.#env = env;
-    this.#stateDir = state;
     manager.subscribe((event) => {
       if (event.type === "thread.updated") this.#deliver(event.thread);
     });
@@ -262,7 +249,7 @@ export class Orchestrator {
         name: "delegate_task",
         direct: true,
         description:
-          "Hands a task to another agent in a new thread, on any available harness (see orchestrator_capabilities). The agent sees only the task text, not your conversation, so include the context it needs. By default this waits for the result; with wait set to false it returns a taskId at once, and the result is sent to you as a message when the task finishes. A task's ID is its thread's ID, which the thread tools take too. A worktree is a new branch from your HEAD, without your uncommitted changes; the result names its path and branch, to review and merge.",
+          "Hands a task to another agent in a new thread, on any available harness (see orchestrator_capabilities). The agent sees only the task text, not your conversation, so include the context it needs. By default this waits for the result; with wait set to false it returns a taskId at once, and the result is sent to you as a message when the task finishes. A task's ID is its thread's ID, which the thread tools take too.",
         inputSchema: {
           type: "object",
           properties: {
@@ -285,12 +272,6 @@ export class Orchestrator {
             },
             title: { type: "string", description: "A short name for the task." },
             role: { type: "string", enum: ROLES },
-            isolation: {
-              type: "string",
-              enum: ISOLATIONS,
-              description:
-                "shared, the default, is your folder. worktree is a git worktree and branch of its own, without uncommitted changes.",
-            },
             wait: {
               type: "boolean",
               description: "Wait for the result (the default), or return at once.",
@@ -581,6 +562,20 @@ export class Orchestrator {
   }
 
   /**
+   * Starts a task as `delegate_task` does for the agent in `thread`, in a folder
+   * an extension chose. Agents cannot choose one: a sandboxed agent could start
+   * a child outside its sandbox.
+   */
+  delegateFrom(
+    thread: Thread,
+    input: Record<string, unknown>,
+    options: { cwd?: string; callId?: string } = {},
+  ) {
+    const caller = this.#scope.agent({ kind: "agent", thread, callId: null });
+    return this.#delegate(caller, input, options.callId ?? null, options.cwd);
+  }
+
+  /**
    * Stops a thread and every thread under it, as the user does with esc: each
    * running turn is interrupted and the agents' queued messages are dropped.
    * Reports to the stopped threads are not delivered, and the ones already
@@ -652,14 +647,19 @@ export class Orchestrator {
   }
 
   /** `callId` is the caller's tool call, where its harness said which. */
-  async #delegate(caller: ManagedThread, input: Record<string, unknown>, callId: string | null) {
+  async #delegate(
+    caller: ManagedThread,
+    input: Record<string, unknown>,
+    callId: string | null,
+    cwd?: string,
+  ) {
     const requestId = text(input, "requestId") ?? null;
     const wait = input["wait"] !== false;
     const timeout = seconds(input["timeoutSeconds"], DEFAULT_WAIT_SECONDS);
     const key = requestId ? `${caller.id}\0${requestId}` : null;
     let starting = key ? this.#byRequest.get(key) : undefined;
     if (!starting) {
-      starting = this.#start(caller, input, requestId, callId);
+      starting = this.#start(caller, input, requestId, callId, cwd);
       if (key) {
         this.#byRequest.set(key, starting);
         // A task that failed to start can be tried again with the same ID.
@@ -677,6 +677,7 @@ export class Orchestrator {
     input: Record<string, unknown>,
     requestId: string | null,
     callId: string | null,
+    cwd?: string,
   ): Promise<Task> {
     const brief = text(input, "task");
     if (!brief) throw new OperationError("invalid_request", "task is empty");
@@ -712,7 +713,6 @@ export class Orchestrator {
     const role = text(input, "role");
     if (role && !ROLES.includes(role))
       throw new OperationError("invalid_request", `no role ${role}`);
-    const repo = await this.#worktreeRepository(info.cwd, text(input, "isolation"));
     const sameHarness = harness === caller.harness;
 
     const counts = this.#counts(caller);
@@ -731,15 +731,11 @@ export class Orchestrator {
     this.#reserved.set(root, (this.#reserved.get(root) ?? 0) + 1);
     try {
       let child: ManagedThread;
-      const id = newThreadId();
-      const worktree = repo ? await this.#addWorktree(info.cwd, repo, id) : null;
       try {
         child = await this.#manager.create({
-          id,
           harness,
-          worktree,
           settings: {
-            cwd: worktree?.path ?? info.cwd,
+            cwd: cwd ?? info.cwd,
             model: text(input, "model") ?? (sameHarness ? info.model : null),
             effort: text(input, "effort") ?? (sameHarness ? info.effort : null),
             runtimeMode: mode,
@@ -752,8 +748,6 @@ export class Orchestrator {
           origin: "delegated",
         });
       } catch (error) {
-        // Nothing ran there, so nothing of the refused task need stay; only what git refuses does.
-        if (worktree && (await releaseWorktree(worktree)) === null) this.#manager.dropWorktree(id);
         // A harness that cannot run the task as narrowly as asked is refused, with why.
         if (error instanceof ModeError) throw new OperationError(error.code, error.message);
         throw error;
@@ -769,7 +763,7 @@ export class Orchestrator {
       };
       this.#tasks.set(task.id, task);
       child.thread.send(
-        { text: this.#brief(brief, role, worktree) },
+        { text: this.#brief(brief, role) },
         { type: "task", from: caller.id, task: brief },
       );
       return task;
@@ -780,40 +774,11 @@ export class Orchestrator {
     }
   }
 
-  /** The repository a task gets a worktree of, or null for one that works in the caller's folder. */
-  async #worktreeRepository(cwd: string, isolation: string | undefined): Promise<string | null> {
-    if (isolation && !ISOLATIONS.includes(isolation))
-      throw new OperationError("invalid_request", `no isolation ${isolation}`);
-    if (isolation !== "worktree") return null;
-    const repo = await gitRepository(cwd);
-    if (!repo)
-      throw new OperationError(
-        "invalid_request",
-        `${cwd} is not in a git repository, so a task there cannot have a worktree`,
-      );
-    return repo;
-  }
-
-  async #addWorktree(cwd: string, repo: string, id: string): Promise<Worktree> {
-    const path = join(this.#stateDir, "worktrees", id);
-    try {
-      return await addWorktree(cwd, repo, path, `1h/${shortThreadId(id)}`);
-    } catch (error) {
-      throw new OperationError(
-        "worktree_failed",
-        `could not make a worktree: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-  }
-
-  #brief(task: string, role: string | undefined, worktree: Worktree | null): string {
+  #brief(task: string, role: string | undefined): string {
     const lead = role
       ? `You are doing ${role} work for another agent.`
       : "You are doing a task for another agent.";
-    const where = worktree
-      ? ` You work in a git worktree of your own, on branch ${worktree.branch}, which that agent reviews and merges. Commit your work there. If a sandbox stops git from committing, do not work around it: leave your changes in place and say so.`
-      : "";
-    return `${lead} When you finish, reply with your result: your final message goes back to that agent, which sees nothing else of this conversation.${where}\n\n${task}`;
+    return `${lead} When you finish, reply with your result: your final message goes back to that agent, which sees nothing else of this conversation.\n\n${task}`;
   }
 
   /** The task's run has ended, or its thread has gone. */
@@ -864,7 +829,6 @@ export class Orchestrator {
       harness: child?.harness ?? null,
       title: child?.title ?? null,
       status,
-      ...worktreeView(child?.worktree),
       result: clip(run?.result ?? null),
       error: run
         ? run.error
@@ -932,10 +896,7 @@ export class Orchestrator {
     // A parent closing with its children has no use for their outcomes.
     const parent = this.#manager.get(task.parentId);
     if (!parent || this.#manager.closing(parent.id)) return;
-    const where = child.worktree
-      ? `\n\nIts worktree is ${child.worktree.path}, on branch ${child.worktree.branch}.`
-      : "";
-    const message = `[1harness] Task ${task.id} (${child.harness}: ${child.title}) ${said}:\n\n${outcome}${where}`;
+    const message = `[1harness] Task ${task.id} (${child.harness}: ${child.title}) ${said}:\n\n${outcome}`;
     const origin = { type: "report", from: child.id, status, result: outcome } as const;
     if (parent.thread.busy && parent.thread.capabilities.steer) {
       // Steering reports its own failures to the thread; this only keeps one from crashing the host.

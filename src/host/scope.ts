@@ -6,7 +6,7 @@ import type { ManagedThread, ThreadManager } from "./manager.ts";
 /** A thread as a read sees it: one in memory, or a closed one only the store keeps. */
 export type ThreadSnapshot = Pick<
   ManagedThread,
-  "id" | "title" | "harness" | "status" | "parentId" | "runs" | "worktree"
+  "id" | "title" | "harness" | "status" | "parentId" | "runs"
 > & { readonly thread: Pick<Thread, "info" | "requests"> };
 
 /**

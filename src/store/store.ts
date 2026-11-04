@@ -11,7 +11,6 @@ import type {
 } from "../core/events.ts";
 import type { Message, MessageOrigin } from "../core/thread.ts";
 import type { RunRecord, Visit } from "../host/manager.ts";
-import type { Worktree } from "../host/worktree.ts";
 import type { LogEntry, LoggedEntry } from "../protocol.ts";
 
 /** A thread as the store keeps it. */
@@ -26,8 +25,6 @@ export interface ThreadRow {
   /** The thread it was forked from, and the handoff of that thread's turns it started with. */
   forkedFrom: string | null;
   forkContext: string | null;
-  /** The git worktree 1harness made for it, in its `cwd`. */
-  worktree: Worktree | null;
   /** `open` has a session, `parked` had one and will again, `closed` was ended. */
   state: "open" | "parked" | "closed";
   info: SessionInfo;
@@ -99,7 +96,6 @@ CREATE TABLE IF NOT EXISTS threads (
   forked_from TEXT,
   fork_context TEXT,
   usage TEXT,
-  worktree TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -246,7 +242,6 @@ export class Store {
     if (!columns.has("usage")) this.#db.exec("ALTER TABLE threads ADD COLUMN usage TEXT");
     if (!columns.has("named"))
       this.#db.exec("ALTER TABLE threads ADD COLUMN named INTEGER NOT NULL DEFAULT 0");
-    if (!columns.has("worktree")) this.#db.exec("ALTER TABLE threads ADD COLUMN worktree TEXT");
     const visitColumns = new Set(
       this.#all("PRAGMA table_info(visits)").map((row) => String(row["name"])),
     );
@@ -331,16 +326,15 @@ export class Store {
     this.#run(
       `INSERT INTO threads (id, title, cwd, harness, parent_id, parent_call_id, origin, state, info,
          capabilities, methods, handoff, seen_without_handoff, generation, error, pinned, archived,
-         seen_runs, native, forked_from, fork_context, usage, named, worktree, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         seen_runs, native, forked_from, fork_context, usage, named, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET title = excluded.title, cwd = excluded.cwd,
          harness = excluded.harness, state = excluded.state, info = excluded.info,
          capabilities = excluded.capabilities, methods = excluded.methods,
          handoff = excluded.handoff, seen_without_handoff = excluded.seen_without_handoff,
          generation = excluded.generation, error = excluded.error, pinned = excluded.pinned,
          archived = excluded.archived, seen_runs = excluded.seen_runs, native = excluded.native,
-         usage = excluded.usage, named = excluded.named, worktree = excluded.worktree,
-         updated_at = excluded.updated_at`,
+         usage = excluded.usage, named = excluded.named, updated_at = excluded.updated_at`,
       row.id,
       row.title,
       row.cwd,
@@ -364,7 +358,6 @@ export class Store {
       row.forkContext,
       row.usage === null ? null : JSON.stringify(row.usage),
       row.named ? 1 : 0,
-      row.worktree === null ? null : JSON.stringify(row.worktree),
       row.createdAt,
       row.updatedAt,
     );
@@ -381,7 +374,6 @@ export class Store {
       origin: row["origin"] === "delegated" ? "delegated" : "user",
       forkedFrom: row["forked_from"] === null ? null : String(row["forked_from"]),
       forkContext: row["fork_context"] === null ? null : String(row["fork_context"]),
-      worktree: typeof row["worktree"] === "string" ? json(row["worktree"]) : null,
       state: String(row["state"]) as ThreadRow["state"],
       info: json(row["info"]),
       capabilities: json(row["capabilities"]),
@@ -504,11 +496,6 @@ export class Store {
       match,
       limit,
     ).map((row) => ({ threadId: String(row["thread_id"]), snippet: String(row["snippet"]) }));
-  }
-
-  /** The threads that work in a folder, closed ones included. */
-  threadsIn(cwd: string): string[] {
-    return this.#all("SELECT id FROM threads WHERE cwd = ?", cwd).map((row) => String(row["id"]));
   }
 
   /** Deletes a thread and everything kept for it. */
