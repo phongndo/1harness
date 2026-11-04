@@ -55,6 +55,30 @@ describe("harnessesText", () => {
     );
   });
 
+  it("says nothing can start until one is installed", () => {
+    const missing = harnesses.filter((harness) => harness.state === "missing");
+    assert.match(
+      harnessesText(missing, { chosen: null, last: null }),
+      /Nothing can start yet: install one of these, then run 1harness\./,
+    );
+  });
+
+  it("says which variable finds a missing harness installed off PATH", () => {
+    const missing = {
+      id: "codex",
+      label: "Codex",
+      state: "missing",
+      detail: "install with `npm i -g @openai/codex`",
+      unavailable: "Codex is not installed",
+      path: null,
+      override: "ONEHARNESS_CODEX_PATH",
+    } as const;
+    assert.match(
+      harnessesText([missing], { chosen: null, last: null }),
+      /Installed off PATH\? Set ONEHARNESS_CODEX_PATH\./,
+    );
+  });
+
   it("says it starts the harness used last without a default, and when it will ask", () => {
     assert.match(
       harnessesText(harnesses, { chosen: null, last: "claude" }),

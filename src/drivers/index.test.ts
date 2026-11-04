@@ -113,6 +113,7 @@ describe("each harness's sign-in, asked of its own CLI", () => {
     assert.equal(info.state, "missing");
     assert.equal(info.path, null);
     assert.match(info.unavailable ?? "", /Codex is not installed: no `codex` on PATH/);
+    assert.equal(info.detail, "install with `npm i -g @openai/codex`");
   });
 });
 
