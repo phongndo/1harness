@@ -28,7 +28,8 @@ function queueRows(queue: readonly Message[], held: boolean, width: number): str
     const when = held
       ? `your next message runs ${queue.length === 1 ? "it" : "these"} first`
       : "runs when this turn ends";
-    rows.push(...wrap(style.muted(`    ${when} · /unqueue takes one back`), width, "    "));
+    // When it goes and how to take it back are why this row is here, so not faint.
+    rows.push(...wrap(style.text(`    ${when} · /unqueue takes one back`), width, "    "));
   }
   return rows;
 }

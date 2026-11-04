@@ -1252,7 +1252,10 @@ function toolLine(item: ToolItem, settled: boolean, cwd: string, waiting = false
       const exited = item.exitCode !== null && item.exitCode !== 0;
       const word = exited && !running ? "Ran" : verb("Ran", "Running", "");
       const exit = exited ? style.muted(` · exit ${item.exitCode}`) : "";
-      return `${style.muted(`${word} `)}${highlightCommand(item.command)}${exit}`;
+      // What is running now is the one row of the group to read.
+      const live = running && !settled;
+      const shown = live ? style.text(oneLineText(item.command)) : highlightCommand(item.command);
+      return `${style.muted(`${word} `)}${shown}${exit}`;
     }
     case "file_change": {
       const [change] = item.changes;
