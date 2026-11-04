@@ -2,8 +2,9 @@
 // how to take its tools back out. The harness's own prompt and tools are its
 // business and are not counted.
 
-import { saveSettings, toolDisabled, type Settings } from "../core/settings.ts";
+import { saveSettings, type Settings } from "../core/settings.ts";
 import type { ToolDefinition } from "../extensions/api.ts";
+import type { Tools, ToolServer } from "../extensions/tool-server.ts";
 import { required, text } from "../operations/input.ts";
 import { OperationError, type Operation } from "../operations/operation.ts";
 import type { ThreadManager } from "./manager.ts";
@@ -24,6 +25,8 @@ export interface ContextAccess {
   readonly scope: Scope;
   /** The tools every session gets. */
   shared(): ReadonlyMap<string, { tool: ToolDefinition }>;
+  /** What a session sees by name, and what it reaches through the gateway. */
+  exposure(own: Tools | undefined): ReturnType<ToolServer["exposure"]>;
   settings(): Settings;
   configDir(): string;
 }
@@ -34,7 +37,7 @@ export function contextOperations(access: ContextAccess): Operation[] {
     {
       name: "thread_context",
       description:
-        "Says what 1harness itself adds to a thread's context: the tools it offers, the MCP servers it adds, and any handoff waiting to go with the next message. Tokens are estimates; the harness's own prompt is not counted.",
+        "Says what 1harness itself adds to a thread's context: the tools it offers by name, those agents find with tool_search, the MCP servers it adds, and any handoff waiting to go with the next message. Tokens are estimates; the harness's own prompt is not counted.",
       inputSchema: {
         type: "object",
         properties: { threadId: { type: "string", description: "A thread's ID." } },
@@ -44,25 +47,29 @@ export function contextOperations(access: ContextAccess): Operation[] {
       callers: ["user", "external"],
       run: (input, { caller }) => {
         const { id, harness } = access.scope.readable(caller, required(input, "threadId"));
-        const settings = access.settings();
         const own = access.manager.extensionsOf(id)?.tools;
+        const { advertised, onDemand } = access.exposure(own ? () => own : undefined);
+        const named = [...advertised.keys(), ...onDemand.keys()];
         const listed = [
-          ...[...access.shared()].map(([name, { tool }]) => ({
-            name,
-            source: "1harness",
-            tool,
-          })),
+          ...[...access.shared()].map(([name, { tool }]) => ({ name, source: "1harness", tool })),
           // A folder's tool of the same name loses to 1harness's own, as sessions see them.
           ...[...(own ?? [])]
             .filter(([name]) => !access.shared().has(name))
             .map(([name, { extension, tool }]) => ({ name, source: extension, tool })),
+          // The gateway's own, which are only ever advertised.
+          ...[...advertised]
+            .filter(([name]) => !access.shared().has(name) && !own?.has(name))
+            .map(([name, { tool }]) => ({ name, source: "1harness", tool })),
         ];
         const tools = listed.map(({ name, source, tool }) => ({
           name,
           source,
           tokens: toolTokens(tool),
-          offered: !toolDisabled(settings, name),
+          offered: named.includes(name),
+          onDemand: onDemand.has(name),
         }));
+        const sum = (keep: (tool: (typeof tools)[number]) => boolean) =>
+          tools.reduce((total, tool) => total + (keep(tool) ? tool.tokens : 0), 0);
         const live = access.manager.get(id);
         const waiting = live?.thread.handoff ?? null;
         const forked = live?.forkContext ?? null;
@@ -70,7 +77,9 @@ export function contextOperations(access: ContextAccess): Operation[] {
           threadId: id,
           harness,
           tools,
-          toolTokens: tools.reduce((sum, tool) => sum + (tool.offered ? tool.tokens : 0), 0),
+          // What every turn pays for, and what stays out of context until a search brings it in.
+          toolTokens: sum((tool) => tool.offered && !tool.onDemand),
+          onDemandTokens: sum((tool) => tool.onDemand),
           servers: access.manager.serversOf(id),
           handoffTokens: waiting ? tokens(waiting) : 0,
           forkTokens: forked ? tokens(forked) : 0,

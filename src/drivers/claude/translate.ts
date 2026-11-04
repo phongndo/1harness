@@ -25,7 +25,7 @@ import { unifiedDiff } from "../../core/diff.ts";
 import { truncate } from "../../core/wording.ts";
 import { noticeEvent } from "../session-events.ts";
 import { record, text } from "../../core/values.ts";
-import { mcpTool } from "../../core/tools.ts";
+import { gatewayCall, mcpTool } from "../../core/tools.ts";
 import { agentDescription, contentText, summarizeInput, todoStatus } from "../text.ts";
 
 type ContentBlock = SDKAssistantMessage["message"]["content"][number];
@@ -185,13 +185,14 @@ export function toolItem(id: string, name: string, rawInput: unknown): Item | nu
     default: {
       if (TASK_TOOLS.has(name) || HIDDEN_TOOLS.has(name)) return null;
       const mcp = mcpTool(name);
+      const inner = mcp && gatewayCall(mcp.server, mcp.tool, input);
       return {
         kind: "tool_call",
         id,
-        tool: mcp?.tool ?? name,
+        tool: inner?.tool ?? mcp?.tool ?? name,
         server: mcp?.server ?? null,
         category: mcp ? "other" : (TOOL_CATEGORIES[name] ?? "other"),
-        summary: summarizeInput(input, SUMMARY_KEYS),
+        summary: summarizeInput(inner ? record(inner.input) : input, SUMMARY_KEYS),
         output: "",
         status: "running",
       };

@@ -14,6 +14,7 @@ import {
 } from "../../core/events.ts";
 import { truncate } from "../../core/wording.ts";
 import { noticeEvent } from "../session-events.ts";
+import { gatewayCall } from "../../core/tools.ts";
 import { contentText, todoStatus } from "../text.ts";
 import { INIT_PROMPT } from "./prompts.ts";
 
@@ -399,14 +400,15 @@ export function toItem(item: CodexThreadItem, done = true): Item | null {
         changes: fileChanges(item.changes),
         status: itemStatus(item.status),
       };
-    case "mcpToolCall":
+    case "mcpToolCall": {
+      const inner = gatewayCall(item.server, item.tool, item.arguments);
       return {
         kind: "tool_call",
         id: item.id,
-        tool: item.tool,
+        tool: inner?.tool ?? item.tool,
         server: item.server,
         category: "other",
-        summary: compact(item.arguments),
+        summary: compact((inner?.input ?? item.arguments) as JsonValue),
         output:
           item.error?.message ??
           (item.result
@@ -414,6 +416,7 @@ export function toItem(item: CodexThreadItem, done = true): Item | null {
             : ""),
         status: item.error ? "failed" : itemStatus(item.status),
       };
+    }
     case "dynamicToolCall":
       return {
         kind: "tool_call",

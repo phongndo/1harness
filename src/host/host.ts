@@ -302,6 +302,7 @@ export class Host {
         const settings = this.#settings();
         return (name) => toolDisabled(settings, name);
       },
+      () => this.#settings().toolGateway,
     );
     this.manager = new ThreadManager({
       version: options.version,
@@ -353,6 +354,7 @@ export class Host {
         manager: this.manager,
         scope: this.#scope,
         shared: () => this.#agentTools,
+        exposure: (own) => this.tools.exposure(own),
         settings: () => this.#settings(),
         configDir: () => options.configDir ?? configDir(),
       }),

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import type { query } from "@anthropic-ai/claude-agent-sdk";
 import type { HarnessEvent } from "../../core/events.ts";
-import { ClaudeSession } from "./session.ts";
+import { ClaudeSession, sessionPermissions } from "./session.ts";
 
 let root: string;
 
@@ -55,5 +55,32 @@ describe("ClaudeSession", () => {
     );
     await session.close();
     await ended;
+  });
+});
+
+describe("remembering an approval", () => {
+  it("never writes a rule for the gateway, which would allow every tool behind it", () => {
+    const suggestions = [
+      {
+        type: "addRules" as const,
+        rules: [{ toolName: "mcp__1harness__tool_act" }],
+        behavior: "allow" as const,
+        destination: "session" as const,
+      },
+    ];
+    assert.deepEqual(
+      sessionPermissions("mcp__1harness__tool_act", { name: "thread_send" }, suggestions),
+      [],
+    );
+    assert.deepEqual(sessionPermissions("mcp__1harness__tool_read", { name: "x" }, undefined), []);
+    // Anything else is remembered as it always was.
+    assert.deepEqual(sessionPermissions("mcp__docs__search", { q: 1 }, undefined), [
+      {
+        type: "addRules",
+        rules: [{ toolName: "mcp__docs__search" }],
+        behavior: "allow",
+        destination: "session",
+      },
+    ]);
   });
 });

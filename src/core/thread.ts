@@ -1,4 +1,5 @@
 import { errorMessage } from "./errors.ts";
+import { GATEWAY_SEARCH, TOOL_SERVER } from "./tools.ts";
 import { randomUUID } from "node:crypto";
 import {
   SESSION_METHODS,
@@ -755,7 +756,14 @@ export class Thread {
   /** Approves a request the user already chose to always allow, if it is one. */
   #allowed(request: HarnessRequest): RequestResponse | undefined {
     if (request.kind !== "approval") return undefined;
-    const key = actionKey(request.action);
+    const { action } = request;
+    // It reads only tools' names and schemas, so asking would guard nothing. A plain
+    // yes, since "always" can write a rule into the harness's own settings.
+    if (action.type === "tool" && action.server === TOOL_SERVER && action.tool === GATEWAY_SEARCH) {
+      const yes = request.options.find((candidate) => candidate.effect === "allow");
+      return yes ? { kind: "approval", optionId: yes.id } : undefined;
+    }
+    const key = actionKey(action);
     if (!key || !this.#allowances.has(key)) return undefined;
     const option =
       request.options.find((candidate) => candidate.effect === "allow-always") ??

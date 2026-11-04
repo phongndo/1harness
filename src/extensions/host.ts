@@ -21,6 +21,7 @@ import type {
 } from "../core/events.ts";
 import { loadMcpConfig } from "../core/mcp-config.ts";
 import { errorMessage } from "../core/errors.ts";
+import { GATEWAY_ACT, GATEWAY_READ, GATEWAY_SEARCH } from "../core/tools.ts";
 import { type Thread, type ThreadEvent, type ToolRenderer } from "../core/thread.ts";
 import {
   choose,
@@ -606,6 +607,8 @@ export class ExtensionHost {
     const name = operation.name;
     if (!OPERATION_NAME.test(name))
       throw new Error(`${tool ? "tool" : "operation"} name ${name} is not valid`);
+    if (name === GATEWAY_SEARCH || name === GATEWAY_READ || name === GATEWAY_ACT)
+      throw new Error(`${name} is 1harness's own`);
     const owner = this.operations.get(name);
     if (owner) throw new Error(`${name} is already registered by ${owner.extension}`);
     const extension = record.name;

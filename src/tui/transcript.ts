@@ -1061,6 +1061,7 @@ const OWN_TOOLS: Record<string, [string, string, string]> = {
     "checking harnesses",
   ],
   delegate_task: ["Handed off a task", "Handing off a task", "handing off a task"],
+  tool_search: ["Looked for a tool", "Looking for a tool", "looking for a tool"],
   task_status: ["Checked on a task", "Checking on a task", "checking on a task"],
   task_cancel: ["Cancelled a task", "Cancelling a task", "cancelling a task"],
   thread_list: ["Listed threads", "Listing threads", "listing threads"],

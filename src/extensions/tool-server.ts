@@ -5,6 +5,7 @@ import type { Thread } from "../core/thread.ts";
 import { serveMcp } from "../operations/mcp-http.ts";
 import type { OperationInfo } from "../operations/operation.ts";
 import type { ToolDefinition } from "./api.ts";
+import { gatewayTools } from "./tool-gateway.ts";
 
 /** One session's access: the server config to give the harness, and its thread once known. */
 export interface ToolGrant {
@@ -13,7 +14,7 @@ export interface ToolGrant {
   revoke(): void;
 }
 
-type Tools = () => ReadonlyMap<string, { tool: ToolDefinition }>;
+export type Tools = () => ReadonlyMap<string, { tool: ToolDefinition }>;
 
 /**
  * Serves tools to every harness as one MCP server over streamable HTTP on
@@ -28,16 +29,40 @@ export class ToolServer {
   #url: Promise<string> | null = null;
   #grants = new Map<string, { thread: Thread | null; tools: Tools }>();
   #disabled: () => (name: string) => boolean;
+  #gateway: () => boolean;
 
-  /** `disabled` says, as things stand, which tools to keep from sessions' lists and calls. */
+  /**
+   * `disabled` says, as things stand, which tools to keep from sessions' lists
+   * and calls; `gateway`, whether to offer all but `direct` tools through
+   * `tool_search`.
+   */
   constructor(
     tools: () => ReadonlyMap<string, { tool: ToolDefinition }>,
     version: string,
     disabled: () => (name: string) => boolean = () => () => false,
+    gateway: () => boolean = () => false,
   ) {
     this.#tools = tools;
     this.#version = version;
     this.#disabled = disabled;
+    this.#gateway = gateway;
+  }
+
+  /** What a session sees by name, and what it reaches through the gateway, as things stand. */
+  exposure(own: Tools = () => new Map()): {
+    advertised: ReadonlyMap<string, { tool: ToolDefinition }>;
+    onDemand: ReadonlyMap<string, ToolDefinition>;
+  } {
+    const off = this.#disabled();
+    const all = [...own(), ...this.#tools()].filter(([name]) => !off(name));
+    const onDemand = new Map(
+      all.filter(([, { tool }]) => !tool.direct).map(([name, { tool }]) => [name, tool]),
+    );
+    if (!this.#gateway() || onDemand.size === 0)
+      return { advertised: new Map(all), onDemand: new Map() };
+    const direct = all.filter(([, { tool }]) => tool.direct);
+    const gateway = gatewayTools(onDemand).map((tool) => [tool.name, { tool }] as const);
+    return { advertised: new Map([...direct, ...gateway]), onDemand };
   }
 
   /**
@@ -45,10 +70,7 @@ export class ToolServer {
    * there is no tool to serve.
    */
   async grant(own: Tools = () => new Map()): Promise<ToolGrant | null> {
-    const tools: Tools = () => {
-      const off = this.#disabled();
-      return new Map([...own(), ...this.#tools()].filter(([name]) => !off(name)));
-    };
+    const tools: Tools = () => this.exposure(own).advertised;
     if (tools().size === 0) return null;
     const url = await this.#listen();
     const token = randomBytes(24).toString("base64url");
@@ -111,7 +133,7 @@ export class ToolServer {
     await serveMcp(request, response, {
       version: this.#version,
       instructions:
-        "1harness: hand work to agents on any harness, follow and steer its threads, and use the tools its extensions add.",
+        "1harness: hand work to agents on any harness, follow and steer its threads, and use the tools its extensions add. tool_search finds what is not listed.",
       tools: () => [...grant.tools().values()].map(({ tool }) => toolInfo(tool)),
       call: async (name, input, meta) => {
         const entry = grant.tools().get(name);

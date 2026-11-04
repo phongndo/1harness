@@ -8,8 +8,9 @@ import type {
   ToolCategory,
 } from "../../core/events.ts";
 import { unifiedDiff } from "../../core/diff.ts";
+import { GATEWAY_ACT, GATEWAY_READ, gatewayCall, TOOL_SERVER } from "../../core/tools.ts";
 import { record } from "../../core/values.ts";
-import { contentText, todoStatus } from "../text.ts";
+import { contentText, summarizeInput, todoStatus } from "../text.ts";
 
 // The subset of the Agent Client Protocol (v1) this driver reads. Updates of
 // other kinds reach the translator as well, typed as these, and are dropped.
@@ -97,6 +98,24 @@ function fileChanges(call: AcpToolCall): FileChange[] {
   ];
 }
 
+/** A tool on 1harness's own server, as an ACP agent names one, such as fx's `mcp_1harness_tool_act`. */
+function ownToolName(call: AcpToolCall): string | null {
+  return /^(?:mcp[_-]+)?1harness[_-]+(.+)$/.exec(call.name ?? "")?.[1] ?? null;
+}
+
+/** The tool a call on 1harness's own server really runs, through the gateway or not. */
+function ownTool(call: AcpToolCall): { tool: string; input: unknown } | null {
+  const tool = ownToolName(call);
+  if (tool === null) return null;
+  return gatewayCall(TOOL_SERVER, tool, call.rawInput) ?? { tool, input: call.rawInput };
+}
+
+/** Whether a call goes through the gateway, which an "always" would open every tool behind. */
+export function throughGateway(call: AcpToolCall): boolean {
+  const tool = ownToolName(call);
+  return tool === GATEWAY_READ || tool === GATEWAY_ACT;
+}
+
 /** A tool call as a 1harness item, by the kind the agent gives it. */
 export function toolItem(call: AcpToolCall): Item {
   const status = itemStatus(call.status);
@@ -118,17 +137,21 @@ export function toolItem(call: AcpToolCall): Item {
     case "delete":
     case "move":
       return { kind: "file_change", id: call.toolCallId, changes: fileChanges(call), status };
-    default:
+    default: {
+      const own = ownTool(call);
       return {
         kind: "tool_call",
         id: call.toolCallId,
-        tool: call.name ?? call.title ?? "tool",
-        server: null,
+        tool: own?.tool ?? call.name ?? call.title ?? "tool",
+        server: own ? TOOL_SERVER : null,
         category: TOOL_CATEGORIES[call.kind ?? ""] ?? "other",
-        summary: call.title ?? field(call.rawInput, "path", "query", "url") ?? "",
+        summary: own
+          ? summarizeInput(record(own.input), ["path", "query", "url"])
+          : (call.title ?? field(call.rawInput, "path", "query", "url") ?? ""),
         output,
         status,
       };
+    }
   }
 }
 
@@ -144,6 +167,8 @@ export function approvalAction(call: AcpToolCall): ApprovalAction {
   if (call.kind === "edit" || call.kind === "delete" || call.kind === "move") {
     return { type: "file_change", paths: fileChanges(call).map((change) => change.path) };
   }
+  const own = ownTool(call);
+  if (own) return { type: "tool", tool: own.tool, server: TOOL_SERVER, input: own.input };
   return {
     type: "tool",
     tool: call.name ?? call.title ?? "tool",

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AcpTranslator, approvalAction, toolItem } from "./translate.ts";
+import { AcpTranslator, approvalAction, throughGateway, toolItem } from "./translate.ts";
 
 describe("AcpTranslator", () => {
   it("streams each message as one item, ended when something else arrives", () => {
@@ -133,5 +133,52 @@ describe("toolItem", () => {
         cwd: null,
       },
     );
+  });
+});
+
+describe("1harness's own tools on an ACP agent", () => {
+  const act = {
+    toolCallId: "t1",
+    name: "mcp_1harness_tool_act",
+    title: "tool_act",
+    kind: "other",
+    status: "completed",
+    rawInput: { name: "save_note", input: { text: "hello" } },
+  };
+
+  it("show as the tool that really runs, in items and approvals", () => {
+    const item = toolItem(act as never);
+    assert.ok(item.kind === "tool_call");
+    assert.equal(item.tool, "save_note");
+    assert.equal(item.server, "1harness");
+    assert.equal(item.summary, '{"text":"hello"}');
+    assert.deepEqual(approvalAction(act as never), {
+      type: "tool",
+      tool: "save_note",
+      server: "1harness",
+      input: { text: "hello" },
+    });
+    assert.equal(throughGateway(act as never), true);
+  });
+
+  it("name a search as itself, which is how it goes unasked", () => {
+    const search = { ...act, name: "mcp_1harness_tool_search", rawInput: { query: "note" } };
+    assert.deepEqual(approvalAction(search as never), {
+      type: "tool",
+      tool: "tool_search",
+      server: "1harness",
+      input: { query: "note" },
+    });
+    assert.equal(throughGateway(search as never), false);
+  });
+
+  it("leave other servers' tools as they were", () => {
+    const other = { ...act, name: "mcp_docs_tool_act" };
+    const item = toolItem(other as never);
+    assert.ok(item.kind === "tool_call");
+    assert.equal(item.tool, "mcp_docs_tool_act");
+    assert.equal(item.server, null);
+    assert.equal(item.summary, "tool_act");
+    assert.equal(throughGateway(other as never), false);
   });
 });

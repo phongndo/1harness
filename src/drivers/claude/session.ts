@@ -49,7 +49,7 @@ import {
 } from "../../core/events.ts";
 import { errorMessage } from "../../core/errors.ts";
 import { text } from "../../core/values.ts";
-import { checkToolHook, mcpTool, toolAction } from "../../core/tools.ts";
+import { checkToolHook, gatewayCall, mcpTool, toolAction } from "../../core/tools.ts";
 import { ANSWER, ASK, PLAN_TITLE, fileName, planOptions, steppedDown } from "../../core/wording.ts";
 import { StderrTail } from "../child.ts";
 import { readImage } from "../images.ts";
@@ -589,15 +589,18 @@ export class ClaudeSession implements HarnessSession {
 
     // The choices Claude Code itself offers, in 1harness's words.
     const options: ApprovalOption[] = [{ id: "allow", label: ANSWER.yes, effect: "allow" }];
+    const mcp = mcpTool(tool);
+    const inner = mcp && gatewayCall(mcp.server, mcp.tool, input);
+    const shown = inner ? `mcp__${mcp.server}__${inner.tool}` : tool;
     if (!context.suppressAlwaysAllowRule) {
       options.push({
         id: "allowSession",
-        label: alwaysAllowLabel(tool, context.suggestions),
+        label: alwaysAllowLabel(shown, context.suggestions),
         effect: "allow-always",
       });
     }
     options.push({ id: "deny", label: ANSWER.noAndExplain, effect: "deny" });
-    const prompt = approvalPrompt(tool, input);
+    const prompt = approvalPrompt(shown, inner ? (inner.input as Record<string, unknown>) : input);
     // Claude Code's own sentence for the prompt goes under 1harness's question.
     const detail = [
       context.title ?? "",
@@ -635,7 +638,7 @@ export class ClaudeSession implements HarnessSession {
         toolUseID: context.toolUseID,
         decisionClassification: choice === "allowSession" ? "user_permanent" : "user_temporary",
         ...(choice === "allowSession"
-          ? { updatedPermissions: sessionPermissions(tool, context.suggestions) }
+          ? { updatedPermissions: sessionPermissions(tool, input, context.suggestions) }
           : {}),
       };
     }
@@ -737,10 +740,14 @@ export class ClaudeSession implements HarnessSession {
   }
 }
 
-function sessionPermissions(
+export function sessionPermissions(
   tool: string,
+  input: unknown,
   suggestions: PermissionUpdate[] | undefined,
 ): PermissionUpdate[] {
+  // A rule for the gateway would allow every tool behind it; the thread remembers just this one.
+  const mcp = mcpTool(tool);
+  if (mcp && gatewayCall(mcp.server, mcp.tool, input)) return [];
   if (suggestions && suggestions.length > 0) {
     return suggestions.map((suggestion) => ({ ...suggestion, destination: "session" }));
   }
