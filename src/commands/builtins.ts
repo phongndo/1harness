@@ -334,7 +334,7 @@ const model: CommandDefinition = {
       const options = await models(context);
       const current = options.findIndex((option) => matchesModel(option, context.info?.model));
       const index = await context.ui.pick(
-        "Models",
+        "Model for this thread",
         options.map((option, position) => ({
           label: option.label,
           detail: option.description,

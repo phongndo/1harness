@@ -405,11 +405,18 @@ export class ResumeView {
     const widest = (pick: (entry: ResumeEntry) => string) =>
       Math.max(0, ...shown.map((entry) => visibleWidth(pick(entry))));
     const age = Math.max(AGE_WIDTH, widest((entry) => entryAge(entry, now)) + 2);
-    const on = widest((entry) => entry.on);
+    const widestOn = widest((entry) => entry.on);
+    const widestTitle = widest((entry) => oneLineText(entry.title));
+    const stateWidth = widest((entry) => plainText(entry.state ?? ""));
+    const taken = 4 + age + (stateWidth > 0 ? stateWidth + 2 : 0) + 2;
+    // The same on every row says nothing about any of them, so a title cut short gets its room.
+    const on =
+      new Set(shown.map((entry) => entry.on)).size === 1 && taken + widestTitle + widestOn > width
+        ? 0
+        : widestOn;
     const folder =
       this.#scope === "folder" ? 0 : widest((entry) => shortPath(entry.cwd, this.#home));
-    const widestState = widest((entry) => plainText(entry.state ?? ""));
-    const state = widestState > 0 ? widestState + 2 : 0;
+    const state = stateWidth > 0 ? stateWidth + 2 : 0;
     // The marker, the age, and room for a title of a few words.
     const fits = (right: number) => 4 + age + state + 25 + right <= width;
     if (fits(on + (folder ? folder + 2 : 0))) return { age, state, on, folder };

@@ -2584,7 +2584,11 @@ export class App {
     let saved = false;
     const index = await this.#pick(
       `Which harness should 1harness start?${tally}`,
-      harnesses.map((harness) => pickEntry(harnessEntry(harness, null, this.#defaultHarness))),
+      // One not installed cannot start, so choosing it would only lead to an error.
+      harnesses.map((harness) => ({
+        ...pickEntry(harnessEntry(harness, null, this.#defaultHarness)),
+        inert: harness.state === "missing",
+      })),
       {
         filter: true,
         count: false,

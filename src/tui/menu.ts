@@ -358,7 +358,8 @@ export class Menu {
         own > labelWidth && own <= room && !describing
           ? pad(item.label, own)
           : pad(truncate(item.label, labelWidth - 3), labelWidth);
-      const detail = current ? paint(item.detail) : style.muted(item.detail);
+      // What cannot be chosen is there to be read, as how to install it.
+      const detail = current || item.inert ? paint(item.detail) : style.muted(item.detail);
       // Under one heading, the rows after the first would only say it again.
       const previous = visible[start + offset - 1]?.entry;
       const tag = this.config.headings && previous?.tag === item.tag ? "" : item.tag;
