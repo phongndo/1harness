@@ -1,4 +1,5 @@
 import { RUNTIME_MODES, isRuntimeMode, modeRank } from "../core/events.ts";
+import { safeCut } from "../core/wording.ts";
 import {
   checkHarness,
   drivers,
@@ -40,6 +41,10 @@ const RESULT_LIMIT = 8000;
 const READ_LIMIT = 40_000;
 /** How many of a run's commands thread_read shows, the latest ones. */
 const COMMAND_COUNT = 20;
+/** How much of a run's input, and of its result, thread_read returns unless asked otherwise. */
+const RUN_CHARS = 8000;
+/** Input and result together must fit READ_LIMIT, or one run could flood a context. */
+const MAX_RUN_CHARS = READ_LIMIT / 2;
 
 /** How a task stands: its run's status, or why it has none. */
 type TaskStatus = RunRecord["status"] | "starting" | "cancelled";
@@ -79,6 +84,19 @@ function runNumber(input: Record<string, unknown>, name: string): number | undef
   return value;
 }
 
+/** A count from the input, at least `least`, or undefined when not given. */
+function countInput(
+  input: Record<string, unknown>,
+  name: string,
+  least: number,
+): number | undefined {
+  const value = input[name];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < least)
+    throw new OperationError("invalid_request", `${name} must be a whole number, from ${least}`);
+  return value;
+}
+
 /** A thread in brief, with what it waits on the user for. */
 export function threadView(thread: ThreadSnapshot) {
   const info = thread.thread.info;
@@ -93,7 +111,7 @@ export function threadView(thread: ThreadSnapshot) {
     runtimeMode: info.runtimeMode,
     plan: info.interactionMode === "plan",
     runs: thread.runs.length,
-    lastResult: last?.result ? clip(last.result.slice(0, 400)) : null,
+    lastResult: last?.result ? clip(last.result.slice(0, safeCut(last.result, 400))) : null,
     ...(requests.length > 0
       ? {
           waitingOn: requests.map((request) =>
@@ -141,6 +159,38 @@ function runView(run: RunRecord) {
       exitCode,
     })),
     error: run.error,
+  };
+}
+
+/** Where thread_read is reading: how much of each field, from where, in which thread. */
+interface ReadWindow {
+  threadId: string;
+  offset: number;
+  maxChars: number;
+}
+
+/** The part of a run's input or result in the window, saying how to read on if it is cut. */
+function readField(value: string | null, run: number, window: ReadWindow): string | null {
+  if (value === null) return null;
+  const { threadId, offset, maxChars } = window;
+  if (offset > 0 && offset >= value.length) return `(no more: ${value.length} characters in all)`;
+  const start = safeCut(value, offset);
+  if (value.length - start <= maxChars) return value.slice(start);
+  const cut = safeCut(value, start + maxChars);
+  // A limit narrower than the pair at hand takes the pair, so reading on always gets somewhere.
+  const end = cut > start ? cut : start + 2;
+  const call = JSON.stringify({ threadId, fromRun: run, toRun: run, offset: end });
+  return `${value.slice(start, end)}\n… (cut at ${end} of ${value.length} characters; read on with thread_read ${call})`;
+}
+
+/** A run as thread_read returns it. Activity is opt-in: most readers want the conversation. */
+function readView(run: RunRecord, window: ReadWindow, activity: boolean) {
+  const { filesChanged, commands, error, ...brief } = runView(run);
+  return {
+    ...brief,
+    input: readField(run.input, run.index, window),
+    result: readField(run.result, run.index, window),
+    ...(activity ? { filesChanged, commands, error } : error ? { error } : {}),
   };
 }
 
@@ -308,7 +358,7 @@ export class Orchestrator {
       {
         name: "thread_read",
         description:
-          "Reads a thread's runs: what each was asked and answered, the commands it ran, and the files it changed. Reads the latest runs, or a range with fromRun and toRun. Runs come back oldest first; a long read keeps the newest runs that fit, and moreRuns names the older runs in the range that were left out.",
+          "Reads a thread's runs: what each was asked and answered. Reads the latest runs, or a range with fromRun and toRun. Runs come back oldest first; a long read keeps the newest runs that fit, and moreRuns names the older runs in the range that were left out.",
         inputSchema: {
           type: "object",
           properties: {
@@ -319,6 +369,19 @@ export class Orchestrator {
             },
             fromRun: { type: "number", description: "The first run to read, counted from 1." },
             toRun: { type: "number", description: "The last run to read." },
+            detail: {
+              type: "string",
+              enum: ["messages", "activity"],
+              description: "activity adds filesChanged and commands; messages by default.",
+            },
+            maxCharsPerRun: {
+              type: "number",
+              description: `Most characters of each input and result; ${RUN_CHARS} by default, ${MAX_RUN_CHARS} at most.`,
+            },
+            offset: {
+              type: "number",
+              description: "Where to read on in a cut run named by fromRun and toRun.",
+            },
           },
           required: ["threadId"],
         },
@@ -329,6 +392,21 @@ export class Orchestrator {
           const from = runNumber(input, "fromRun");
           const to = runNumber(input, "toRun");
           const count = typeof input["runs"] === "number" ? Math.max(1, input["runs"]) : 5;
+          const detail = input["detail"] ?? "messages";
+          if (detail !== "messages" && detail !== "activity")
+            throw new OperationError("invalid_request", "detail must be messages or activity");
+          const offset = countInput(input, "offset", 0) ?? 0;
+          // Each field has its own place to read on from, which only makes sense for one run.
+          if (offset > 0 && (from === undefined || from !== to))
+            throw new OperationError(
+              "invalid_request",
+              "offset reads on in one run: give fromRun and toRun that run's number",
+            );
+          const window = {
+            threadId: thread.id,
+            offset,
+            maxChars: Math.min(countInput(input, "maxCharsPerRun", 1) ?? RUN_CHARS, MAX_RUN_CHARS),
+          };
           const chosen =
             from === undefined && to === undefined
               ? thread.runs.slice(-count)
@@ -336,10 +414,10 @@ export class Orchestrator {
                   (run) => run.index >= (from ?? 1) && run.index <= (to ?? Infinity),
                 );
           // Newest first until the limit, so a long range comes back in pages.
-          const views: ReturnType<typeof runView>[] = [];
+          const views: ReturnType<typeof readView>[] = [];
           let used = 0;
           for (const run of chosen.toReversed()) {
-            const view = runView(run);
+            const view = readView(run, window, detail === "activity");
             // Measured as it is sent, indented.
             const size = JSON.stringify(view, null, 2).length;
             if (views.length > 0 && used + size > READ_LIMIT) break;

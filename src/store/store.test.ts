@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import type { Capabilities, SessionInfo } from "../core/events.ts";
 import { Store, StoreLocked, type ThreadRow } from "./store.ts";
 
@@ -173,14 +174,38 @@ describe("Store", () => {
       model: null,
       effort: null,
       contextTokens: null,
+      contextWindow: 200_000,
       leftAt: 3,
     });
+    assert.equal(store.visits("t1").get("codex")?.contextWindow, 200_000);
     assert.equal(store.threadByNative("codex-9")?.id, "t1");
     // A search with only punctuation matches nothing rather than failing.
     assert.deepEqual(store.search('"*:'), []);
     store.deleteThread("t2");
     assert.equal(store.thread("t2"), null);
     assert.deepEqual(store.log("t2"), []);
+    store.close();
+  });
+
+  it("adds the context window to a store's earlier visits", () => {
+    const file = join(root, "old-visits.db");
+    Store.open(file).close();
+    const old = new DatabaseSync(file);
+    old.exec("ALTER TABLE visits DROP COLUMN context_window");
+    old.exec(
+      "INSERT INTO visits (thread_id, harness, native, runs, context_tokens, left_at) VALUES ('t1', 'codex', 'n', 2, 5, 3)",
+    );
+    old.close();
+    const store = Store.open(file);
+    assert.deepEqual(store.visits("t1").get("codex"), {
+      native: "n",
+      runs: 2,
+      model: null,
+      effort: null,
+      contextTokens: 5,
+      contextWindow: null,
+      leftAt: 3,
+    });
     store.close();
   });
 });
