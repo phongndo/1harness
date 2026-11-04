@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
 import { describe, it } from "node:test";
-import { welcomeRows } from "./welcome.ts";
+import { nearestName, welcomeRows } from "./welcome.ts";
 
 const thread = { harness: "Codex", model: "gpt-6", mode: "supervised" } as const;
 const text = (width: number, height: number, more = {}) =>
@@ -28,5 +28,16 @@ describe("a thread with nothing in it", () => {
   it("fits a short pane", () => {
     assert.equal(welcomeRows(thread, 40, 3).length, 3);
     assert.match(text(40, 3), /^  ● Codex/);
+  });
+});
+
+describe("the name closest to a mistyped one", () => {
+  const names = ["new", "resume", "model", "status", "help"];
+
+  it("finds a near miss, and suggests nothing for what is far from all of them", () => {
+    assert.equal(nearestName("modle", names), "model");
+    assert.equal(nearestName("stauts", names), "status");
+    assert.equal(nearestName("nope", names), null);
+    assert.equal(nearestName("zzzzzz", names), null);
   });
 });

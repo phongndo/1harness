@@ -110,12 +110,19 @@ export function rule(width: number, label = ""): string {
   return style.rule(`${"─".repeat(Math.max(0, width - visibleWidth(tail)))}${tail}`);
 }
 
+/** `enter use` with the key standing out, which is what the eye looks for along the line. */
+export function keyHint(hint: string): string {
+  const gap = hint.indexOf(" ");
+  if (gap === -1) return style.text(hint);
+  return `${style.text(hint.slice(0, gap))}${style.muted(hint.slice(gap))}`;
+}
+
 export function hints(parts: readonly string[], width: number): string {
   // Too wide, the first hints give way, the most familiar keys such as ↑↓,
   // so the line keeps what ends it: how to confirm and how to leave.
   let shown = [...parts];
   while (shown.length > 2 && visibleWidth(shown.join(HINT_GAP)) > width) shown = shown.slice(1);
-  return truncate(style.muted(shown.join(HINT_GAP)), width);
+  return truncate(shown.map(keyHint).join(HINT_GAP), width);
 }
 
 /**
@@ -300,7 +307,7 @@ export class Menu {
     // Informational rows are not counted, unless they are all there is.
     const count = visible.filter(({ entry: item }) => !item.inert).length || visible.length;
     let title = style.bold(
-      style.strong(this.config.count ? `${this.config.title} ${count}` : this.config.title),
+      style.strong(this.config.count ? `${this.config.title} · ${count}` : this.config.title),
     );
     const filter = this.#query ? `  ${style.muted("filter")} ${this.#query}` : "";
     if (this.#tabs.length > 0)

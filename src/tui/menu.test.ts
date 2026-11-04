@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
 import { describe, it } from "node:test";
 import type { Key } from "./input.ts";
-import { Menu, entry } from "./menu.ts";
+import { Menu, entry, keyHint } from "./menu.ts";
+import { style } from "./theme.ts";
 
 /** A key as the decoder reports it: `ctrl+d`, a typed character such as `G`, or a name such as `down`. */
 function key(spec: string): Key {
@@ -27,6 +28,13 @@ function press(target: Menu, ...specs: string[]): string | undefined {
   for (const spec of specs) target.key(key(spec));
   return target.selected()?.label;
 }
+
+describe("a key hint", () => {
+  it("makes the key stand out from what it does", () => {
+    assert.equal(keyHint("enter use"), `${style.text("enter")}${style.muted(" use")}`);
+    assert.equal(keyHint("esc"), style.text("esc"));
+  });
+});
 
 function hintLine(config: { filter?: boolean; narrows?: boolean; leave?: string }): string {
   return stripVTControlCharacters(
@@ -79,7 +87,7 @@ describe("Menu layout", () => {
       tabs: true,
     });
     const title = () => stripVTControlCharacters(list.render(50, 4)[1] ?? "");
-    assert.match(title(), /^Commands 7 {2}\[All\].*›$/);
+    assert.match(title(), /^Commands · 7 {2}\[All\].*›$/);
     for (let step = 0; step < names.length; step++) list.key(key("tab"));
     assert.match(title(), /‹ .*\[Claude Code\]$/, "the last tab, with more before it");
     assert.ok(title().length <= 50);

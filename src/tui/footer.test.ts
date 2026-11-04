@@ -42,13 +42,10 @@ const line = (width: number, more: Partial<StatusLineState> = {}) =>
 
 describe("the hint after a failed turn", () => {
   it("offers enter, after any wait the failure named", () => {
-    assert.equal(retryHint(null, 80), "enter tries again · or type a message · / commands");
-    assert.equal(
-      retryHint(Date.now() - 1, 80),
-      "enter tries again · or type a message · / commands",
-    );
-    assert.match(retryHint(Date.now() + 41_500, 80), /^wait 42s, then enter tries again · or/);
-    assert.equal(retryHint(null, 30), "enter tries again");
+    assert.match(retryHint(null, 80), /^enter resends your message · or type another/);
+    assert.match(retryHint(Date.now() - 1, 80), /^enter resends your message/);
+    assert.match(retryHint(Date.now() + 41_500, 80), /^wait 42s, then enter resends your message/);
+    assert.equal(retryHint(null, 20), "enter resends it");
   });
 });
 
