@@ -113,7 +113,7 @@ function assertNothingLeft(repo: string, dirs: Dirs): void {
 async function assertFails(repo: string, dirs: Dirs, why: RegExp): Promise<void> {
   const parent = await parentIn(repo);
   const threads = host!.manager.list().length;
-  await assert.rejects(delegate(parent, { role: "implementation" }), (error: Error) => {
+  await assert.rejects(delegate(parent, { isolation: "worktree" }), (error: Error) => {
     assert.match(error.message, /^worktree_failed: /);
     assert.match(error.message, why);
     return true;
@@ -125,7 +125,7 @@ async function assertFails(repo: string, dirs: Dirs, why: RegExp): Promise<void>
 async function child(repo: string, dirs: Dirs, store: Store | null = null) {
   startHost(dirs, store);
   const parent = await parentIn(repo);
-  const task = await delegate(parent, { role: "implementation" });
+  const task = await delegate(parent, { isolation: "worktree" });
   return { parent, id: task.threadId, ...task.worktree! };
 }
 
@@ -211,12 +211,12 @@ after(() => {
 });
 
 describe("where delegate_task puts a task", () => {
-  it("defaults to a worktree for role implementation in a repository", async () => {
+  it("makes a worktree when asked, on a branch of its own", async () => {
     const repo = newRepo();
     const dirs = newDirs();
     startHost(dirs);
     const parent = await parentIn(repo);
-    const task = await delegate(parent, { role: "implementation" });
+    const task = await delegate(parent, { isolation: "worktree" });
     const expected = join(dirs.state, "worktrees", task.threadId);
     assert.deepEqual(task.worktree, {
       path: expected,
@@ -234,11 +234,19 @@ describe("where delegate_task puts a task", () => {
     );
   });
 
-  it("defaults to the caller's folder for every other role, and for none", async () => {
+  it("stays in the caller's folder unless asked, whatever the role", async () => {
     const repo = newRepo();
     startHost(newDirs());
     const parent = await parentIn(repo);
-    for (const role of [undefined, "research", "review", "design", "test", "general"]) {
+    for (const role of [
+      undefined,
+      "implementation",
+      "research",
+      "review",
+      "design",
+      "test",
+      "general",
+    ]) {
       const task = await delegate(parent, role ? { role } : {});
       assert.equal(task.worktree, undefined, role);
       assert.equal(cwdOf(task.threadId), repo, role);
@@ -247,19 +255,19 @@ describe("where delegate_task puts a task", () => {
     assert.equal(git(repo, "branch", "--list", "1h/*"), "");
   });
 
-  it("defaults to the caller's folder outside a repository", async () => {
+  it("stays in the caller's folder outside a repository", async () => {
     const plain = folder();
     startHost(newDirs());
-    const task = await delegate(await parentIn(plain), { role: "implementation" });
+    const task = await delegate(await parentIn(plain), {});
     assert.equal(task.worktree, undefined);
     assert.equal(cwdOf(task.threadId), plain);
   });
 
-  it("takes an explicit choice over the role's default", async () => {
+  it("takes the choice it is given, for any role", async () => {
     const repo = newRepo();
     startHost(newDirs());
     const parent = await parentIn(repo);
-    const shared = await delegate(parent, { role: "implementation", isolation: "shared" });
+    const shared = await delegate(parent, { isolation: "shared" });
     assert.equal(shared.worktree, undefined);
     assert.equal(cwdOf(shared.threadId), repo);
     const own = await delegate(parent, { role: "review", isolation: "worktree" });
@@ -284,7 +292,7 @@ describe("where delegate_task puts a task", () => {
     git(repo, "commit", "-q", "--allow-empty", "-m", "second");
     writeFileSync(join(repo, "README"), "changed\n");
     writeFileSync(join(repo, "untracked"), "new\n");
-    const { worktree } = await delegate(parent, { role: "implementation" });
+    const { worktree } = await delegate(parent, { isolation: "worktree" });
     assert.equal(git(worktree!.path, "rev-parse", "HEAD"), git(repo, "rev-parse", "HEAD"));
     assert.equal(readFileSync(join(worktree!.path, "README"), "utf8"), "first\n");
     assert.equal(existsSync(join(worktree!.path, "untracked")), false);
@@ -296,7 +304,7 @@ describe("where delegate_task puts a task", () => {
     const parent = await parentIn(repo);
     const [a, b] = await Promise.all(
       ["a", "b"].map((name) =>
-        delegate(parent, { role: "implementation", task: `WRITE ${name}\nnow` }),
+        delegate(parent, { isolation: "worktree", task: `WRITE ${name}\nnow` }),
       ),
     );
     assert.notEqual(a!.worktree!.path, b!.worktree!.path);
@@ -314,7 +322,7 @@ describe("where delegate_task puts a task", () => {
     const repo = newRepo();
     startHost(newDirs());
     const parent = await parentIn(repo);
-    const task = await delegate(parent, { role: "implementation", wait: false });
+    const task = await delegate(parent, { isolation: "worktree", wait: false });
     assert.ok(task.worktree);
     const session = parent.thread.session as unknown as ScriptedSession;
     const deadline = Date.now() + 2000;
@@ -363,7 +371,7 @@ describe("a delegation whose worktree cannot be made", () => {
     writeFileSync(join(dirs.state, "worktrees"), "in the way");
     startHost(dirs);
     const parent = await parentIn(repo);
-    await assert.rejects(delegate(parent, { role: "implementation" }), /^Error: worktree_failed/);
+    await assert.rejects(delegate(parent, { isolation: "worktree" }), /^Error: worktree_failed/);
     assert.equal(git(repo, "branch", "--list", "1h/*"), "");
   });
 
@@ -373,7 +381,7 @@ describe("a delegation whose worktree cannot be made", () => {
     startHost(dirs);
     const parent = await parentIn(repo);
     await assert.rejects(
-      delegate(parent, { role: "implementation", harness: "broken" }),
+      delegate(parent, { isolation: "worktree", harness: "broken" }),
       /would not start/,
     );
     assertNothingLeft(repo, dirs);
@@ -581,7 +589,7 @@ describe("across a restart", () => {
     const file = join(dirs.state, "store.db");
     startHost(dirs, Store.open(file));
     const parent = await parentIn(repo);
-    const task = await delegate(parent, { role: "implementation" });
+    const task = await delegate(parent, { isolation: "worktree" });
     await host!.shutdown();
 
     startHost(dirs, Store.open(file));
@@ -611,7 +619,7 @@ describe("a trusted folder's extensions and MCP servers", () => {
     const { repo, dirs, file, trustList } = await project(true);
     startHost(dirs, Store.open(file));
     const parent = await parentIn(repo);
-    const { threadId, worktree } = await delegate(parent, { role: "implementation" });
+    const { threadId, worktree } = await delegate(parent, { isolation: "worktree" });
     assert.ok(hasProject(threadId));
     assert.ok(host!.manager.extensionsOf(threadId)!.trusted);
     assert.ok(host!.manager.serversOf(threadId).includes("project"));
@@ -629,7 +637,7 @@ describe("a trusted folder's extensions and MCP servers", () => {
   it("reach threads a worktree's thread started, in it or in one of their own", async () => {
     const { repo, dirs, file } = await project(true);
     startHost(dirs, Store.open(file));
-    const first = await delegate(await parentIn(repo), { role: "implementation" });
+    const first = await delegate(await parentIn(repo), { isolation: "worktree" });
     const inChild = host!.manager.get(first.threadId)!;
     const shared = await delegate(inChild, { isolation: "shared" });
     const nested = await delegate(inChild, { isolation: "worktree" });
@@ -643,7 +651,7 @@ describe("a trusted folder's extensions and MCP servers", () => {
     const { repo, dirs, file } = await project(true);
     startHost(dirs, Store.open(file));
     const { threadId, worktree } = await delegate(await parentIn(repo), {
-      role: "implementation",
+      isolation: "worktree",
     });
     writeFileSync(
       join(worktree!.path, ".1harness", "mcp.json"),
@@ -659,7 +667,7 @@ describe("a trusted folder's extensions and MCP servers", () => {
   it("stay out of a child of a folder that is not trusted", async () => {
     const { repo, dirs, file } = await project(false);
     startHost(dirs, Store.open(file));
-    const { threadId } = await delegate(await parentIn(repo), { role: "implementation" });
+    const { threadId } = await delegate(await parentIn(repo), { isolation: "worktree" });
     const check = () => {
       assert.equal(hasProject(threadId), false);
       assert.equal(host!.manager.extensionsOf(threadId)!.trusted, false);
@@ -674,7 +682,7 @@ describe("a trusted folder's extensions and MCP servers", () => {
   it("stay out of a thread opened by hand in 1harness's own worktree", async () => {
     const { repo, dirs, file } = await project(true);
     startHost(dirs, Store.open(file));
-    const first = await delegate(await parentIn(repo), { role: "implementation" });
+    const first = await delegate(await parentIn(repo), { isolation: "worktree" });
     const byHand = await parentIn(first.worktree!.path, "by hand");
     assert.equal(host!.manager.extensionsOf(byHand.id)!.trusted, false);
     await byHand.thread.send({ text: "stay" });
