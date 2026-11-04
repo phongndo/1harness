@@ -238,6 +238,14 @@ function refusedCall(status: "running" | "failed") {
   } as const;
 }
 
+function runningCall(id: string, command: string) {
+  return { kind: "command", id, command, output: "", exitCode: null, status: "running" } as const;
+}
+
+function approvalDecision(outcome: string) {
+  return { type: "decision", kind: "approval", title: "Run?", answer: "", outcome } as never;
+}
+
 describe("a refused call", () => {
   const context2 = { width: 80, cwd: "/work", blink: true } as never;
 
@@ -264,6 +272,54 @@ describe("a refused call", () => {
       .join("\n");
     assert.match(rows, /Refused rm -rf dist/);
     assert.doesNotMatch(rows, /failed|Ran 1 command|doesn't want/);
+  });
+
+  it("marks the call whose approval closed, among calls running together", () => {
+    const view = new ThreadView("t1");
+    const live = { busy: true, agent: () => null };
+    view.startTurn(1000);
+    view.item(runningCall("a", "first-cmd"), false, true);
+    view.item(runningCall("b", "second-cmd"), false, true);
+    const request = {
+      kind: "approval",
+      id: "ask",
+      title: "Run?",
+      detail: "",
+      action: { type: "command", command: "first-cmd", cwd: null },
+      options: [],
+      defaultOptionId: null,
+    } as never;
+    view.awaiting([request]);
+    view.awaiting([]);
+    view.apply(approvalDecision("declined"), live);
+    const statuses = () =>
+      view.transcript
+        .since(0)
+        .flatMap((block) => (block.kind === "tools" ? block.items : []))
+        .map((item) => item.status);
+    assert.deepEqual(statuses(), ["declined", "running"]);
+    // With two left to choose from, and nothing closed, it does not guess.
+    view.item(runningCall("c", "third-cmd"), false, true);
+    view.apply(approvalDecision("declined"), live);
+    assert.deepEqual(statuses(), ["declined", "running", "running"]);
+  });
+
+  it("does not take an answer that is no refusal for one", () => {
+    const view = new ThreadView("t1");
+    view.startTurn(1000);
+    view.item(refusedCall("running"), false, true);
+    view.apply(
+      {
+        type: "decision",
+        kind: "approval",
+        title: "Plan?",
+        answer: "Keep",
+        outcome: "answered",
+      } as never,
+      { busy: true, agent: () => null },
+    );
+    const [block] = view.transcript.since(0).filter((one) => one.kind === "tools");
+    assert.equal(block?.kind === "tools" && block.items[0]?.status, "running");
   });
 });
 

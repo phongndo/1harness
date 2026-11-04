@@ -162,6 +162,8 @@ export class ThreadView {
   #waiting = new Set<Extract<Block, { kind: "tools" }>>();
   /** Calls the user refused, which harnesses go on to report as having failed. */
   #refused = new Set<string>();
+  /** Calls whose approval just closed, until the decision saying how arrives. */
+  #answered: string[] = [];
   /** Log entries applied, which the terminal's own lines are placed among. */
   #applied = 0;
   /** The terminal's own lines, and how many entries had been applied when each came. */
@@ -206,7 +208,10 @@ export class ThreadView {
         if (entry.error) this.notice("error", sessionEnded(entry.error, this.retry !== null));
         break;
       case "decision":
-        if (entry.kind === "approval" && entry.outcome !== "allowed") this.#refuse();
+        // "answered" chose an option that neither allows nor refuses.
+        if (entry.kind === "approval" && ["declined", "dismissed"].includes(entry.outcome))
+          this.#refuse();
+        this.#answered = [];
         this.transcript.add({
           kind: "decision",
           request: entry.kind,
@@ -218,21 +223,27 @@ export class ThreadView {
     }
   }
 
-  /** Marks the call just refused, the one the approval waited on or else the latest running. */
+  /**
+   * Marks the call just refused. The decision comes only after its approval has
+   * closed, so that is the call it last waited on. The log does not say which: read
+   * back, or for a request no call matched, it can only be told when one call is running.
+   */
   #refuse(): void {
-    const block = this.transcript.last(
-      (candidate) =>
-        candidate.kind !== "tools" || !candidate.items.some((item) => item.status === "running"),
+    const running = [...this.blocks].filter(
+      ([id, block]) =>
+        block.kind === "tools" &&
+        block.items.some((item) => item.id === id && item.status === "running"),
     );
-    if (block?.kind !== "tools") return;
-    const waited = block.awaiting ?? [];
-    const running = block.items.filter((item) => item.status === "running");
-    const refused = waited.length > 0 ? waited : running.slice(-1).map((item) => item.id);
-    for (const id of refused) this.#refused.add(id);
-    block.items = block.items.map((item) =>
-      refused.includes(item.id) ? { ...item, status: "declined" } : item,
-    );
-    this.transcript.touch(block);
+    const only = running.length === 1 ? [running[0]![0]] : [];
+    for (const id of this.#answered.length > 0 ? this.#answered : only) {
+      const block = this.blocks.get(id);
+      if (block?.kind !== "tools") continue;
+      this.#refused.add(id);
+      block.items = block.items.map((item) =>
+        item.id === id ? { ...item, status: "declined" } : item,
+      );
+      this.transcript.touch(block);
+    }
   }
 
   /**
@@ -278,6 +289,8 @@ export class ThreadView {
       const now = block.items.filter((item) => waiting.has(item.id)).map((item) => item.id);
       if (now.length > 0) this.#waiting.add(block);
       if (before.length === now.length && before.every((id) => now.includes(id))) continue;
+      const closed = before.filter((id) => !now.includes(id));
+      if (closed.length > 0) this.#answered = closed;
       block.awaiting = now;
       this.transcript.touch(block);
     }
