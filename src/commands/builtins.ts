@@ -95,7 +95,10 @@ export function harnessEntry(
   if (harness.state !== "ready" || !marks.some(Boolean)) marks.push(HARNESS_STATES[harness.state]);
   return {
     label: harness.id,
-    detail: harness.detail ? `${harness.label} · ${harness.detail}` : harness.label,
+    // A name that is its ID, as fx's, would only say it twice.
+    detail: [harness.label === harness.id ? "" : harness.label, harness.detail ?? ""]
+      .filter(Boolean)
+      .join(" · "),
     tag: marks.filter(Boolean).join(" · "),
   };
 }

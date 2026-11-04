@@ -148,6 +148,8 @@ export interface HarnessInfo {
   unavailable: string | null;
   /** The executable it runs, where it is installed. */
   path: string | null;
+  /** The variable that points 1harness at an install off PATH, where it has one. */
+  override?: string;
 }
 
 /** What the host asks of the client running a command, or tells it. */

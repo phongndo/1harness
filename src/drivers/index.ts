@@ -37,6 +37,10 @@ export interface DriverDefinition {
   unavailable(env: NodeJS.ProcessEnv): string | null;
   /** The executable it runs, as the user would find it to check its version or sign in. */
   executable?(env: NodeJS.ProcessEnv): string | null;
+  /** How to get it where it is not installed, as a person would be told. */
+  install?: string;
+  /** The variable that points 1harness at an install off PATH. */
+  override?: string;
   /**
    * Asks the harness, through its own CLI, whether it is signed in. 1harness
    * never signs in for a harness; it says how to, in the harness's own words
@@ -186,9 +190,20 @@ const known = new WeakMap<DriverDefinition, Known>();
 /** Whether a harness is installed, without asking it anything. */
 function installed(driver: DriverDefinition, env: NodeJS.ProcessEnv): HarnessInfo {
   const reason = driver.unavailable(env);
-  const base = { id: driver.id, label: driver.label, path: driver.executable?.(env) ?? null };
+  const base = {
+    id: driver.id,
+    label: driver.label,
+    path: driver.executable?.(env) ?? null,
+    ...(driver.override ? { override: driver.override } : {}),
+  };
   return reason
-    ? { ...base, state: "missing", detail: reason, unavailable: reason, path: null }
+    ? {
+        ...base,
+        state: "missing",
+        detail: driver.install ?? reason,
+        unavailable: reason,
+        path: null,
+      }
     : { ...base, state: "unchecked", detail: null, unavailable: null };
 }
 
@@ -252,7 +267,7 @@ export function checkHarness(
  */
 export function acpDriver(
   spec: AcpAgentSpec,
-  extra: Pick<DriverDefinition, "signIn"> = {},
+  extra: Pick<DriverDefinition, "signIn" | "install"> = {},
 ): DriverDefinition {
   const { unavailable, executable: locate, find } = executable(spec.label, spec.command);
   return {
@@ -333,6 +348,8 @@ const claude = executable("Claude Code", "claude", "ONEHARNESS_CLAUDE_PATH");
 registerDriver({
   id: "claude",
   label: "Claude Code",
+  override: "ONEHARNESS_CLAUDE_PATH",
+  install: "install with `npm i -g @anthropic-ai/claude-code`",
   unavailable: claude.unavailable,
   executable: claude.executable,
   signIn: asking(claude.executable, ["auth", "status", "--json"], ({ stdout, output }) => {
@@ -354,6 +371,8 @@ const codex = executable("Codex", "codex", "ONEHARNESS_CODEX_PATH");
 registerDriver({
   id: "codex",
   label: "Codex",
+  override: "ONEHARNESS_CODEX_PATH",
+  install: "install with `npm i -g @openai/codex`",
   unavailable: codex.unavailable,
   executable: codex.executable,
   signIn: asking(codex.executable, ["login", "status"], ({ code, output }) => {
@@ -374,6 +393,8 @@ const opencode = executable("OpenCode", "opencode", "ONEHARNESS_OPENCODE_PATH");
 registerDriver({
   id: "opencode",
   label: "OpenCode",
+  override: "ONEHARNESS_OPENCODE_PATH",
+  install: "install with `npm i -g opencode-ai`",
   unavailable: opencode.unavailable,
   executable: opencode.executable,
   signIn: asking(
@@ -401,6 +422,7 @@ registerDriver(
   acpDriver(
     { id: "fx", label: "fx", command: "fx", args: ["acp"] },
     {
+      install: "install from https://github.com/vercel-labs/fx",
       signIn: asking(fx.executable, ["status", "--json"], ({ stdout, output }) => {
         const status = json(stdout);
         if (!status || Array.isArray(status)) return unreadable("fx", "fx status", output);

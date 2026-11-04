@@ -403,7 +403,7 @@ describe("App", () => {
         },
       });
       const picker = await session.sees("Which harness should 1harness start?");
-      assert.match(picker, /claude\s+Claude Code · Claude Code is not installed: .*not installed/);
+      assert.match(picker, /claude\s+Claude Code · install with `npm i -g .*not installed/);
       assert.match(
         picker,
         /signedout\s+Signed Out · run `signedout login` to sign in\s+needs sign-in/,

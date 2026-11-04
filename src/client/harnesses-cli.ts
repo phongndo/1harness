@@ -39,8 +39,15 @@ export function harnessesText(harnesses: readonly HarnessInfo[], { chosen, last 
         ? `1harness starts ${chosen}, your default, unless -H names another.`
         : last && known(last)
           ? `1harness starts ${last}, the harness used last, unless -H names another; ctrl+s in /harness sets a default.`
-          : "1harness asks which to start the next time it opens.";
-  return `${rows.join("\n")}\n\n${footer}\n`;
+          : harnesses.every((harness) => harness.state === "missing")
+            ? "Nothing can start yet: install one of these, then run 1harness."
+            : "1harness asks which to start the next time it opens.";
+  const overrides = harnesses.flatMap((harness) =>
+    harness.state === "missing" && harness.override ? [harness.override] : [],
+  );
+  const elsewhere =
+    overrides.length > 0 ? `Installed off PATH? Set ${overrides.join(", ")}.\n` : "";
+  return `${rows.join("\n")}\n\n${footer}\n${elsewhere}`;
 }
 
 /** `1harness harnesses`; resolves with the exit status. */
