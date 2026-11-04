@@ -10,6 +10,7 @@ import {
   type ChoiceResult,
   type QuestionsResult,
 } from "./prompt.ts";
+import { commandRisk } from "./risk.ts";
 
 // What the harnesses ask the user, from every thread: approvals and
 // questions, kept oldest first, the thread on screen's shown as a prompt in
@@ -125,15 +126,25 @@ export class Requests {
     const request = next.request;
     const respond = (response: RequestResponse) => this.#respond(next, response);
     if (request.kind === "approval") {
-      const initial = Math.max(
-        0,
-        request.options.findIndex((option) => option.id === request.defaultOptionId),
-      );
+      const warning =
+        request.action.type === "command" ? commandRisk(request.action.command) : null;
+      // Something that can lose work should not be one enter away from going ahead.
+      const refusal = warning
+        ? request.options.findIndex((option) => option.effect === "deny")
+        : -1;
+      const initial =
+        refusal >= 0
+          ? refusal
+          : Math.max(
+              0,
+              request.options.findIndex((option) => option.id === request.defaultOptionId),
+            );
       const command = /^\$ /m.test(request.detail);
       const config: ChoiceConfig = {
         header: "Permission needed",
         tag: command ? "Command" : "",
         title: request.title,
+        ...(warning ? { warning } : {}),
         detail: request.detail ? [request.detail] : [],
         options: request.options.map((option) => ({ label: option.label, description: "" })),
         multiSelect: false,

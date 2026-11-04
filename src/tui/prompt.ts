@@ -16,6 +16,8 @@ export interface ChoiceConfig {
   /** Shown at the right edge, such as `Command`. */
   tag: string;
   title: string;
+  /** What could go wrong in choosing yes, which should not read as ordinary detail. */
+  warning?: string;
   detail: string[];
   options: ChoiceOption[];
   multiSelect: boolean;
@@ -220,6 +222,7 @@ export class ChoicePrompt {
       "",
       // A harness's text can hold line breaks, which would throw the rows off.
       ...wrap(`  ${style.bold(oneLineText(config.title))}`, width, "  "),
+      ...(config.warning ? wrap(`  ${style.removed(`⚠ ${config.warning}`)}`, width, "    ") : []),
     ];
     const detail = config.detail.flatMap((text) => {
       const lines = plainText(text).replace(/\s+$/, "").split("\n");
@@ -295,7 +298,7 @@ export class ChoicePrompt {
       };
     }
     // The numbers on the choices say they pick, so no hint does.
-    const keys = ["↑↓ navigate"];
+    const keys = ["↑↓ move"];
     if (config.multiSelect) keys.push("space toggle");
     if (this.#commentable) keys.push("tab comment");
     keys.push(...(frame.keys ?? []), "enter confirm", "esc cancel");
