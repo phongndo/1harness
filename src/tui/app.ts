@@ -48,7 +48,7 @@ import { FolderLabel } from "./folder.ts";
 import { Suggestions, inMenuOrder } from "./completion.ts";
 import { Editor, applyEditingKey } from "./editor.ts";
 import { contextRow, footerRows, statusLine, type Footer } from "./footer.ts";
-import { welcomeRows } from "./welcome.ts";
+import { nearestName, welcomeRows } from "./welcome.ts";
 import { InputDecoder, WHEEL_ROWS, type InputEvent, type Key } from "./input.ts";
 import { LivePages } from "./live.ts";
 import { codeBlocks } from "./markdown.ts";
@@ -2522,9 +2522,13 @@ export class App {
         return;
       }
       // Skills answer to `$` alone, so `/` is only ever 1harness's.
+      const near = nearestName(
+        name,
+        this.#available().map((command) => command.name),
+      );
       const hint = this.#skill(name)
         ? `$${name} runs the skill.`
-        : "Type /help for commands and skills.";
+        : `${near ? `Did you mean /${near}? ` : ""}↑ edits it · /help lists all`;
       this.#notice("warning", `Unknown command /${name}. ${hint}`);
     } catch (error) {
       this.#notice("error", errorMessage(error));
@@ -2816,25 +2820,11 @@ export class App {
         footer = this.#footer(width, height);
       }
     }
-    // What the mouse finds where: each row's target, and what it selected, shown so.
-    // The context row covers the top row, so that clicks and selection keep their places.
-    // No room at all leaves no row to cover, and one more would make the frame too tall.
-    const pinned = view.top > 0 && view.rows.length > 0;
-    this.#targets = pinned ? [null, ...view.targets.slice(1)] : view.targets;
-    this.#pointer.drawn(view.rows, view.top);
-    this.#livePages.seen(view.pictures.map((one) => one.picture));
-    const selection = this.#pointer.selection;
-    const painted = selection ? paintSelection(view.rows, selection, view.top, width) : view.rows;
-    const transcript = pinned
-      ? [
-          contextRow(shown.transcript.askedAbove(context, view.top), view.top, width),
-          ...painted.slice(1),
-        ]
-      : painted;
-    // Nothing said yet: say what this thread will do, and how to begin.
+    // Nothing said yet: say what this thread will do, and how to begin. A notice, such as
+    // a mistyped command, goes under that rather than taking its place.
     const current = this.#current;
     const opening =
-      transcript.length === 0 && current
+      current && view.top === 0 && shown.transcript.since(0).every((b) => b.kind === "notice")
         ? welcomeRows(
             {
               harness: this.#harnessLabel(current.harness),
@@ -2842,14 +2832,35 @@ export class App {
               mode: current.info.runtimeMode,
             },
             width,
-            room,
+            room - view.rows.length - (view.rows.length > 0 ? 1 : 0),
           )
-        : transcript;
+        : [];
+    if (opening.length > 0 && view.rows.length > 0) opening.push("");
+    // What the mouse finds where: each row's target, and what it selected, shown so.
+    // The context row covers the top row, so that clicks and selection keep their places.
+    // No room at all leaves no row to cover, and one more would make the frame too tall.
+    const pinned = view.top > 0 && view.rows.length > 0;
+    this.#targets = [
+      ...opening.map(() => null),
+      ...(pinned ? [null, ...view.targets.slice(1)] : view.targets),
+    ];
+    const top = view.top - opening.length;
+    this.#pointer.drawn([...opening, ...view.rows], top);
+    this.#livePages.seen(view.pictures.map((one) => one.picture));
+    const selection = this.#pointer.selection;
+    const rows = [...opening, ...view.rows];
+    const painted = selection ? paintSelection(rows, selection, top, width) : rows;
+    const transcript = pinned
+      ? [
+          contextRow(shown.transcript.askedAbove(context, view.top), view.top, width),
+          ...painted.slice(1),
+        ]
+      : painted;
     // The composer sits on the screen's last rows from the first frame to the
     // last; the transcript reads down from the top, and the rows between stay blank.
     const above = [
-      ...opening,
-      ...Array.from({ length: Math.max(0, room - opening.length) }, () => ""),
+      ...transcript,
+      ...Array.from({ length: Math.max(0, room - transcript.length) }, () => ""),
     ];
     this.#listAt = footer.list
       ? { menu: footer.list.menu, row: above.length + footer.list.row }

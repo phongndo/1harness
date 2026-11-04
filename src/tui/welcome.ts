@@ -10,6 +10,41 @@ const MODE_NAMES: Record<RuntimeMode, string> = {
   "full-access": "Full access",
 };
 
+function editDistance(a: string, b: string): number {
+  let row = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (const [i, charA] of [...a].entries()) {
+    const next = [i + 1];
+    for (const [j, charB] of [...b].entries())
+      next.push(
+        Math.min(
+          (row[j] ?? 0) + (charA === charB ? 0 : 1),
+          (row[j + 1] ?? 0) + 1,
+          (next[j] ?? 0) + 1,
+        ),
+      );
+    row = next;
+  }
+  return row[b.length] ?? 0;
+}
+
+/**
+ * The name closest to a mistyped one: within two edits, or three when it starts
+ * the same, since first letters are rarely what a typo gets wrong.
+ */
+export function nearestName(typed: string, names: readonly string[]): string | null {
+  let best: string | null = null;
+  let distance = Number.POSITIVE_INFINITY;
+  for (const name of names) {
+    const edits = editDistance(typed.toLowerCase(), name);
+    const limit = name[0] === typed[0]?.toLowerCase() ? 3 : 2;
+    if (edits <= limit && edits < distance) {
+      best = name;
+      distance = edits;
+    }
+  }
+  return best;
+}
+
 /** What a thread with nothing in it says, in `height` rows at most. */
 export function welcomeRows(
   thread: { harness: string; model: string | null; mode: RuntimeMode },

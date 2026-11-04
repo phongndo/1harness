@@ -673,6 +673,17 @@ describe("App", () => {
 });
 
 describe("App commands", () => {
+  it("keeps saying how to begin under a mistyped command, and brings it back on up", async () => {
+    const session = await start();
+    await session.sees("Describe a task to begin");
+    await session.type("/stauts\r");
+    const screen = await session.sees("Did you mean /status?");
+    assert.match(screen, /Describe a task to begin/);
+    assert.ok(screen.indexOf("Describe a task") < screen.indexOf("Unknown command"));
+    await session.type("\x1b[A");
+    await session.sees(/^\/stauts/m);
+  });
+
   it("narrows the command menu to what is typed after the slash", async () => {
     const session = await start();
     await session.sees("Ask anything");
