@@ -4,7 +4,7 @@ import { runsOn } from "./agents.ts";
 import type { Key } from "./input.ts";
 import { hints, lineStep, rule } from "./menu.ts";
 import { style } from "./theme.ts";
-import { oneLineText, pad, spread, truncate, visibleWidth } from "./text.ts";
+import { oneLineText, pad, plainText, spread, truncate, visibleWidth } from "./text.ts";
 
 // The thread list /resume and ctrl+t open, laid out as Codex's and pi's
 // pickers are: a search line, then a thread a row, when it last moved at the
@@ -29,6 +29,8 @@ export interface ResumeEntry {
   depth: number;
   /** A status dot for a thread at work or waiting on you; empty otherwise. */
   dot: string;
+  /** Where it stands, in a word: `done`, `needs you`, or `current` for the one on screen. */
+  state?: string;
   /** Moved out of the lists with ctrl+a, so it shows only among the archived. */
   archived?: boolean;
 }
@@ -129,6 +131,8 @@ export class ResumeView {
       home?: string;
       all?: boolean;
       lineage?: boolean;
+      /** Starts on the next thread rather than `initial`, which it would be pointless to open. */
+      elsewhere?: boolean;
     },
   ) {
     this.title = title;
@@ -152,6 +156,8 @@ export class ResumeView {
       0,
       this.#visible().findIndex((entry) => entry.id === initial),
     );
+    if (options.elsewhere && this.selected?.id === initial && this.#visible().length > 1)
+      this.#index = this.#index === 0 ? 1 : 0;
     this.#chosen = this.selected?.id;
   }
 
@@ -395,17 +401,19 @@ export class ResumeView {
     shown: readonly ResumeEntry[],
     width: number,
     now: number,
-  ): { age: number; on: number; folder: number } {
+  ): { age: number; state: number; on: number; folder: number } {
     const widest = (pick: (entry: ResumeEntry) => string) =>
       Math.max(0, ...shown.map((entry) => visibleWidth(pick(entry))));
     const age = Math.max(AGE_WIDTH, widest((entry) => entryAge(entry, now)) + 2);
     const on = widest((entry) => entry.on);
     const folder =
       this.#scope === "folder" ? 0 : widest((entry) => shortPath(entry.cwd, this.#home));
+    const widestState = widest((entry) => plainText(entry.state ?? ""));
+    const state = widestState > 0 ? widestState + 2 : 0;
     // The marker, the age, and room for a title of a few words.
-    const fits = (right: number) => 4 + age + 25 + right <= width;
-    if (fits(on + (folder ? folder + 2 : 0))) return { age, on, folder };
-    return fits(on) ? { age, on, folder: 0 } : { age, on: 0, folder: 0 };
+    const fits = (right: number) => 4 + age + state + 25 + right <= width;
+    if (fits(on + (folder ? folder + 2 : 0))) return { age, state, on, folder };
+    return fits(on) ? { age, state, on, folder: 0 } : { age, state, on: 0, folder: 0 };
   }
 
   /**
@@ -416,11 +424,12 @@ export class ResumeView {
     entry: ResumeEntry,
     selected: boolean,
     width: number,
-    columns: { age: number; on: number; folder: number },
+    columns: { age: number; state: number; on: number; folder: number },
     now: number,
   ): string {
     const marker = selected ? style.strong("›") : " ";
-    const lead = `  ${marker} ${style.muted(entryAge(entry, now).padEnd(columns.age))}${"  ".repeat(entry.depth)}${entry.dot}`;
+    const state = columns.state > 0 ? pad(entry.state ?? "", columns.state) : "";
+    const lead = `  ${marker} ${style.muted(entryAge(entry, now).padEnd(columns.age))}${state}${"  ".repeat(entry.depth)}${columns.state > 0 ? "" : entry.dot}`;
     const parts: string[] = [];
     if (columns.on) parts.push(pad(entry.on, columns.on));
     if (columns.folder) parts.push(pad(shortPath(entry.cwd, this.#home), columns.folder));

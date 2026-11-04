@@ -1184,6 +1184,7 @@ export class App {
     await this.#openFrom(
       new ResumeView(words ? `Threads mentioning ${words}` : "Resume", entries, {
         initial: this.#currentId,
+        elsewhere: true,
         cwd: this.#cwd(),
         home: homedir(),
         // What mentions the words, from every folder.

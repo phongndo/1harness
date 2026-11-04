@@ -766,9 +766,8 @@ describe("App threads and keys", () => {
     await session.type("\x14");
     const picker = await session.sees("enter resume");
     assert.match(picker, /Resume\s+◉ This folder\s+○ All\s+○ Archived/);
-    // Most recent first: the thread on screen, then the one before it.
-    assert.match(picker, /› now\s+beta\s+scripted · current\n\s+now\s+alpha\s+scripted/);
-    await session.type("\x1b[B");
+    // Most recent first, and on the one before the thread on screen, which needs no opening.
+    assert.match(picker, /\s+now\s+current\s+beta\s+scripted\n\s+› now\s+done\s+alpha\s+scripted/);
     await session.type("\r");
     await session.sees("Done with alpha");
     assert.doesNotMatch(session.terminal.text(), /Done with beta/);
