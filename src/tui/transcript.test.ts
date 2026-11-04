@@ -141,7 +141,7 @@ describe("tool groups", () => {
   it("sums the group up in a sentence over a tree of past-tense rows", () => {
     const rows = renderBlock({ kind: "tools", items, settled: true }, { ...context, width: 80 });
     assert.deepEqual(plain(rows), [
-      "● Changed 1 file, ran 1 command, and performed 1 other action",
+      "● Changed 1 file, ran 1 command, and read 1 file",
       "├ Ran ls -la && echo done",
       "├ Read notes.txt",
       "└ Edited notes.txt +2 / -1",
@@ -696,7 +696,10 @@ describe("loading earlier turns", () => {
       rows.some((line) => line.includes("Stopped read a.ts")),
       rows.join("\n"),
     );
-    assert.ok(rows.includes("  Interrupted · 5s (↑1 ↓2 tokens)"), rows.join("\n"));
+    assert.ok(
+      rows.some((shown) => shown.startsWith("  ■ Interrupted · 5s · 1 tokens in, 2 out")),
+      rows.join("\n"),
+    );
   });
 });
 
@@ -828,7 +831,7 @@ describe("finished turns", () => {
       "",
       "  Fixed it.",
       "",
-      "  Done · 4s (↑1 ↓2 tokens)",
+      "  ✓ Done · 4s · 1 tokens in, 2 out · ctrl+x shows the work",
     ]);
     const detailed = plain(view.transcript.view({ ...context, details: true }, 30, 0).rows);
     // The line the work folds into would only say what the work under it says.
@@ -911,6 +914,23 @@ describe("a failed turn", () => {
       "● Ran 1 command · 1 failed · ctrl+x shows output",
       "└ ✗ pnpm test · exit 1: 1 of 3 failed",
     ]);
+  });
+
+  it("does not tell a command still running as already run", () => {
+    const heading = plain(
+      renderBlock(
+        {
+          kind: "tools",
+          settled: false,
+          items: [
+            { ...failing, id: "done", status: "completed", exitCode: 0 },
+            { ...failing, id: "going", command: "pnpm build", status: "running", exitCode: null },
+          ],
+        },
+        context,
+      ),
+    )[0];
+    assert.equal(heading, "● Ran 1 command");
   });
 
   it("names the first test a runner marks as failing", () => {

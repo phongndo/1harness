@@ -71,12 +71,11 @@ function attentionLine(
 
 /**
  * fx's activity line: a blinking dot, the phase and elapsed time, then the
- * token estimate. `running` is whether a tool runs; `steer` whether a
- * message joins the turn.
+ * token estimate. `running` is whether a tool runs.
  */
 function activityLine(
   turn: TurnState,
-  state: { running: boolean; blink: boolean; steer: boolean },
+  state: { running: boolean; blink: boolean },
   width: number,
 ): string {
   const seconds = Math.floor((Date.now() - turn.startedAt) / 1000);
@@ -89,10 +88,8 @@ function activityLine(
         : (turn.heading ?? turn.phase);
   const dot = state.blink ? style.text("•") : " ";
   const tokens = tokenCounts(Math.ceil(turn.up), Math.ceil(turn.down));
-  const hint = state.steer
-    ? "esc stop · ctrl+x details · enter adds to turn · tab queues"
-    : "esc stop · ctrl+x details · enter queues";
-  const left = `${dot} ${style.text(`${phase} (${seconds}s)`)} ${style.muted(tokens)}`;
+  const hint = "esc stop · ctrl+x details";
+  const left = `${dot} ${style.text(`${phase} · ${seconds}s`)} ${style.muted(`· ${tokens}`)}`;
   // A narrow screen keeps what the turn is doing and drops the keys.
   if (visibleWidth(left) + visibleWidth(hint) + 2 > width) return truncate(left, width);
   return spread(left, style.muted(hint), width);
@@ -281,7 +278,9 @@ export function footerRows(state: FooterState, width: number, height: number): F
     // An empty composer says what it takes.
     if (state.editor.empty && !panel) {
       const hint = state.busy
-        ? "Add to the turn, or tab to queue a message"
+        ? state.steer
+          ? "enter adds to this turn · tab queues for after it"
+          : "enter queues for after this turn"
         : state.retry
           ? retryHint(state.retry.at, width)
           : ([

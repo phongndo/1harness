@@ -667,7 +667,7 @@ describe("App commands", () => {
       await session.sees("Done with /tmp/gone.png");
       // A queued skill comes back as typed.
       await session.type("hold\r");
-      await session.sees("Add to the turn");
+      await session.sees("enter queues for after this turn");
       await session.type("$tidy later\r");
       await session.sees("queued: /tidy later");
       await session.type("/unqueue\r");

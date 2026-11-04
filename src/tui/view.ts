@@ -14,9 +14,9 @@ import {
   type Block,
 } from "./transcript.ts";
 
-/** A turn's tokens up and down, as its activity line and summary say them: `(↑1.2k ↓350 tokens)`. */
+/** A turn's tokens each way, as its activity line and summary say them. */
 export function tokenCounts(up: number, down: number): string {
-  return `(↑${formatTokens(up)} ↓${formatTokens(down)} tokens)`;
+  return `${formatTokens(up)} tokens in, ${formatTokens(down)} out`;
 }
 
 /** What the view needs from the client to show an entry. */
@@ -399,12 +399,19 @@ export class ThreadView {
     const down = ended?.down ?? Math.ceil(turn.down);
     const tokens = tokenCounts(up, down);
     const label =
-      status === "interrupted" ? "Interrupted · " : status === "failed" ? "Failed · " : "Done · ";
+      status === "interrupted" ? "Interrupted" : status === "failed" ? "Failed" : "Done";
+    const work = this.transcript
+      .since(this.#turnStart)
+      .some((block) => block.kind === "worked" && !block.failures?.length);
     // A harness that reported the failure as it happened already said why.
     const said = this.transcript
       .since(this.#turnStart)
       .some((block) => block.kind === "notice" && block.level === "error");
-    this.transcript.add({ kind: "summary", text: `${label}${seconds}s ${tokens}` });
+    this.transcript.add({
+      kind: "summary",
+      outcome: status,
+      text: `${label} · ${seconds}s · ${tokens}${work ? " · ctrl+x shows the work" : ""}`,
+    });
     if (status === "failed" && error && !said) this.notice("error", error);
     if (status === "failed") {
       const wait = /try again in (\d+)\s*s/i.exec(error ?? "")?.[1];

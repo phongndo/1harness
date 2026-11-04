@@ -75,7 +75,7 @@ export type Block =
   /** The agents a turn started: one row each, with its status and how it ended. */
   | { kind: "agents"; rows: AgentRow[] }
   /** The muted line that closes a turn: duration and token estimate. */
-  | { kind: "summary"; text: string }
+  | { kind: "summary"; text: string; outcome?: "completed" | "interrupted" | "failed" }
   /**
    * An image, with a caption under it; with its file's `path`, drawn again
    * from the file for other cells.
@@ -517,7 +517,7 @@ export function renderBlock(block: Block, context: RenderContext): string[] {
     case "agents":
       return agentRows(block, context);
     case "summary":
-      return [truncate(style.muted(`  ${block.text}`), width)];
+      return [truncate(summaryRow(block, width), width)];
     case "decision":
       return decisionRows(block, width);
     case "image":
@@ -525,6 +525,25 @@ export function renderBlock(block: Block, context: RenderContext): string[] {
     case "html":
       return htmlRows(block, context);
   }
+}
+
+/** How the turn went stands apart from its counts: it is what a glance at the end looks for. */
+function summaryRow(block: Extract<Block, { kind: "summary" }>, width: number): string {
+  const { outcome, text } = block;
+  if (!outcome) return style.muted(`  ${text}`);
+  const at = text.indexOf(" · ");
+  const label = at === -1 ? text : text.slice(0, at);
+  const all = at === -1 ? "" : text.slice(at);
+  // A narrow pane gives up what it says last, whole, not cut mid-word.
+  const room = width - visibleWidth(label) - 4;
+  const rest = visibleWidth(all) <= room ? all : all.slice(0, Math.max(0, all.lastIndexOf(" · ")));
+  const said =
+    outcome === "failed"
+      ? style.removed(`✗ ${label}`)
+      : outcome === "interrupted"
+        ? style.attention(`■ ${label}`)
+        : `${style.added("✓")} ${label}`;
+  return `  ${style.bold(said)}${style.muted(rest)}`;
 }
 
 /** Lines of a page's text shown where it is not drawn, until ctrl+x shows them all. */
@@ -978,8 +997,8 @@ export function groupSummary(items: readonly ToolItem[]): string {
     } else counts.set(category(item), (counts.get(category(item)) ?? 0) + 1);
   }
   const present = (Object.keys(PHRASES) as Category[]).filter((name) => counts.has(name));
-  const phrases = present.slice(0, 2).map((name) => PHRASES[name](counts.get(name) ?? 0));
-  const rest = present.slice(2).reduce((sum, name) => sum + (counts.get(name) ?? 0), 0);
+  const phrases = present.slice(0, 3).map((name) => PHRASES[name](counts.get(name) ?? 0));
+  const rest = present.slice(3).reduce((sum, name) => sum + (counts.get(name) ?? 0), 0);
   if (rest > 0) phrases.push(`performed ${plural(rest, "other action")}`);
   const sentence =
     phrases.length <= 2
@@ -1014,7 +1033,10 @@ function toolRows(block: Extract<Block, { kind: "tools" }>, context: RenderConte
     if (context.details) return detailedItem(only, `${marker} `, "  ", context, line(only));
     return [truncate(`${marker} ${line(only)}`, context.width), ...tail(only, "  ")];
   }
-  const rows = [truncate(`${marker} ${style.muted(groupSummary(items))}`, context.width)];
+  // What is still running has its own row, so it is not told as already done.
+  const finished = running ? items.filter((item) => item.status !== "running") : items;
+  const heading = finished.length > 0 ? groupSummary(finished) : `Running ${items.length} calls`;
+  const rows = [truncate(`${marker} ${style.muted(heading)}`, context.width)];
   items.forEach((item, index) => {
     const last = index === items.length - 1;
     const branch = style.muted(last ? "└ " : "├ ");
