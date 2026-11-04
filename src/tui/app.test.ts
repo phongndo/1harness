@@ -332,6 +332,49 @@ describe("App", () => {
     assert.match(screen, /^Ask anything/m);
   });
 
+  it("sends a failed turn's message again on enter in the empty composer", async () => {
+    const flaky: ScriptedSession[] = [];
+    const unregisterFlaky = registerDriver({
+      id: "flaky",
+      label: "Flaky",
+      unavailable: () => null,
+      create: (options) => {
+        const made = new ScriptedSession(options);
+        const play = made.startTurn.bind(made);
+        made.startTurn = async (input) => {
+          if (made.prompts.length > 0) return play(input);
+          made.prompts.push(input.text);
+          made.events.push({ type: "turn.started", turnId: "failing" });
+          made.events.push({
+            type: "item.completed",
+            item: { kind: "user_message", id: "asked", text: input.text, inputId: input.id! },
+          });
+          made.events.push({
+            type: "turn.ended",
+            turnId: "failing",
+            status: "failed",
+            error: "overloaded",
+          });
+        };
+        flaky.push(made);
+        return made;
+      },
+    });
+    try {
+      const session = await start({ harness: "flaky" });
+      await session.sees("Ask anything");
+      // With nothing failed, enter in the empty composer does nothing.
+      await session.type("\r");
+      await session.type("try this\r");
+      await session.sees("enter tries again");
+      await session.type("\r");
+      await session.sees("Done with try this");
+      assert.deepEqual(flaky[0]?.prompts, ["try this", "try this"]);
+    } finally {
+      unregisterFlaky();
+    }
+  });
+
   it("sends a message typed while the first thread is still starting once it opens", async () => {
     let open!: () => void;
     const opened = new Promise<void>((resolve) => (open = resolve));

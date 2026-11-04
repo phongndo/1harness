@@ -201,6 +201,18 @@ export function statusLine(state: StatusLineState, width: number): string {
   return spread(left, style.muted(right()), width);
 }
 
+/** The empty composer's hint after a failed turn: a wait the failure named counts down. */
+export function retryHint(at: number | null, width: number): string {
+  const left = at === null ? 0 : Math.ceil((at - Date.now()) / 1000);
+  const wait = left > 0 ? `wait ${left}s, then ` : "";
+  return (
+    [
+      `${wait}enter tries again · or type a message · / commands`,
+      `${wait}enter tries again · or type a message`,
+    ].find((text) => visibleWidth(text) <= width) ?? `${wait}enter tries again`
+  );
+}
+
 /** A panel over the composer, as the footer shows it. */
 type FooterPanel =
   | { kind: "info"; title: string; rows: [string, string][] }
@@ -228,6 +240,8 @@ export interface FooterState {
   editor: Pick<Editor, "layout" | "empty">;
   /** Whether the thread on screen is working, which the empty composer's hint says. */
   busy: boolean;
+  /** A failed turn enter can send again, and when the failure says that can work. */
+  retry: { at: number | null } | null;
   /** The list open under the composer, such as commands or files. */
   suggestions: Menu | null;
   status: string;
@@ -268,11 +282,13 @@ export function footerRows(state: FooterState, width: number, height: number): F
     if (state.editor.empty && !panel) {
       const hint = state.busy
         ? "Add to the turn, or tab to queue a message"
-        : ([
-            "Ask anything · / commands · $ skills · @ files",
-            "Ask anything · / commands · @ files",
-            "Ask anything · / commands",
-          ].find((text) => visibleWidth(text) <= width) ?? "Ask anything");
+        : state.retry
+          ? retryHint(state.retry.at, width)
+          : ([
+              "Ask anything · / commands · $ skills · @ files",
+              "Ask anything · / commands · @ files",
+              "Ask anything · / commands",
+            ].find((text) => visibleWidth(text) <= width) ?? "Ask anything");
       layout.rows[0] = truncate(style.faint(hint), width);
     }
     const start = Math.max(0, Math.min(layout.cursor.row - limit + 1, layout.rows.length - limit));

@@ -2261,7 +2261,12 @@ export class App {
 
   #submit(raw: string): void {
     const text = raw.trim();
-    if (text === "") return;
+    if (text === "") {
+      // The composer says so while there is a failed turn to send again.
+      const retry = this.#view.retry;
+      if (retry && this.#live && !this.#live.busy) this.#send(retry.text);
+      return;
+    }
     const message = this.#messageText(text);
     // Behind ones already held too, which a thread shown while it starts must not overtake.
     if (
@@ -2852,7 +2857,10 @@ export class App {
 
   /** Runs the blink only while something on screen is in progress. */
   #animate(): void {
-    const active = this.#view.turn !== null || this.#view.transcript.animating;
+    const active =
+      this.#view.turn !== null ||
+      this.#view.transcript.animating ||
+      (this.#view.retry?.at ?? 0) > Date.now();
     if (active && !this.#blinkTimer) {
       this.#blinkTimer = setInterval(() => {
         this.#blinkOn = !this.#blinkOn;
@@ -2882,6 +2890,7 @@ export class App {
         panel: this.#panel,
         editor: this.#editor,
         busy: this.#live?.busy === true,
+        retry: this.#live ? this.#view.retry : null,
         suggestions: this.#suggestions.menu,
         status: this.#statusLine(width),
       },

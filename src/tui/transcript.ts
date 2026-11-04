@@ -579,10 +579,13 @@ const WORKED_FILES = 6;
 
 /** A finished turn's work in a line, over the files it changed. */
 function workedRows(block: Extract<Block, { kind: "worked" }>, context: RenderContext): string[] {
-  const rows = [truncate(`${style.strong("●")} ${style.muted(block.text)}`, context.width)];
+  const failures = block.failures ?? [];
+  const detail = failures.length > 0 ? " · ctrl+x shows output" : "";
+  const rows = [
+    truncate(`${style.strong("●")} ${style.muted(`${block.text}${detail}`)}`, context.width),
+  ];
   const files = block.files.slice(0, WORKED_FILES);
   const more = block.files.length - files.length;
-  const failures = block.failures ?? [];
   failures.forEach((failure, index) => {
     const last = index === failures.length - 1 && files.length === 0 && more === 0;
     rows.push(
@@ -833,6 +836,9 @@ function resultRows(block: Extract<Block, { kind: "result" }>, context: RenderCo
 export function failureText(item: ToolItem): string {
   const lines = "output" in item ? plainText(item.output).trim().split("\n") : [];
   const last = oneLineText(lines.at(-1) ?? "");
+  // The count a test runner ends on says how many; this says which.
+  const named = lines.find((line) => /^\s*(?:✖|✗|×|FAIL\b|not ok\b)/.test(line))?.trim();
+  const first = named && named !== lines.at(-1)?.trim() ? ` · first: ${oneLineText(named)}` : "";
   const what =
     item.kind === "command"
       ? `${oneLineText(item.command)}${item.exitCode ? ` · exit ${item.exitCode}` : ""}`
@@ -843,7 +849,7 @@ export function failureText(item: ToolItem): string {
           : item.kind === "web_search"
             ? "Web search"
             : "Tool call";
-  return last ? `${what}: ${last}` : what;
+  return last ? `${what}: ${last}${first}` : what;
 }
 
 function noticeRows(block: Extract<Block, { kind: "notice" }>, width: number): string[] {
@@ -854,7 +860,8 @@ function noticeRows(block: Extract<Block, { kind: "notice" }>, width: number): s
     .split("\n")
     .flatMap((line, index) =>
       wrap(
-        `  ${index === 0 && label ? style.bold(paint(label)) : ""}${style.soft(line)}`,
+        // A command to run stands out from the words around it.
+        `  ${index === 0 && label ? style.bold(paint(label)) : ""}${(line.startsWith("$ ") ? style.bold : style.soft)(line)}`,
         width,
         "  ",
       ),

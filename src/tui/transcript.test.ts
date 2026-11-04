@@ -7,7 +7,7 @@ import { plainLine, type AgentRow } from "./agents.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { visibleWidth, wrap } from "./text.ts";
 import { Transcript, failureText, renderBlock, type Block, type ToolItem } from "./transcript.ts";
-import { ThreadView } from "./view.ts";
+import { ThreadView, sessionEnded } from "./view.ts";
 
 const plain = (rows: string[]) => rows.map((row) => stripVTControlCharacters(row));
 const context = { width: 60, cwd: "/work", blink: true, now: 100_000 };
@@ -221,6 +221,45 @@ describe("agents", () => {
 /** The last bold heading in reasoning, read whole. */
 const lastHeading = (text: string) =>
   [...text.matchAll(/\*\*([^*\n]{2,80})\*\*/g)].at(-1)?.[1]?.trim() ?? null;
+
+function asked(view: ThreadView, text: string): void {
+  view.startTurn(1000);
+  view.transcript.add({ kind: "user", text });
+}
+
+describe("after a failure", () => {
+  it("offers the failed message again, and when the failure says that can work", () => {
+    const view = new ThreadView("t1");
+    asked(view, "run the suite");
+    view.endTurn("failed", "429: try again in 42s", { at: 5000, up: 1, down: 1 });
+    assert.deepEqual(view.retry, { text: "run the suite", at: 47_000 });
+    view.startTurn();
+    assert.equal(view.retry, null);
+  });
+
+  it("offers nothing after a turn that went well, or a message whose pictures are gone", () => {
+    const view = new ThreadView("t1");
+    asked(view, "fine");
+    view.endTurn("completed", null);
+    assert.equal(view.retry, null);
+    view.startTurn();
+    view.transcript.add({ kind: "user", text: "see", images: [{} as never] });
+    view.endTurn("failed", "boom");
+    assert.equal(view.retry, null);
+  });
+
+  it("puts a command a dead session names on its own line", () => {
+    assert.equal(
+      sessionEnded("demo exited (code 1): login expired; run `demo auth login`"),
+      "Session ended: demo exited (code 1): login expired\nIn a shell, run:\n$ demo auth login\n" +
+        "Then press enter to try again; the thread picks up where it left off.",
+    );
+    assert.match(
+      sessionEnded("demo exited (code 1)"),
+      /^Session ended: demo exited \(code 1\)\nTo start/,
+    );
+  });
+});
 
 describe("ThreadView", () => {
   it("heads the turn with the latest bold heading of its reasoning as it streams", () => {
@@ -868,7 +907,17 @@ describe("a failed turn", () => {
         context,
       ),
     );
-    assert.deepEqual(rows, ["● Ran 1 command · 1 failed", "└ ✗ pnpm test · exit 1: 1 of 3 failed"]);
+    assert.deepEqual(rows, [
+      "● Ran 1 command · 1 failed · ctrl+x shows output",
+      "└ ✗ pnpm test · exit 1: 1 of 3 failed",
+    ]);
+  });
+
+  it("names the first test a runner marks as failing", () => {
+    assert.equal(
+      failureText({ ...failing, output: "✔ one\n✖ handles no newline\n  boom\n1 of 3 failed\n" }),
+      "pnpm test · exit 1: 1 of 3 failed · first: ✖ handles no newline",
+    );
   });
 });
 
