@@ -14,9 +14,9 @@ import {
   type Block,
 } from "./transcript.ts";
 
-/** A turn's tokens up and down, as its activity line and summary say them: `(↑1.2k ↓350)`. */
+/** A turn's tokens up and down, as its activity line and summary say them: `(↑1.2k ↓350 tokens)`. */
 export function tokenCounts(up: number, down: number): string {
-  return `(↑${formatTokens(up)} ↓${formatTokens(down)})`;
+  return `(↑${formatTokens(up)} ↓${formatTokens(down)} tokens)`;
 }
 
 /** What the view needs from the client to show an entry. */
@@ -380,7 +380,7 @@ export class ThreadView {
     const down = ended?.down ?? Math.ceil(turn.down);
     const tokens = tokenCounts(up, down);
     const label =
-      status === "interrupted" ? "Interrupted · " : status === "failed" ? "Failed · " : "";
+      status === "interrupted" ? "Interrupted · " : status === "failed" ? "Failed · " : "Done · ";
     const next = status === "failed" ? " · send a message to try again" : "";
     // A harness that reported the failure as it happened already said why.
     const said = this.transcript

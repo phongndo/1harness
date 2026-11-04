@@ -316,7 +316,7 @@ describe("ThreadView", () => {
     // Folded, the turn's work is its summary; the command still running stays in view.
     assert.equal(plain(view.transcript.view(context, 10, 0).rows)[0], "● Used 1 tool");
     assert.deepEqual(
-      plain(view.transcript.view({ ...context, details: true }, 10, 0).rows).slice(2, 7),
+      plain(view.transcript.view({ ...context, details: true }, 10, 0).rows).slice(0, 5),
       ["● Stopped handing off a task", "", "  Starting the server", "", "● Running npm run dev"],
     );
   });
@@ -656,7 +656,7 @@ describe("loading earlier turns", () => {
       rows.some((line) => line.includes("Stopped read a.ts")),
       rows.join("\n"),
     );
-    assert.ok(rows.includes("  Interrupted · 5s (↑1 ↓2)"), rows.join("\n"));
+    assert.ok(rows.includes("  Interrupted · 5s (↑1 ↓2 tokens)"), rows.join("\n"));
   });
 });
 
@@ -788,9 +788,15 @@ describe("finished turns", () => {
       "",
       "  Fixed it.",
       "",
-      "  4s (↑1 ↓2)",
+      "  Done · 4s (↑1 ↓2 tokens)",
     ]);
     const detailed = plain(view.transcript.view({ ...context, details: true }, 30, 0).rows);
+    // The line the work folds into would only say what the work under it says.
+    assert.equal(
+      detailed.filter((line) => line === "● Changed 1 file and ran 1 command").length,
+      1,
+      detailed.join("\n"),
+    );
     assert.ok(
       detailed.some((line) => line.includes("◦ Planning the fix")),
       detailed.join("\n"),

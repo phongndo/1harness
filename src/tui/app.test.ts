@@ -925,7 +925,7 @@ describe("App threads and keys", () => {
     await session.type("\x18");
     const whole = await session.sees("details · ctrl+x");
     assert.match(whole, /┃ go/);
-    assert.match(whole, /Ran 1 command/);
+    assert.match(whole, /Reading the parser/);
     assert.match(whole, /more lines · pgdn/);
     await session.type("\x18");
     await session.sees("Done with go");

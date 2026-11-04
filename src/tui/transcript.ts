@@ -478,7 +478,10 @@ export function renderBlock(block: Block, context: RenderContext): string[] {
     case "thinking":
       return thinkingRows(block.text, context);
     case "worked":
-      return marked(workedRows(block, context), { kind: "details" }, context);
+      // In detail, the work it stands for shows right under it, saying the same.
+      return context.details
+        ? []
+        : marked(workedRows(block, context), { kind: "details" }, context);
     case "assistant":
       return block.text.trim() === ""
         ? []
