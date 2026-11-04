@@ -20,6 +20,14 @@ describe("commandRisk", () => {
     "sudo systemctl restart nginx",
     "cd /etc && sudo rm passwd",
     "git add . && git push --force",
+    "ls | xargs sudo rm",
+    "for f in a b; do sudo chown me $f; done",
+    "FOO=1 sudo make install",
+    'bash -c "sudo reboot"',
+    "ssh host sudo reboot",
+    "/usr/bin/sudo reboot",
+    "git restore --staged --worktree .",
+    "git restore --worktree --staged .",
   ])
     it(`warns of ${command}`, () => assert.notEqual(commandRisk(command), null));
 
@@ -39,6 +47,9 @@ describe("commandRisk", () => {
     "grep sudo README",
     "git push origin main && pnpm build -f",
     "git reset --soft HEAD~1 && echo --hard",
+    "git push origin main\ncurl -f https://example.com",
+    "man sudo",
+    "git log --grep sudo",
   ])
     it(`leaves ${command} alone`, () => assert.equal(commandRisk(command), null));
 });
