@@ -15,7 +15,13 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join as joinPath, resolve as resolvePath } from "node:path";
 import { configDir, stateDir } from "../core/paths.ts";
-import { DEFAULT_AGENT_MODE, defaultHarness, defaultMode, loadSettings } from "../core/settings.ts";
+import {
+  DEFAULT_AGENT_MODE,
+  defaultHarness,
+  defaultMode,
+  loadSettings,
+  toolDisabled,
+} from "../core/settings.ts";
 import { errorMessage } from "../core/errors.ts";
 import { gitBranch } from "../core/git.ts";
 import { type Thread } from "../core/thread.ts";
@@ -73,6 +79,7 @@ import { mediaMethods } from "./media-methods.ts";
 import { FileIndexes } from "./file-indexes.ts";
 import { Clients, type Client, type Handlers } from "./clients.ts";
 import { EventFeed } from "./feed.ts";
+import { contextOperations } from "./context.ts";
 import { ExtensionSets, type ExtensionSet } from "./extension-sets.ts";
 import { hostOperations } from "./operations.ts";
 import { Orchestrator } from "./orchestrator.ts";
@@ -288,7 +295,14 @@ export class Host {
       operations: (folder, modules) => this.#extensionOperations(folder, modules),
     });
     // Every session gets 1harness's own tools; its folder's extensions add theirs.
-    this.tools = new ToolServer(() => this.#agentTools, options.version);
+    this.tools = new ToolServer(
+      () => this.#agentTools,
+      options.version,
+      () => {
+        const settings = this.#settings();
+        return (name) => toolDisabled(settings, name);
+      },
+    );
     this.manager = new ThreadManager({
       version: options.version,
       extensions: (cwd, client) => this.#extensionsFor(cwd, client),
@@ -335,6 +349,13 @@ export class Host {
         subscribe: (listener) => this.subscribe(listener),
       }),
       ...this.pageTools.map(toolOperation),
+      ...contextOperations({
+        manager: this.manager,
+        scope: this.#scope,
+        shared: () => this.#agentTools,
+        settings: () => this.#settings(),
+        configDir: () => options.configDir ?? configDir(),
+      }),
     ];
     this.#agentTools = new Map(agentTools(this.operations).map((tool) => [tool.name, { tool }]));
     this.manager.subscribe((event) => this.#managerEvent(event));

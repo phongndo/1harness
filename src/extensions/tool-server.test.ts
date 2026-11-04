@@ -123,4 +123,48 @@ describe("ToolServer", () => {
   it("offers nothing when no extension has a tool", async () => {
     assert.equal(await new ToolServer(() => new Map(), "1").grant(), null);
   });
+
+  it("keeps disabled tools out of sessions' lists and calls, as settings stand each time", async () => {
+    const echo: ToolDefinition = {
+      name: "echo",
+      description: "Repeats its text",
+      inputSchema: { type: "object", properties: {} },
+      execute: () => "said",
+    };
+    let off = new Set(["echo"]);
+    const server = new ToolServer(
+      () => new Map([["echo", { tool: echo }]]),
+      "1.0.0",
+      () => (name) => off.has(name),
+    );
+    assert.equal(await server.grant(), null);
+    off = new Set();
+    const grant = await server.grant();
+    assert.ok(grant && grant.config.type === "http");
+    grant.bind({ callId: () => null } as unknown as Thread);
+    const { url, headers } = grant.config;
+    const rpc = async (method: string, params: object = {}) => {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      });
+      return (await response.json()) as {
+        result?: { tools?: { name: string }[]; content?: { text: string }[]; isError?: boolean };
+        error?: { message: string };
+      };
+    };
+    const call = () => rpc("tools/call", { name: "echo", arguments: {} });
+    assert.deepEqual(
+      (await rpc("tools/list")).result?.tools?.map((tool) => tool.name),
+      ["echo"],
+    );
+    assert.equal((await call()).result?.content?.[0]?.text, "said");
+    // A harness keeps the list it read, so it may still call what was just turned off.
+    off = new Set(["echo"]);
+    assert.deepEqual((await rpc("tools/list")).result?.tools, []);
+    assert.match(JSON.stringify(await call()), /No tool named echo/);
+    grant.revoke();
+    await server.close();
+  });
 });

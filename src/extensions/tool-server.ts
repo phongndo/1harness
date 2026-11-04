@@ -27,10 +27,17 @@ export class ToolServer {
   #server: Server | null = null;
   #url: Promise<string> | null = null;
   #grants = new Map<string, { thread: Thread | null; tools: Tools }>();
+  #disabled: () => (name: string) => boolean;
 
-  constructor(tools: () => ReadonlyMap<string, { tool: ToolDefinition }>, version: string) {
+  /** `disabled` says, as things stand, which tools to keep from sessions' lists and calls. */
+  constructor(
+    tools: () => ReadonlyMap<string, { tool: ToolDefinition }>,
+    version: string,
+    disabled: () => (name: string) => boolean = () => () => false,
+  ) {
     this.#tools = tools;
     this.#version = version;
+    this.#disabled = disabled;
   }
 
   /**
@@ -38,7 +45,10 @@ export class ToolServer {
    * there is no tool to serve.
    */
   async grant(own: Tools = () => new Map()): Promise<ToolGrant | null> {
-    const tools: Tools = () => new Map([...own(), ...this.#tools()]);
+    const tools: Tools = () => {
+      const off = this.#disabled();
+      return new Map([...own(), ...this.#tools()].filter(([name]) => !off(name)));
+    };
     if (tools().size === 0) return null;
     const url = await this.#listen();
     const token = randomBytes(24).toString("base64url");

@@ -363,6 +363,11 @@ export class ThreadManager {
     return this.#extensions.get(id);
   }
 
+  /** The MCP servers 1harness added to a thread's session. */
+  serversOf(id: string): readonly string[] {
+    return Object.keys(this.#servers.get(id) ?? {});
+  }
+
   /**
    * Connects a thread's MCP servers, which its sessions get, the tool server's
    * grant among them; the caller binds the grant to the thread. Problems with
