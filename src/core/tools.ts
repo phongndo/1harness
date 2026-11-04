@@ -1,4 +1,4 @@
-import type { ApprovalAction, ToolPolicy } from "./events.ts";
+import type { ApprovalAction, ToolCallCheck, ToolPolicy } from "./events.ts";
 import { record, text } from "./values.ts";
 
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
@@ -85,7 +85,21 @@ export function denyHookOutput(reason: string): HookOutput {
   };
 }
 
-/** The output for a PreToolUse hook's input, as Claude Code and Codex send it, as a tool policy decides. */
+/** What a tool policy sees for a call to one of 1harness's tools: the tool that really runs. */
+export function ownToolCheck(name: string, input: unknown): ToolCallCheck {
+  const inner = gatewayCall(TOOL_SERVER, name, input);
+  return {
+    tool: `mcp__${TOOL_SERVER}__${inner?.tool ?? name}`,
+    input: inner ? inner.input : input,
+    action: toolAction(`mcp__${TOOL_SERVER}__${name}`, input),
+  };
+}
+
+/**
+ * The output for a PreToolUse hook's input, as Claude Code and Codex send it,
+ * as a tool policy decides. Calls to 1harness's own tools pass: the tool server
+ * checks those on every harness, and a handler should see each call once.
+ */
 export async function checkToolHook(
   policy: ToolPolicy | undefined,
   hook: unknown,
@@ -94,12 +108,7 @@ export async function checkToolHook(
   if (!policy || fields["hook_event_name"] !== "PreToolUse") return {};
   const tool = text(fields["tool_name"]);
   const input = fields["tool_input"];
-  const mcp = mcpTool(tool);
-  const inner = mcp && gatewayCall(mcp.server, mcp.tool, input);
-  const reason = await policy({
-    tool: mcp && inner ? `mcp__${mcp.server}__${inner.tool}` : tool,
-    input: inner ? inner.input : input,
-    action: toolAction(tool, input),
-  });
+  if (mcpTool(tool)?.server === TOOL_SERVER) return {};
+  const reason = await policy({ tool, input, action: toolAction(tool, input) });
   return reason ? denyHookOutput(reason) : {};
 }

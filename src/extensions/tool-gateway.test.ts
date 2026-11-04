@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
+import type { ToolCallCheck, ToolPolicy } from "../core/events.ts";
 import type { Thread } from "../core/thread.ts";
+import { checkToolHook } from "../core/tools.ts";
 import type { ToolContext, ToolDefinition } from "./api.ts";
 import { ToolServer } from "./tool-server.ts";
 
@@ -27,7 +29,11 @@ after(async () => {
 
 async function serve(
   tools: ToolDefinition[],
-  options: { gateway?: () => boolean; off?: () => (name: string) => boolean } = {},
+  options: {
+    gateway?: () => boolean;
+    off?: () => (name: string) => boolean;
+    policy?: ToolPolicy;
+  } = {},
 ) {
   const server = new ToolServer(
     () => new Map(tools.map((entry) => [entry.name, { tool: entry }])),
@@ -36,7 +42,7 @@ async function serve(
     options.gateway ?? (() => true),
   );
   servers.push(server);
-  const grant = await server.grant();
+  const grant = await server.grant(undefined, () => options.policy);
   assert.ok(grant && grant.config.type === "http");
   const thread = { callId: () => "call-1" } as unknown as Thread;
   grant.bind(thread);
@@ -195,5 +201,121 @@ describe("the tool gateway", () => {
     const result = await call("tool_act", { name: "thread_send", input: "[1]" });
     assert.equal(result.isError, true);
     assert.match(result.text, /must be a JSON object/);
+  });
+});
+
+/** A server whose policy blocks one tool by its full name, and notes every check. */
+async function guarded(blocked: string, gateway = true) {
+  calls.length = 0;
+  const seen: ToolCallCheck[] = [];
+  const policy: ToolPolicy = async (call) => {
+    seen.push(call);
+    return call.tool === blocked ? `${blocked} is off limits` : undefined;
+  };
+  return { seen, policy, ...(await serve(TOOLS, { policy, gateway: () => gateway })) };
+}
+const blocked = (text: string) => ({ text, isError: true });
+
+describe("a tool policy on the tool server", () => {
+  it("keeps a blocked tool from running and tells the agent why", async () => {
+    const { call } = await guarded("mcp__1harness__thread_send");
+    assert.deepEqual(
+      await call("tool_act", { name: "thread_send", input: { x: 1 } }),
+      blocked("mcp__1harness__thread_send is off limits"),
+    );
+    assert.equal(calls.length, 0);
+  });
+
+  it("checks the tool that tool_act reaches, as a harness's hook would show it", async () => {
+    const { call, seen } = await guarded("nothing");
+    assert.equal(
+      (await call("tool_act", { name: "thread_send", input: { x: 1 } })).text,
+      "ran thread_send",
+    );
+    assert.deepEqual(seen, [
+      {
+        tool: "mcp__1harness__thread_send",
+        input: { x: 1 },
+        action: { type: "tool", tool: "thread_send", server: "1harness", input: { x: 1 } },
+      },
+    ]);
+  });
+
+  it("checks the tool that tool_read reaches, with input sent as a string", async () => {
+    const { call, seen } = await guarded("mcp__1harness__thread_read");
+    assert.equal(
+      (await call("tool_read", { name: "thread_read", input: '{"x":1}' })).text,
+      "mcp__1harness__thread_read is off limits",
+    );
+    assert.equal(calls.length, 0);
+    assert.deepEqual(seen, [
+      {
+        tool: "mcp__1harness__thread_read",
+        input: { x: 1 },
+        action: { type: "tool", tool: "thread_read", server: "1harness", input: { x: 1 } },
+      },
+    ]);
+  });
+
+  it("checks direct tools and tool_search under their own names", async () => {
+    const { call, seen } = await guarded("mcp__1harness__delegate_task");
+    assert.equal((await call("delegate_task", { x: 1 })).isError, true);
+    assert.equal(calls.length, 0);
+    assert.equal((await call("tool_search", { query: "read" })).isError, false);
+    assert.deepEqual(
+      seen.map((check) => [check.tool, check.action]),
+      [
+        [
+          "mcp__1harness__delegate_task",
+          { type: "tool", tool: "delegate_task", server: "1harness", input: { x: 1 } },
+        ],
+        [
+          "mcp__1harness__tool_search",
+          { type: "tool", tool: "tool_search", server: "1harness", input: { query: "read" } },
+        ],
+      ],
+    );
+  });
+
+  it("checks tools by name when the gateway is off", async () => {
+    const { call } = await guarded("mcp__1harness__thread_send", false);
+    assert.equal((await call("thread_send", {})).isError, true);
+    assert.equal((await call("thread_read", {})).text, "ran thread_read");
+    assert.deepEqual(
+      calls.map(([name]) => name),
+      ["thread_read"],
+    );
+  });
+
+  it("does not let a name that is not a string reach a tool past its check", async () => {
+    const { call, seen } = await guarded("mcp__1harness__thread_send");
+    const reply = await call("tool_act", { name: ["thread_send"] });
+    assert.equal(reply.isError, true);
+    assert.match(reply.text, /^No tool /);
+    assert.equal(calls.length, 0);
+    assert.deepEqual(
+      seen.map((check) => check.tool),
+      ["mcp__1harness__tool_act"],
+    );
+  });
+
+  it("shows a handler each call once, when a harness's hook runs first too", async () => {
+    const { call, seen, policy } = await guarded("nothing");
+    for (const [name, input] of [
+      ["tool_act", { name: "thread_send", input: { x: 1 } }],
+      ["tool_read", { name: "thread_read" }],
+      ["delegate_task", {}],
+      ["tool_search", {}],
+    ] as const) {
+      seen.length = 0;
+      await checkToolHook(policy, {
+        hook_event_name: "PreToolUse",
+        tool_name: `mcp__1harness__${name}`,
+        tool_input: input,
+      });
+      assert.equal(seen.length, 0, `the hook leaves ${name} alone`);
+      await call(name, input);
+      assert.equal(seen.length, 1, `the server checks ${name}`);
+    }
   });
 });

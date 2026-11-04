@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { checkToolHook, gatewayCall, isGatewayName, toolAction } from "./tools.ts";
+import { checkToolHook, gatewayCall, isGatewayName, ownToolCheck, toolAction } from "./tools.ts";
 
 describe("calls through the gateway", () => {
   it("name the tool they reach, however the input was sent", () => {
@@ -47,27 +47,76 @@ describe("calls through the gateway", () => {
     });
   });
 
-  it("show policies the tool that really runs, which can block it", async () => {
-    const seen: unknown[] = [];
-    const output = await checkToolHook(
-      async (call) => {
-        seen.push([call.tool, call.input, call.action]);
-        return call.action.type === "tool" && call.action.tool === "thread_send" ? "no" : undefined;
-      },
-      {
-        hook_event_name: "PreToolUse",
-        tool_name: "mcp__1harness__tool_act",
-        tool_input: { name: "thread_send", input: { threadId: "t" } },
-      },
+  it("show policies the tool that really runs", () => {
+    const action = {
+      type: "tool",
+      tool: "thread_send",
+      server: "1harness",
+      input: { threadId: "t" },
+    };
+    const check = { tool: "mcp__1harness__thread_send", input: { threadId: "t" }, action };
+    assert.deepEqual(
+      ownToolCheck("tool_act", { name: "thread_send", input: { threadId: "t" } }),
+      check,
     );
-    assert.deepEqual(seen, [
-      [
-        "mcp__1harness__thread_send",
-        { threadId: "t" },
-        { type: "tool", tool: "thread_send", server: "1harness", input: { threadId: "t" } },
-      ],
-    ]);
+    assert.deepEqual(ownToolCheck("thread_send", { threadId: "t" }), check);
+    assert.deepEqual(ownToolCheck("tool_search", { query: "x" }), {
+      tool: "mcp__1harness__tool_search",
+      input: { query: "x" },
+      action: { type: "tool", tool: "tool_search", server: "1harness", input: { query: "x" } },
+    });
+  });
+});
+
+const hook = (tool_name: string, tool_input: unknown) => ({
+  hook_event_name: "PreToolUse",
+  tool_name,
+  tool_input,
+});
+
+describe("checkToolHook", () => {
+  it("leaves 1harness's own tools to its tool server", async () => {
+    const seen: unknown[] = [];
+    const policy = async (call: unknown) => {
+      seen.push(call);
+      return "no";
+    };
+    assert.deepEqual(await checkToolHook(policy, hook("mcp__1harness__delegate_task", {})), {});
+    assert.deepEqual(
+      await checkToolHook(policy, hook("mcp__1harness__tool_act", { name: "thread_send" })),
+      {},
+    );
+    assert.deepEqual(seen, []);
+  });
+
+  it("blocks every other tool as the policy says", async () => {
+    const seen: unknown[] = [];
+    const check = (name: string, input: unknown) =>
+      checkToolHook(
+        async (call) => {
+          seen.push(call);
+          return "no";
+        },
+        hook(name, input),
+      );
+    const output = await check("Bash", { command: "ls" });
     assert.equal(output.hookSpecificOutput?.permissionDecision, "deny");
     assert.equal(output.hookSpecificOutput?.permissionDecisionReason, "no");
+    assert.equal(
+      (await check("mcp__docs__tool_act", { name: "x" })).hookSpecificOutput?.permissionDecision,
+      "deny",
+    );
+    assert.deepEqual(seen, [
+      {
+        tool: "Bash",
+        input: { command: "ls" },
+        action: { type: "command", command: "ls", cwd: null },
+      },
+      {
+        tool: "mcp__docs__tool_act",
+        input: { name: "x" },
+        action: { type: "tool", tool: "tool_act", server: "docs", input: { name: "x" } },
+      },
+    ]);
   });
 });

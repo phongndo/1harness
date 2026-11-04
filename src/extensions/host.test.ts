@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, it } from "node:test";
@@ -15,6 +15,7 @@ import type {
 } from "../core/events.ts";
 import { Thread } from "../core/thread.ts";
 import { ExtensionHost } from "./host.ts";
+import { ToolServer } from "./tool-server.ts";
 
 class FakeSession {
   readonly capabilities = {
@@ -337,6 +338,68 @@ describe("ExtensionHost", () => {
       assert.match((await check("sudo reboot")) ?? "", /blocks commands matching/);
       assert.equal(await check("ls"), undefined);
     } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("checks its session's calls to 1harness's tools, whatever the harness", async () => {
+    const { root, host, notices } = setup();
+    const server = new ToolServer(() => new Map(), "1");
+    try {
+      const folder = join(root, "config", "extensions");
+      mkdirSync(folder, { recursive: true });
+      const ran = join(root, "ran");
+      writeFileSync(
+        join(folder, "guard.ts"),
+        `import { writeFileSync } from "node:fs";
+export default function (api) {
+  const tool = (name) => ({
+    name,
+    description: name,
+    inputSchema: { type: "object" },
+    direct: true,
+    execute: () => { writeFileSync(${JSON.stringify(ran)}, name); return "ran " + name; },
+  });
+  api.registerTool(tool("wipe"));
+  api.registerTool(tool("flaky"));
+  api.onToolCall((call, context) => {
+    if (!context.thread) throw new Error("no thread");
+    if (call.tool === "mcp__1harness__flaky") throw new Error("broken check");
+    return call.tool === "mcp__1harness__wipe" ? "not today" : undefined;
+  });
+}
+`,
+      );
+      await host.loadAll();
+      const { grant } = await host.sessionServers(server);
+      assert.ok(grant && grant.config.type === "http");
+      grant.bind(new Thread(new FakeSession() as unknown as HarnessSession));
+      const call = async (name: string) => {
+        const { url, headers } = grant.config as { url: string; headers: Record<string, string> };
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...headers },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: { name, arguments: {} },
+          }),
+        });
+        return ((await response.json()) as { result: unknown }).result;
+      };
+      assert.deepEqual(await call("wipe"), {
+        content: [{ type: "text", text: "not today" }],
+        isError: true,
+      });
+      assert.equal(existsSync(ran), false, "the blocked tool did not run");
+      assert.deepEqual(await call("flaky"), { content: [{ type: "text", text: "ran flaky" }] });
+      assert.ok(
+        notices.some((notice) => notice.includes("broken check")),
+        "a check that throws is reported, and does not block",
+      );
+    } finally {
+      await server.close();
       rmSync(root, { recursive: true, force: true });
     }
   });

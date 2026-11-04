@@ -310,7 +310,8 @@ export class ExtensionHost {
   /**
    * The MCP servers 1harness adds to a new session: the shared ones from
    * `mcp.json`, and the tool server when extensions have tools. The grant ties
-   * the tool server to the session's thread.
+   * the tool server to the session's thread, and checks its calls with the
+   * extensions' tool policy.
    */
   async sessionServers(tools: ToolServer): Promise<{
     servers: Record<string, McpServerConfig>;
@@ -318,7 +319,10 @@ export class ExtensionHost {
     warnings: string[];
   }> {
     const config = loadMcpConfig(this.#options.configDir, this.trusted ? this.#options.cwd : null);
-    const grant = await tools.grant(() => this.tools);
+    const grant = await tools.grant(
+      () => this.tools,
+      (thread) => this.toolPolicy(() => thread),
+    );
     const servers = { ...config.servers, ...(grant ? { "1harness": grant.config } : {}) };
     return { servers, grant, warnings: config.warnings };
   }
