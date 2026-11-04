@@ -1,10 +1,11 @@
-import type { RuntimeMode } from "../core/events.ts";
+import type { HarnessRequest, RuntimeMode } from "../core/events.ts";
 import type { Message } from "../core/thread.ts";
 import { cacheHit, contextUsed, formatCost } from "../core/wording.ts";
 import type { ThreadState } from "../protocol.ts";
 import type { Editor } from "./editor.ts";
 import { infoPanel, type Menu } from "./menu.ts";
 import type { ResumeView } from "./resume.ts";
+import { commandRisk } from "./risk.ts";
 import type { CursorPosition } from "./screen.ts";
 import { style } from "./theme.ts";
 import { oneLineText, spread, truncate, visibleWidth, wrap } from "./text.ts";
@@ -23,16 +24,12 @@ function queueRows(queue: readonly Message[], held: boolean, width: number): str
       width,
     ),
   );
-  if (held && queue.length > 0)
-    rows.push(
-      ...wrap(
-        style.muted(
-          `    your next message runs ${queue.length === 1 ? "it" : "these"} first · /unqueue takes one back`,
-        ),
-        width,
-        "    ",
-      ),
-    );
+  if (queue.length > 0) {
+    const when = held
+      ? `your next message runs ${queue.length === 1 ? "it" : "these"} first`
+      : "runs when this turn ends";
+    rows.push(...wrap(style.muted(`    ${when} · /unqueue takes one back`), width, "    "));
+  }
   return rows;
 }
 
@@ -41,17 +38,34 @@ function queueRows(queue: readonly Message[], held: boolean, width: number): str
  * approval: the oldest one, with how many more are waiting.
  */
 function attentionLine(
-  waiting: readonly { threadId: string; request: { kind: "approval" | "question" } }[],
+  waiting: readonly { threadId: string; request: HarnessRequest }[],
   threads: ReadonlyMap<string, ThreadState>,
   width: number,
 ): string | null {
   const [first] = waiting;
   const thread = first ? threads.get(first.threadId) : undefined;
   if (!first || !thread) return null;
-  const what = first.request.kind === "question" ? "has a question" : "needs approval";
+  const { request } = first;
+  // What it asks, so a risky command need not be opened to be seen for what it is.
+  const command =
+    request.kind === "approval" && request.action.type === "command"
+      ? request.action.command
+      : null;
+  const what =
+    request.kind === "question"
+      ? style.attention("has a question")
+      : command
+        ? `${style.attention("wants to run")} ${(commandRisk(command) ? style.removed : style.text)(oneLineText(command))}`
+        : style.attention("needs approval");
   const others = new Set(waiting.map((open) => open.threadId)).size - 1;
   const more = others > 0 ? style.muted(` · ${others} more`) : "";
-  const left = `${style.attention("◆")} ${style.strong(thread.title || "New thread")}  ${style.attention(what)}${more}`;
+  // The title gives way first: it is what is being asked that needs reading here.
+  const room = width - visibleWidth(what) - visibleWidth(more) - 4 - 14;
+  // Which thread, after whose it is; a narrow pane keeps what is asked in view.
+  const who = "Another thread: ";
+  const whose = room - who.length >= 12 ? style.muted(who) : "";
+  const title = truncate(thread.title || "New thread", Math.max(8, room - visibleWidth(whose)));
+  const left = `${style.attention("◆")} ${whose}${style.strong(title)}  ${what}${more}`;
   return spread(truncate(left, Math.max(0, width - 14)), style.muted("ctrl+o open"), width);
 }
 
@@ -76,12 +90,16 @@ function activityLine(
   const dot = state.blink ? style.text("•") : " ";
   const tokens = tokenCounts(Math.ceil(turn.up), Math.ceil(turn.down));
   const hint = state.steer
-    ? "esc stop · enter adds to turn · tab queues"
-    : "esc stop · enter queues";
+    ? "esc stop · ctrl+x details · enter adds to turn · tab queues"
+    : "esc stop · ctrl+x details · enter queues";
   const left = `${dot} ${style.text(`${phase} (${seconds}s)`)} ${style.muted(tokens)}`;
   // A narrow screen keeps what the turn is doing and drops the keys.
   if (visibleWidth(left) + visibleWidth(hint) + 2 > width) return truncate(left, width);
   return spread(left, style.muted(hint), width);
+}
+
+function moreLines(count: number): string {
+  return `${count} more ${count === 1 ? "line" : "lines"}`;
 }
 
 /** What the status line shows, as the terminal has it when it draws. */
@@ -105,6 +123,8 @@ export interface StatusLineState {
   notes?: readonly string[];
   /** Rows the view is scrolled up. */
   scroll: number;
+  /** Rows of the transcript above the top of the view. */
+  above: number;
   /** Whether tool calls show whole. */
   details: boolean;
 }
@@ -118,22 +138,20 @@ export function statusLine(state: StatusLineState, width: number): string {
   if (state.toast) return truncate(`${style.added("✓")} ${style.text(state.toast)}`, width);
   const { current } = state;
   const info = current?.info ?? null;
-  // A closed thread on screen says so first, since it takes no messages.
+  // Kept longest first, so a narrow pane still says what the agent may do and who it is.
+  const closed = current?.status === "closed" ? "closed" : null;
   const mode = info?.runtimeMode ?? state.runtimeMode;
-  const parts: string[] = current?.status === "closed" ? ["closed", mode] : [mode];
   // Empty while the first run asks which harness to start.
-  if (state.harness) parts.push(state.harness);
-  if (info) {
-    if (state.model) parts.push(state.model);
-    if (info.effort) parts.push(info.effort);
-  }
+  let harness: string | null = state.harness || null;
+  let model = info ? state.model : null;
+  let effort = info ? info.effort : null;
   const usage = current?.usage;
-  const context = usage ? contextUsed(usage) : null;
-  if (context) parts.push(`ctx ${context.percent}%`);
+  const contextShare = usage ? contextUsed(usage) : null;
+  let context = contextShare ? `ctx ${contextShare.percent}%` : null;
   const cached = usage ? cacheHit(usage) : null;
-  if (cached !== null) parts.push(`cache ${cached}%`);
+  let cache = cached !== null ? `cache ${cached}%` : null;
   // Nothing spent yet, or a subscription that does not count it, shows no cost.
-  if (usage?.costUsd) parts.push(formatCost(usage.costUsd));
+  let cost = usage?.costUsd ? formatCost(usage.costUsd) : null;
   const where = [state.folder, state.server ? `on ${state.server}` : null].filter(Boolean);
   let left = style.text(where.join(" · "));
   if (info?.interactionMode === "plan")
@@ -141,14 +159,38 @@ export function statusLine(state: StatusLineState, width: number): string {
   for (const note of state.notes ?? [])
     left += `${left === "" ? "" : style.muted(" · ")}${style.text(oneLineText(note))}`;
   // The right edge stays whole as the left is cut, so modes the keys toggle go there too.
-  const hint =
+  // At the bottom, a reply can open mid-sentence with nothing to say more lies above it.
+  let scrolled =
     state.scroll > 0
-      ? `↓ ${state.scroll} more lines · pgdn`
-      : state.details
-        ? "details · ctrl+x"
+      ? `↓ ${moreLines(state.scroll)} · pgdn`
+      : state.above > 0
+        ? `↑ ${moreLines(state.above)} · pgup`
         : null;
-  const right = [hint, parts.join(" · ")].filter(Boolean).join("   ");
-  return spread(left, style.muted(right), width);
+  let details = state.details ? "details · ctrl+x" : null;
+  const right = () =>
+    [
+      scrolled,
+      details,
+      [closed, mode, harness, model, effort, context, cache, cost].filter(Boolean).join(" · "),
+    ]
+      .filter(Boolean)
+      .join("   ");
+  const shed = [
+    () => (cache = null),
+    () => (effort = null),
+    () => (cost = null),
+    () => (context = null),
+    () => (model = null),
+    () => (details = null),
+    () => (harness = null),
+    () => (scrolled = null),
+  ];
+  const leftWidth = visibleWidth(left);
+  for (const drop of shed) {
+    if (leftWidth + 2 + visibleWidth(right()) <= width) break;
+    drop();
+  }
+  return spread(left, style.muted(right()), width);
 }
 
 /** A panel over the composer, as the footer shows it. */

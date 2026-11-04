@@ -6,7 +6,7 @@ import type { LogEntry } from "../protocol.ts";
 import { plainLine, type AgentRow } from "./agents.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { visibleWidth, wrap } from "./text.ts";
-import { Transcript, renderBlock, type Block, type ToolItem } from "./transcript.ts";
+import { Transcript, failureText, renderBlock, type Block, type ToolItem } from "./transcript.ts";
 import { ThreadView } from "./view.ts";
 
 const plain = (rows: string[]) => rows.map((row) => stripVTControlCharacters(row));
@@ -316,7 +316,7 @@ describe("ThreadView", () => {
     // Folded, the turn's work is its summary; the command still running stays in view.
     assert.equal(plain(view.transcript.view(context, 10, 0).rows)[0], "● Used 1 tool");
     assert.deepEqual(
-      plain(view.transcript.view({ ...context, details: true }, 10, 0).rows).slice(2, 7),
+      plain(view.transcript.view({ ...context, details: true }, 10, 0).rows).slice(0, 5),
       ["● Stopped handing off a task", "", "  Starting the server", "", "● Running npm run dev"],
     );
   });
@@ -656,7 +656,7 @@ describe("loading earlier turns", () => {
       rows.some((line) => line.includes("Stopped read a.ts")),
       rows.join("\n"),
     );
-    assert.ok(rows.includes("  Interrupted · 5s (↑1 ↓2)"), rows.join("\n"));
+    assert.ok(rows.includes("  Interrupted · 5s (↑1 ↓2 tokens)"), rows.join("\n"));
   });
 });
 
@@ -788,9 +788,15 @@ describe("finished turns", () => {
       "",
       "  Fixed it.",
       "",
-      "  4s (↑1 ↓2)",
+      "  Done · 4s (↑1 ↓2 tokens)",
     ]);
     const detailed = plain(view.transcript.view({ ...context, details: true }, 30, 0).rows);
+    // The line the work folds into would only say what the work under it says.
+    assert.equal(
+      detailed.filter((line) => line === "● Changed 1 file and ran 1 command").length,
+      1,
+      detailed.join("\n"),
+    );
     assert.ok(
       detailed.some((line) => line.includes("◦ Planning the fix")),
       detailed.join("\n"),
@@ -836,5 +842,78 @@ describe("what a click on the transcript does", () => {
       regions.map(({ kind, code }) => [kind, code]),
       [["code", "print(1)"]],
     );
+  });
+});
+
+describe("a failed turn", () => {
+  const failing = {
+    kind: "command",
+    id: "failing",
+    command: "pnpm test",
+    output: "1 of 3 failed\n",
+    exitCode: 1,
+    status: "failed",
+  } as const;
+
+  it("names what failed under the line its work folds into", () => {
+    const rows = plain(
+      renderBlock(
+        {
+          kind: "worked",
+          text: "Ran 1 command · 1 failed",
+          files: [],
+          failures: [failureText(failing)],
+        },
+        context,
+      ),
+    );
+    assert.deepEqual(rows, ["● Ran 1 command · 1 failed", "└ ✗ pnpm test · exit 1: 1 of 3 failed"]);
+  });
+});
+
+describe("a running command", () => {
+  it("takes its output as it arrives", () => {
+    const view = new ThreadView("t1");
+    view.startTurn();
+    view.item(
+      {
+        kind: "command",
+        id: "run",
+        command: "pnpm test",
+        output: "",
+        exitCode: null,
+        status: "running",
+      },
+      false,
+      true,
+    );
+    view.delta("run", "ok 1\n");
+    assert.deepEqual(plain(view.transcript.view(context, 10, 0).rows), [
+      "● Running pnpm test",
+      "  ok 1",
+    ]);
+  });
+
+  it("shows the last line of its output, so a long one is not a silent row", () => {
+    const rows = plain(
+      renderBlock(
+        {
+          kind: "tools",
+          settled: false,
+          items: [
+            {
+              kind: "command",
+              id: "run",
+              command: "pnpm test",
+              output: "ok 1\nok 2\n",
+              exitCode: null,
+              status: "running",
+            },
+          ],
+        },
+        context,
+      ),
+    );
+    assert.equal(rows.at(-1), "  ok 2");
   });
 });

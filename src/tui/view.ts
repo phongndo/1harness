@@ -5,11 +5,18 @@ import { stripHandoff } from "../host/handoff.ts";
 import type { LogEntry, TurnTokens } from "../protocol.ts";
 import { formatTokens } from "../core/wording.ts";
 import { reportStatus, type AgentRow } from "./agents.ts";
-import { Transcript, changeCounts, groupSummary, isToolItem, type Block } from "./transcript.ts";
+import {
+  Transcript,
+  changeCounts,
+  failureText,
+  groupSummary,
+  isToolItem,
+  type Block,
+} from "./transcript.ts";
 
-/** A turn's tokens up and down, as its activity line and summary say them: `(↑1.2k ↓350)`. */
+/** A turn's tokens up and down, as its activity line and summary say them: `(↑1.2k ↓350 tokens)`. */
 export function tokenCounts(up: number, down: number): string {
-  return `(↑${formatTokens(up)} ↓${formatTokens(down)})`;
+  return `(↑${formatTokens(up)} ↓${formatTokens(down)} tokens)`;
 }
 
 /** What the view needs from the client to show an entry. */
@@ -373,9 +380,14 @@ export class ThreadView {
     const down = ended?.down ?? Math.ceil(turn.down);
     const tokens = tokenCounts(up, down);
     const label =
-      status === "interrupted" ? "Interrupted · " : status === "failed" ? "Failed · " : "";
-    this.transcript.add({ kind: "summary", text: `${label}${seconds}s ${tokens}` });
-    if (status === "failed" && error) this.notice("error", error);
+      status === "interrupted" ? "Interrupted · " : status === "failed" ? "Failed · " : "Done · ";
+    const next = status === "failed" ? " · send a message to try again" : "";
+    // A harness that reported the failure as it happened already said why.
+    const said = this.transcript
+      .since(this.#turnStart)
+      .some((block) => block.kind === "notice" && block.level === "error");
+    this.transcript.add({ kind: "summary", text: `${label}${seconds}s ${tokens}${next}` });
+    if (status === "failed" && error && !said) this.notice("error", error);
   }
 
   /**
@@ -416,7 +428,12 @@ export class ThreadView {
     const [first] = work;
     if (!first) return;
     this.transcript.insertBefore<Extract<Block, { kind: "worked" }>>(
-      { kind: "worked", text: groupSummary(items), files: [...files.values()] },
+      {
+        kind: "worked",
+        text: groupSummary(items),
+        files: [...files.values()],
+        failures: items.filter((item) => item.status === "failed").map(failureText),
+      },
       first,
     );
     for (const block of work) {
@@ -451,6 +468,13 @@ export class ThreadView {
   item(item: Item, completed: boolean, busy: boolean, message?: Message): void {
     if (busy && item.kind !== "notice") this.startTurn();
     const existing = this.blocks.get(item.id);
+    // A thought from a step ago would read as what the agent is doing now.
+    if (this.turn && !existing && (isToolItem(item) || item.kind === "assistant_message"))
+      for (const block of this.transcript.since(this.#turnStart))
+        if (block.kind === "thinking" && !block.folded) {
+          block.folded = true;
+          this.transcript.touch(block);
+        }
     switch (item.kind) {
       case "user_message": {
         const shown = messageBlock(item.text, message);
@@ -558,6 +582,15 @@ export class ThreadView {
       block.text += chunk;
       this.transcript.touch(block);
       if (this.turn) this.turn.phase = "Generating";
+      return;
+    }
+    if (block?.kind === "tools") {
+      const index = block.items.findIndex((item) => item.id === itemId);
+      const item = block.items[index];
+      if (item?.kind === "command") {
+        block.items[index] = { ...item, output: item.output + chunk };
+        this.transcript.touch(block);
+      }
       return;
     }
     const known = this.#reasoning.get(itemId);

@@ -62,7 +62,13 @@ export type Block =
    * What a finished turn did, in place of its work: a sentence, and the files
    * it changed with their lines added and removed.
    */
-  | { kind: "worked"; text: string; files: { path: string; added: number; removed: number }[] }
+  | {
+      kind: "worked";
+      text: string;
+      files: { path: string; added: number; removed: number }[];
+      /** What failed among the folded work, which should not take ctrl+x to find. */
+      failures?: string[];
+    }
   | { kind: "notice"; level: NoticeLevel; text: string }
   /** A 1harness command's output, such as /mcp: a heading over aligned lines. */
   | { kind: "report"; title: string; lines: ReportSpan[][] }
@@ -278,6 +284,20 @@ export class Transcript {
     return this.#entries.slice(count).map((entry) => entry.block);
   }
 
+  /** Where the last message the user sent starts among all rows, or the top when there is none. */
+  lastTurnRow(context: RenderContext): number {
+    let total = 0;
+    let row = 0;
+    for (const entry of this.#entries) {
+      const { rows } = this.#rows(entry, context);
+      if (rows.length === 0) continue;
+      if (total > 0) total += 1;
+      if (entry.block.kind === "user") row = total;
+      total += rows.length;
+    }
+    return row;
+  }
+
   /**
    * The rows in view, `height` of them ending `scroll` rows above the last,
    * with the pictures they show and what each does when clicked; `top` is
@@ -458,7 +478,10 @@ export function renderBlock(block: Block, context: RenderContext): string[] {
     case "thinking":
       return thinkingRows(block.text, context);
     case "worked":
-      return marked(workedRows(block, context), { kind: "details" }, context);
+      // In detail, the work it stands for shows right under it, saying the same.
+      return context.details
+        ? []
+        : marked(workedRows(block, context), { kind: "details" }, context);
     case "assistant":
       return block.text.trim() === ""
         ? []
@@ -544,6 +567,13 @@ function workedRows(block: Extract<Block, { kind: "worked" }>, context: RenderCo
   const rows = [truncate(`${style.strong("●")} ${style.muted(block.text)}`, context.width)];
   const files = block.files.slice(0, WORKED_FILES);
   const more = block.files.length - files.length;
+  const failures = block.failures ?? [];
+  failures.forEach((failure, index) => {
+    const last = index === failures.length - 1 && files.length === 0 && more === 0;
+    rows.push(
+      truncate(`${style.muted(last ? "└ " : "├ ")}${style.removed(`✗ ${failure}`)}`, context.width),
+    );
+  });
   files.forEach((file, index) => {
     const last = index === files.length - 1 && more === 0;
     const counts = [
@@ -784,14 +814,32 @@ function resultRows(block: Extract<Block, { kind: "result" }>, context: RenderCo
   return rows;
 }
 
+/** A failed tool call in one line: what ran, and how it ended where the output says. */
+export function failureText(item: ToolItem): string {
+  const lines = "output" in item ? plainText(item.output).trim().split("\n") : [];
+  const last = oneLineText(lines.at(-1) ?? "");
+  const what =
+    item.kind === "command"
+      ? `${oneLineText(item.command)}${item.exitCode ? ` · exit ${item.exitCode}` : ""}`
+      : item.kind === "tool_call"
+        ? toolName(item)
+        : item.kind === "file_change"
+          ? "File change"
+          : item.kind === "web_search"
+            ? "Web search"
+            : "Tool call";
+  return last ? `${what}: ${last}` : what;
+}
+
 function noticeRows(block: Extract<Block, { kind: "notice" }>, width: number): string[] {
+  const paint = block.level === "error" ? style.removed : style.attention;
   const label = block.level === "error" ? "Error " : block.level === "warning" ? "Warning " : "";
   return plainText(block.text)
     .replace(/\s+$/, "")
     .split("\n")
     .flatMap((line, index) =>
       wrap(
-        `  ${index === 0 && label ? style.bold(style.text(label)) : ""}${style.soft(line)}`,
+        `  ${index === 0 && label ? style.bold(paint(label)) : ""}${style.soft(line)}`,
         width,
         "  ",
       ),
@@ -931,9 +979,15 @@ function toolRows(block: Extract<Block, { kind: "tools" }>, context: RenderConte
   const settled = (item: ToolItem) => block.settled || (block.cut?.includes(item.id) ?? false);
   const line = (item: ToolItem) => toolLine(item, settled(item), context.cwd, waiting(item));
   const [only] = items;
+  // A long command is otherwise a silent row, with no sign whether it is getting anywhere.
+  const tail = (item: ToolItem, hang: string): string[] => {
+    if (item.kind !== "command" || item.status !== "running" || settled(item)) return [];
+    const last = plainText(item.output).trimEnd().split("\n").at(-1)?.trim();
+    return last ? [truncate(`${hang}${style.muted(last)}`, context.width)] : [];
+  };
   if (only && items.length === 1) {
     if (context.details) return detailedItem(only, `${marker} `, "  ", context, line(only));
-    return [truncate(`${marker} ${line(only)}`, context.width)];
+    return [truncate(`${marker} ${line(only)}`, context.width), ...tail(only, "  ")];
   }
   const rows = [truncate(`${marker} ${style.muted(groupSummary(items))}`, context.width)];
   items.forEach((item, index) => {
@@ -943,7 +997,11 @@ function toolRows(block: Extract<Block, { kind: "tools" }>, context: RenderConte
       rows.push(
         ...detailedItem(item, branch, style.muted(last ? "  " : "│ "), context, line(item)),
       );
-    else rows.push(truncate(branch + line(item), context.width));
+    else
+      rows.push(
+        truncate(branch + line(item), context.width),
+        ...tail(item, style.muted(last ? "  " : "│ ")),
+      );
   });
   return rows;
 }

@@ -916,6 +916,22 @@ describe("App threads and keys", () => {
     assert.equal(session.client.threads.get(id)?.title, "Parser work");
   });
 
+  it("brings the work ctrl+x expands into view, and goes back down after", async () => {
+    const session = await start({ prompt: "go" });
+    await session.sees("Done with go");
+    session.terminal.rows = 12;
+    session.terminal.emit("resize");
+    await settle(30);
+    await session.type("\x18");
+    const whole = await session.sees("details · ctrl+x");
+    assert.match(whole, /┃ go/);
+    assert.match(whole, /Reading the parser/);
+    assert.match(whole, /more lines · pgdn/);
+    await session.type("\x18");
+    await session.sees("Done with go");
+    assert.doesNotMatch(session.terminal.text(), /more lines/);
+  });
+
   it("shows tool output whole with ctrl+x, and in brief again", async () => {
     const session = await start({ prompt: "alpha" });
     const brief = await session.sees("Done with alpha");
