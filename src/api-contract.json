@@ -102,6 +102,7 @@
   "extensionApi": [
     "acpAgent",
     "choose",
+    "delegate",
     "name",
     "on",
     "onInput",
@@ -125,7 +126,6 @@
       "input": [
         "effort",
         "harness",
-        "isolation",
         "model",
         "plan",
         "requestId",

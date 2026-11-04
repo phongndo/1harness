@@ -387,14 +387,7 @@ export interface Methods {
    */
   "thread.fork": { params: { threadId: string; turn?: number }; result: ThreadState };
   /** Deletes a thread, and the threads it started, for good. */
-  "thread.forget": {
-    params: { threadId: string };
-    result: {
-      forgotten: string[];
-      /** Worktrees of those threads that hold work, so they stayed. */
-      keptWorktrees?: { threadId: string; path: string; branch: string; reason: string }[];
-    };
-  };
+  "thread.forget": { params: { threadId: string }; result: { forgotten: string[] } };
   /** Threads whose transcripts match, with where. */
   "threads.search": {
     params: { query: string; limit?: number };

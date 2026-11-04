@@ -14,7 +14,7 @@ import type {
   UserInput,
 } from "../core/events.ts";
 import { Thread } from "../core/thread.ts";
-import { ExtensionHost } from "./host.ts";
+import { ExtensionHost, JsonStorage } from "./host.ts";
 import { ToolServer } from "./tool-server.ts";
 
 class FakeSession {
@@ -95,6 +95,25 @@ const skill = (folder: string, name: string, description: string) => {
   mkdirSync(join(folder, name), { recursive: true });
   writeFileSync(join(folder, name, "SKILL.md"), `---\ndescription: ${description}\n---\nBody.`);
 };
+
+describe("JsonStorage", () => {
+  it("keeps what another folder's copy of an extension saved to the same file", () => {
+    const root = mkdtempSync(join(tmpdir(), "1harness-storage-"));
+    try {
+      const file = join(root, "nested", "extension.json");
+      const first = new JsonStorage(file);
+      const second = new JsonStorage(file);
+      first.set("a", 1);
+      second.set("b", 2);
+      first.set("c", 3);
+      second.delete("a");
+      assert.deepEqual(first.keys().toSorted(), ["b", "c"]);
+      assert.equal(second.get("c"), 3);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("what extensions reach", () => {
   it("refuses a shortcut it cannot have, and the extension says so", async () => {
