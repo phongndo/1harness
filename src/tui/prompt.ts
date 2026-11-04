@@ -3,7 +3,7 @@ import type { Key } from "./input.ts";
 import { hints, lineStep, rule, tabRow } from "./menu.ts";
 import type { CursorPosition } from "./screen.ts";
 import { diffLine, style } from "./theme.ts";
-import { diffBody, oneLineText, plainText, spread, truncate, visibleWidth, wrap } from "./text.ts";
+import { oneLineText, plainText, spread, truncate, visibleWidth, wrap } from "./text.ts";
 
 export interface ChoiceOption {
   label: string;
@@ -18,6 +18,10 @@ export interface ChoiceConfig {
   /** Shown at the right edge, such as `Command`. */
   tag: string;
   title: string;
+  /** What tab adds to a choice, for its hint. */
+  comment?: string;
+  /** Where what the warning warns of would happen, said beside it where it fits. */
+  where?: string;
   /** What could go wrong in choosing yes, which should not read as ordinary detail. */
   warning?: string;
   detail: string[];
@@ -61,24 +65,19 @@ const DETAIL_LINES = 12;
 /** Rows kept free of a prompt shown whole, for a row of the transcript. */
 const FOOTER_ROWS = 1;
 
-/** Detail text that is not a diff's change: bold, to read as what is asked about. */
+/** Detail text that is not a diff's: bold, to read as what is asked about. */
 function asked(text: string): string {
   return style.bold(style.strong(text));
-}
-
-/** A detail line's look: a diff's changes in its colors, its header and other text bold. */
-function detailLine(line: string, change: boolean): string {
-  return change ? diffLine(line, asked) : asked(line);
 }
 
 /**
  * A detail line as rows: commands and diffs break anywhere, keeping every
  * character where it was, since what is approved must read exactly; prose
- * breaks at spaces.
+ * breaks at spaces. `other` paints what is not a diff's change.
  */
-function detailRows(line: string, width: number, change: boolean): string[] {
+function detailRows(line: string, width: number, other: (text: string) => string): string[] {
   const exact = /^(\$ |[+-]|@@)/.test(line) || /^\s/.test(line);
-  return wrap(`  ${detailLine(line, change)}`, width, "    ", exact);
+  return wrap(`  ${diffLine(line, other)}`, width, "    ", exact);
 }
 
 /**
@@ -216,6 +215,10 @@ export class ChoicePrompt {
     frame: PromptFrame = {},
   ): { rows: string[]; cursor: CursorPosition | null } {
     const { config } = this;
+    // A narrow pane keeps the warning to a line: its status line names the folder too.
+    const warned = `⚠ ${config.warning}`;
+    const placed = config.where ? `${warned} · ${config.where}` : warned;
+    const warning = visibleWidth(placed) + 2 <= width ? placed : warned;
     const rows = [
       rule(width),
       spread(
@@ -226,13 +229,23 @@ export class ChoicePrompt {
       "",
       // A harness's text can hold line breaks, which would throw the rows off.
       ...wrap(`  ${style.bold(oneLineText(config.title))}`, width, "  "),
-      ...(config.warning ? wrap(`  ${style.removed(`⚠ ${config.warning}`)}`, width, "    ") : []),
+      ...(config.warning ? wrap(`  ${style.removed(warning)}`, width, "    ") : []),
     ];
     const detail = config.detail.flatMap((text) => {
       const lines = plainText(text).replace(/\s+$/, "").split("\n");
-      // A diff's header, at its top, is not a change, though it starts with --- and +++.
-      const head = lines.length - diffBody(lines).length;
-      return lines.flatMap((line, index) => detailRows(line, width, index >= head));
+      const hunks = lines.findIndex((line) => line.startsWith("@@"));
+      // A diff's header says again the file named above it, in the same marks as its changes.
+      const head = (hunks === -1 ? lines : lines.slice(0, hunks)).filter(
+        (line) => !/^(?:---|\+\+\+) /.test(line),
+      );
+      // Quiet context lets the changes stand out.
+      const body = hunks === -1 ? [] : lines.slice(hunks);
+      return [
+        ...head.flatMap((line) => detailRows(line, width, asked)),
+        ...body.flatMap((line) =>
+          detailRows(line, width, line.startsWith("@@") ? style.muted : style.text),
+        ),
+      ];
     });
     const entries: ChoiceOption[] = config.options.map((option, index) => ({
       label: oneLineText(option.label),
@@ -305,10 +318,10 @@ export class ChoicePrompt {
         cursor: { row: offset + layout.cursor.row, column: layout.cursor.column },
       };
     }
-    // The numbers on the choices say they pick, so no hint does.
-    const keys = ["↑↓ move"];
+    const keys = [width >= 60 ? "↑↓ move or press a number" : "↑↓ move"];
     if (config.multiSelect) keys.push("space toggle");
-    if (this.#commentable) keys.push("tab say why");
+    if (this.#commentable)
+      keys.push(`tab ${width >= 60 ? "add a " : ""}${config.comment ?? "comment"}`);
     keys.push(...(frame.keys ?? []), "enter confirm", `esc ${config.escape ?? "cancel"}`);
     rows.push(rule(width), hints(keys, width));
     return { rows, cursor: null };

@@ -2,12 +2,19 @@ import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
 import { describe, it } from "node:test";
 import type { HostClient } from "../client/client.ts";
-import type { ApprovalRequest } from "../core/events.ts";
+import type { ApprovalOption, ApprovalRequest } from "../core/events.ts";
 import type { ThreadState } from "../protocol.ts";
 import { Requests } from "./requests.ts";
 
 /** Opens an approval to run `command`, and says what enter answers and what the prompt shows. */
-async function answerAtOnce(command: string) {
+async function answerAtOnce(
+  command: string,
+  options: readonly ApprovalOption[] = [
+    { id: "yes", label: "Yes", effect: "allow" },
+    { id: "no", label: "No", effect: "deny" },
+  ],
+  cwd: string | null = null,
+) {
   const answers: unknown[] = [];
   const client = {
     call: async (_method: string, params: { response: unknown }) => answers.push(params.response),
@@ -25,11 +32,8 @@ async function answerAtOnce(command: string) {
     id: "ask",
     title: "Run this command?",
     detail: `$ ${command}`,
-    action: { type: "command", command, cwd: null },
-    options: [
-      { id: "yes", label: "Yes", effect: "allow" },
-      { id: "no", label: "No", effect: "deny" },
-    ],
+    action: { type: "command", command, cwd },
+    options: [...options],
     defaultOptionId: "yes",
   };
   requests.sync({ id: "thread", requests: [request] } as unknown as ThreadState);
@@ -47,16 +51,30 @@ describe("an approval", () => {
     const { shown, answer } = await answerAtOnce("rm -rf dist");
     assert.match(shown, /⚠ Deletes files/);
     // Selected, the hint line says what the row would.
-    assert.doesNotMatch(shown, /No +tab to say why/);
-    assert.match(shown, /tab say why/);
+    assert.doesNotMatch(shown, /No +tab gives a reason/);
+    assert.match(shown, /tab add a reason/);
     assert.deepEqual(answer, { kind: "approval", optionId: "no" });
   });
 
   it("marks the selected choice, and says what refusing does and how to say why", async () => {
     const { shown } = await answerAtOnce("pnpm test");
     assert.match(shown, /› 1 {2}Yes/);
-    assert.match(shown, /No +tab to say why; the agent goes on/);
+    assert.match(shown, /No +tab gives a reason; the agent goes on/);
     assert.match(shown, /esc refuse/);
+  });
+
+  it("never offers to allow for good a command that can lose work", async () => {
+    const options = [
+      { id: "yes", label: "Yes", effect: "allow" },
+      { id: "always", label: "Yes, always", effect: "allow-always" },
+      { id: "no", label: "No", effect: "deny" },
+    ] as const;
+    const risky = await answerAtOnce("rm -rf dist", options, "/work/app");
+    assert.doesNotMatch(risky.shown, /always/);
+    assert.match(risky.shown, /⚠ Deletes files, which may not come back · in app/);
+    assert.deepEqual(risky.answer, { kind: "approval", optionId: "no" });
+    const routine = await answerAtOnce("pnpm test", options, "/work/app");
+    assert.match(routine.shown, /Yes, always/);
   });
 
   it("starts where the harness says for any other command", async () => {

@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import type { HostClient } from "../client/client.ts";
 import { errorMessage } from "../core/errors.ts";
 import type { HarnessRequest, NoticeLevel, RequestResponse } from "../core/events.ts";
@@ -126,46 +127,54 @@ export class Requests {
     const request = next.request;
     const respond = (response: RequestResponse) => this.#respond(next, response);
     if (request.kind === "approval") {
-      const warning =
-        request.action.type === "command" ? commandRisk(request.action.command) : null;
-      // Something that can lose work should not be one enter away from going ahead.
-      const refusal = warning
-        ? request.options.findIndex((option) => option.effect === "deny")
-        : -1;
+      const { action } = request;
+      const risk = action.type === "command" ? commandRisk(action.command) : null;
+      // What can lose work deserves a fresh look each time, so it can't be allowed for good.
+      const options = risk
+        ? request.options.filter((option) => option.effect !== "allow-always")
+        : request.options;
+      // Nor should it be one enter away from going ahead.
+      const refusal = risk ? options.findIndex((option) => option.effect === "deny") : -1;
       const initial =
         refusal >= 0
           ? refusal
           : Math.max(
               0,
-              request.options.findIndex((option) => option.id === request.defaultOptionId),
+              options.findIndex((option) => option.id === request.defaultOptionId),
             );
       const command = /^\$ /m.test(request.detail);
       const config: ChoiceConfig = {
         header: "Permission needed",
         tag: command ? "Command" : "",
         title: request.title,
-        ...(warning ? { warning } : {}),
+        ...(risk ? { warning: risk } : {}),
+        // Where it would land matters as much as what it does.
+        ...(risk && action.type === "command" && action.cwd
+          ? { where: `in ${basename(action.cwd)}` }
+          : {}),
         detail: request.detail ? [request.detail] : [],
-        options: request.options.map((option) => ({
+        options: options.map((option) => ({
           label: option.label,
           // Refusing bare stops most harnesses' turns; with a reason the agent goes on.
           description: "",
-          ...(option.effect === "deny" ? { unselected: "tab to say why; the agent goes on" } : {}),
+          ...(option.effect === "deny"
+            ? { unselected: "tab gives a reason; the agent goes on" }
+            : {}),
         })),
         multiSelect: false,
         allowOther: false,
         secret: false,
         initial,
         // A refusal can say why, which the agent hears and goes on with.
-        commentable: (index) => request.options[index]?.effect === "deny",
+        commentable: (index) => options[index]?.effect === "deny",
+        comment: "reason",
         escape: "refuse",
       };
       this.#show(
         next,
         (done: (result: ChoiceResult) => void) => new ChoicePrompt(config, done),
         (result) => {
-          const option =
-            result.kind === "options" ? request.options[result.indexes[0] ?? 0] : undefined;
+          const option = result.kind === "options" ? options[result.indexes[0] ?? 0] : undefined;
           const reason = result.kind === "options" ? result.comment?.text : undefined;
           respond(
             !option
@@ -188,10 +197,11 @@ export class Requests {
       multiSelect: question.multiSelect,
       allowOther: question.allowOther,
       // The agent is told the question went unanswered, and carries on.
-      escape: "skip",
+      escape: "skip, the agent carries on",
       secret: question.secret,
       initial: 0,
       commentable: () => true,
+      comment: "note",
     }));
     this.#show(
       next,
