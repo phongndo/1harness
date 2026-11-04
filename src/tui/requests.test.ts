@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import type { HostClient } from "../client/client.ts";
 import type { ApprovalOption, ApprovalRequest } from "../core/events.ts";
 import type { ThreadState } from "../protocol.ts";
+import { ChoicePrompt } from "./prompt.ts";
 import { Requests } from "./requests.ts";
 
 /** Opens an approval to run `command`, and says what enter answers and what the prompt shows. */
@@ -75,6 +76,33 @@ describe("an approval", () => {
     assert.deepEqual(risky.answer, { kind: "approval", optionId: "no" });
     const routine = await answerAtOnce("pnpm test", options, "/work/app");
     assert.match(routine.shown, /Yes, always/);
+  });
+
+  it("keeps the warning to a line, with the folder under it where it will not fit", () => {
+    const prompt = new ChoicePrompt(
+      {
+        header: "Permission needed",
+        tag: "",
+        title: "Run?",
+        warning: "Deletes files, which may not come back",
+        where: "in parser-app",
+        detail: [],
+        options: [{ label: "No", description: "" }],
+        multiSelect: false,
+        allowOther: false,
+        secret: false,
+        initial: 0,
+        commentable: () => false,
+      },
+      () => {},
+    );
+    const at = (width: number) =>
+      prompt.render(width).rows.map((row) => stripVTControlCharacters(row));
+    assert.ok(at(80).some((row) => row.endsWith("come back · in parser-app")));
+    const narrow = at(50);
+    const warned = narrow.findIndex((row) => row.includes("⚠"));
+    assert.equal(narrow[warned], "  ⚠ Deletes files, which may not come back");
+    assert.equal(narrow[warned + 1], "  in parser-app");
   });
 
   it("starts where the harness says for any other command", async () => {

@@ -215,10 +215,11 @@ export class ChoicePrompt {
     frame: PromptFrame = {},
   ): { rows: string[]; cursor: CursorPosition | null } {
     const { config } = this;
-    // A narrow pane keeps the warning to a line: its status line names the folder too.
+    // A warning keeps to its line; where the folder will not fit beside it, it goes under.
     const warned = `⚠ ${config.warning}`;
-    const placed = config.where ? `${warned} · ${config.where}` : warned;
-    const warning = visibleWidth(placed) + 2 <= width ? placed : warned;
+    const beside = config.where && visibleWidth(`${warned} · ${config.where}`) + 2 <= width;
+    const warning = beside ? `${warned} · ${config.where}` : warned;
+    const under = config.warning && config.where && !beside ? config.where : null;
     const rows = [
       rule(width),
       spread(
@@ -230,6 +231,7 @@ export class ChoicePrompt {
       // A harness's text can hold line breaks, which would throw the rows off.
       ...wrap(`  ${style.bold(oneLineText(config.title))}`, width, "  "),
       ...(config.warning ? wrap(`  ${style.removed(warning)}`, width, "    ") : []),
+      ...(under ? [truncate(`  ${style.removed(under)}`, width)] : []),
     ];
     const detail = config.detail.flatMap((text) => {
       const lines = plainText(text).replace(/\s+$/, "").split("\n");
