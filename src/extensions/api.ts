@@ -7,14 +7,17 @@
 //   export default function (api: ExtensionAPI) { api.on("turn.ended", ...) }
 //
 // Extensions work at four layers, each the same on every harness:
-//   client    — commands, through `registerCommand`, shown by whichever client runs
+//   client    — commands, through `registerCommand`, shown by whichever client runs;
+//               a command's `shortcut` binds a key, `ui.setStatus` writes on the
+//               status line, and `registerToolRenderer` says how tool calls show
 //   session   — events, messages, and approvals of every thread, through `on`,
 //               `onInput`, and `onRequest`
 //   agent     — tools the model can call, through `registerTool`, served to each
 //               harness as an MCP server
 //   operation — what people, programs, and agents inside and outside 1harness can
 //               all call, through `registerOperation`: a tool, `/op`, `1harness op`,
-//               `1harness mcp`, and the server's API at once
+//               `1harness mcp`, and the server's API at once; `runOperation` calls
+//               them from an extension, to open, follow, and message threads
 
 import type { CommandDefinition, CommandUI } from "../commands/registry.ts";
 import type {
@@ -24,16 +27,23 @@ import type {
   ToolCallCheck,
   UserInput,
 } from "../core/events.ts";
-import type { Thread, ThreadEvent } from "../core/thread.ts";
+import type { Thread, ThreadEvent, ToolRenderer } from "../core/thread.ts";
 import type { AcpAgentSpec } from "../drivers/acp/session.ts";
 import type { DriverDefinition } from "../drivers/index.ts";
-import type { Caller, CallerKind, Operation, OperationContext } from "../operations/operation.ts";
+import type {
+  Caller,
+  CallerKind,
+  Operation,
+  OperationContext,
+  OperationInfo,
+} from "../operations/operation.ts";
 
 export type {
   AcpAgentSpec,
   Caller,
   CallerKind,
   OperationContext,
+  OperationInfo,
   CommandDefinition,
   DriverDefinition,
   CommandUI,
@@ -42,6 +52,7 @@ export type {
   Thread,
   ThreadEvent,
   ToolCallCheck,
+  ToolRenderer,
 };
 
 /** What a session handler can reach. */
@@ -53,6 +64,8 @@ export interface ExtensionContext {
    * thread.wake()` for a session to call.
    */
   readonly thread: Thread;
+  /** 1harness's ID for the thread, which operations take; null where nothing manages it. */
+  readonly threadId: string | null;
   /** The client's UI, or null when nobody is watching, as with `--print`. */
   readonly ui: CommandUI | null;
 }
@@ -134,6 +147,22 @@ export interface ExtensionAPI {
    * agents outside 1harness through `1harness mcp`, as `callers` allows.
    */
   registerOperation(operation: OperationDefinition): void;
+  /** The operations `runOperation` can call: 1harness's, and those of the extensions loaded here. */
+  operations(): Promise<OperationInfo[]>;
+  /**
+   * Calls an operation as the user would, so an extension can open, follow, and
+   * message threads on its own, such as from a handler: `thread_open`,
+   * `thread_wait`, `thread_read`, `thread_send`. It acts with the user's
+   * authority, which installing the extension gave it. Not while extensions
+   * load; start from a handler or a command.
+   */
+  runOperation(name: string, input?: Record<string, unknown>): Promise<unknown>;
+  /**
+   * Chooses the line tool calls show as, returning it, or undefined to leave a
+   * call to the next renderer. It runs on the server, on each change to a call,
+   * so it should be quick.
+   */
+  registerToolRenderer(render: ToolRenderer): void;
   /** Runs on each event of every thread. */
   on<T extends ThreadEvent["type"]>(type: T, handler: EventHandler<T>): void;
   /** Sees each message before it is sent or queued. */

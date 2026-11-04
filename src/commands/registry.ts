@@ -59,6 +59,11 @@ export interface CommandUI {
   /** Replaces the composer's text. */
   setInput(text: string): void;
   /**
+   * Shows short text on the status line under `key`, or with null stops; where
+   * the client has a status line. It stays until set again, on any thread.
+   */
+  setStatus?(key: string, text: string | null): void;
+  /**
    * Shows the client's list of threads, or with `query` the ones that
    * mention it, and opens the one chosen; where the client has such a list.
    */
@@ -175,10 +180,34 @@ export interface CommandDefinition {
   description: string;
   /** The help tab it appears under. */
   group: string;
+  /**
+   * The key that runs it with no arguments, where the client takes keys, such as
+   * `alt+r`. `parseShortcut` says which keys are free.
+   */
+  shortcut?: string;
   /** False hides it, such as for a harness without the feature. */
   available?(context: CommandContext): boolean;
   complete?(context: CommandContext, args: string): Completions | null;
   run(context: CommandContext, args: string): Promise<void> | void;
+}
+
+/** Keys the composer and the UI already use, which a command cannot take. */
+const TAKEN_KEYS = new Set([
+  ..."abcdefhijklmnopstuvwxz".split("").map((key) => `ctrl+${key}`),
+  "alt+b",
+  "alt+f",
+]);
+
+/**
+ * Checks a command's shortcut: `ctrl+` or `alt+` and a letter or digit, and not
+ * a key something else answers to, so no extension can take away ctrl+c.
+ */
+export function parseShortcut(shortcut: string): string {
+  const key = shortcut.trim().toLowerCase();
+  if (!/^(ctrl|alt)\+[a-z0-9]$/.test(key))
+    throw new Error(`${shortcut} is not a shortcut; use ctrl+ or alt+ and a letter or digit`);
+  if (TAKEN_KEYS.has(key)) throw new Error(`${key} is already taken`);
+  return key;
 }
 
 export function completion(value: string, detail = "", more = false): Completion {

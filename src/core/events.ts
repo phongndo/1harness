@@ -96,6 +96,8 @@ export type Item =
       summary: string;
       output: string;
       status: ItemStatus;
+      /** The line an extension's renderer chose to show it as. */
+      display?: string;
     }
   | { kind: "web_search"; id: string; query: string; status: ItemStatus }
   | { kind: "todo_list"; id: string; steps: TodoStep[] }

@@ -152,6 +152,7 @@ export class Clients {
           void this.ask(client, { method: "settle", progress: id, level, text: outcome });
       },
       setInput: (text) => void this.ask(client, { method: "setInput", text }),
+      setStatus: (key, text) => void this.ask(client, { method: "status", key, text }),
     };
   }
 

@@ -40,6 +40,9 @@ export interface Message {
   readonly requestId?: string;
 }
 
+/** Chooses the line a tool call shows as, or leaves it to the next. */
+export type ToolRenderer = (item: Extract<Item, { kind: "tool_call" }>) => string | undefined;
+
 /** What a thread keeps when its host stops, to start parked again later. */
 export interface SavedThread {
   info: SessionInfo;
@@ -151,6 +154,7 @@ export class Thread {
   #generation = 0;
   /** What the harness is told before the next message, after a new session took over. */
   #handoff: string | null = null;
+  #toolRenderers: ToolRenderer[] = [];
   #listeners = new Set<ThreadListener>();
   /** Messages waiting for the next turn, with what the input handlers made of them. */
   #queue: Prepared[] = [];
@@ -518,6 +522,32 @@ export class Thread {
    * Lets code answer approvals and questions before clients see them, such as a
    * permission policy. Handlers run in order; the first response wins.
    */
+  /** Adds what chooses the line a tool call shows as; the first to choose one wins. */
+  addToolRenderer(renderer: ToolRenderer): () => void {
+    this.#toolRenderers.push(renderer);
+    return () => {
+      this.#toolRenderers = this.#toolRenderers.filter((entry) => entry !== renderer);
+    };
+  }
+
+  /** An event with the line its tool call shows as, which goes wherever the item goes. */
+  #rendered(event: HarnessEvent): HarnessEvent {
+    if (
+      this.#toolRenderers.length === 0 ||
+      (event.type !== "item.started" &&
+        event.type !== "item.updated" &&
+        event.type !== "item.completed") ||
+      event.item.kind !== "tool_call"
+    )
+      return event;
+    const { item } = event;
+    for (const renderer of this.#toolRenderers) {
+      const display = renderer(item);
+      if (display) return { ...event, item: { ...item, display } };
+    }
+    return event;
+  }
+
   addRequestHandler(handler: RequestHandler): () => void {
     this.#requestHandlers.push(handler);
     return () => {
@@ -858,7 +888,8 @@ export class Thread {
     if (this.#ending) this.#closed = true;
   }
 
-  #apply(event: HarnessEvent): void {
+  #apply(incoming: HarnessEvent): void {
+    const event = this.#rendered(incoming);
     switch (event.type) {
       case "turn.started":
         this.#busy = true;

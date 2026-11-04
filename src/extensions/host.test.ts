@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, it } from "node:test";
+import { pathToFileURL } from "node:url";
 import { CommandRegistry, type CommandUI } from "../commands/registry.ts";
 import { AsyncQueue } from "../core/async-queue.ts";
 import type {
@@ -73,6 +74,115 @@ function setup() {
   });
   return { root, notices, commands, host };
 }
+
+const tool = (name: string) =>
+  ({
+    type: "item.completed",
+    item: {
+      kind: "tool_call",
+      id: name,
+      tool: name,
+      server: null,
+      category: "other",
+      summary: "",
+      output: "",
+      status: "completed",
+    },
+  }) as HarnessEvent;
+
+describe("what extensions reach", () => {
+  it("refuses a shortcut it cannot have, and the extension says so", async () => {
+    const { root, notices, host, commands } = setup();
+    try {
+      mkdirSync(join(root, "config", "extensions"), { recursive: true });
+      writeFileSync(
+        join(root, "config", "extensions", "greedy.ts"),
+        `export default function (api) {
+          api.registerCommand({ name: "greedy", description: "", group: "T", shortcut: "ctrl+c", run() {} });
+        }`,
+      );
+      await host.loadAll();
+      assert.equal(host.extensions[0]?.error, "ctrl+c is already taken");
+      assert.equal(commands.find("greedy"), undefined);
+      assert.match(notices[0] ?? "", /greedy did not load/);
+    } finally {
+      await host.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("says operations are not available where nothing offers them", async () => {
+    const { root, host } = setup();
+    try {
+      mkdirSync(join(root, "config", "extensions"), { recursive: true });
+      writeFileSync(
+        join(root, "config", "extensions", "caller.ts"),
+        `export let call;
+        export default function (api) { call = api.runOperation; }`,
+      );
+      await host.loadAll();
+      const module = (await import(
+        pathToFileURL(join(root, "config", "extensions", "caller.ts")).href
+      )) as { call: (name: string) => Promise<unknown> };
+      await assert.rejects(module.call("thread_list"), /not available here/);
+    } finally {
+      await host.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("gives handlers the thread's ID, and lets renderers choose a tool call's line", async () => {
+    const { root, notices, host } = setup();
+    try {
+      mkdirSync(join(root, "config", "extensions"), { recursive: true });
+      writeFileSync(
+        join(root, "config", "extensions", "drawn.ts"),
+        `export default function (api) {
+          api.registerToolRenderer((item) => {
+            if (item.tool === "broken") throw new Error("no line");
+            return undefined;
+          });
+          api.registerToolRenderer((item) => item.tool === "broken" || item.tool === "search" ? "Searched" : undefined);
+          api.on("turn.ended", (_event, context) => api.storage.set("from", context.threadId));
+        }`,
+      );
+      await host.loadAll();
+      const session = new FakeSession();
+      const thread = new Thread(session as unknown as HarnessSession);
+      const seen: unknown[] = [];
+      thread.subscribe((event) => {
+        if (event.type === "item.completed") seen.push(event.item);
+      });
+      const detach = host.attach(thread, "thread-1");
+      await thread.start();
+      session.events.push(tool("search"));
+      session.events.push(tool("broken"));
+      session.events.push(tool("other"));
+      session.events.push({ type: "turn.started", turnId: "t" });
+      session.events.push({ type: "turn.ended", turnId: "t", status: "completed", error: null });
+      await settle();
+      const shown = (seen as { tool: string; display?: string }[]).map(
+        ({ tool: name, display }) => [name, display],
+      );
+      assert.deepEqual(shown, [
+        ["search", "Searched"],
+        // One renderer failing leaves the call to the next, and says so.
+        ["broken", "Searched"],
+        ["other", undefined],
+      ]);
+      assert.ok(notices.some((notice) => /drawn failed: no line/.test(notice)));
+      const stored = JSON.parse(
+        readFileSync(join(root, "state", "extensions", "drawn.json"), "utf8"),
+      ) as { from: string };
+      assert.equal(stored.from, "thread-1");
+      detach();
+      await thread.close();
+    } finally {
+      await host.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("ExtensionHost", () => {
   it("loads an extension and connects its commands, storage, and handlers", async () => {
