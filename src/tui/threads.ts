@@ -1,6 +1,7 @@
 import type { ThreadListing, ThreadState } from "../protocol.ts";
-import { agentStatus, harnessLabel, isLive, statusDot } from "./agents.ts";
+import { agentStatus, harnessLabel, isLive, paintStatus, statusDot } from "./agents.ts";
 import { listedEntry, type ResumeEntry } from "./resume.ts";
+import { style } from "./theme.ts";
 
 // The thread lists ctrl+t and /lineage open, built from what the host keeps
 // of threads and, over that, the threads open now as they stand.
@@ -32,6 +33,7 @@ function liveEntry(thread: ThreadState): ResumeEntry {
     depth: 0,
     // A thread at work, or waiting on you, says so with its dot.
     dot: isLive(status) ? `${statusDot(status)} ` : "",
+    ...(status === "idle" ? {} : { state: paintStatus(status) }),
   };
 }
 
@@ -97,7 +99,10 @@ export function threadEntries(
   const roots = [...nodes.values()]
     .filter((node) => node.parentId === null)
     .toSorted((a, b) => b.entry.updatedAt - a.entry.updatedAt);
-  const entries = flattenTree(nodes.values(), roots);
+  // Going back to where you already are would do nothing, so the list says which that is.
+  const entries = flattenTree(nodes.values(), roots).map((entry) =>
+    entry.id === currentId ? { ...entry, state: style.strong("current") } : entry,
+  );
   // Archived threads, which tab shows on their own.
   for (const thread of archived)
     if (thread.parentId === null) entries.push({ ...listedEntry(thread), archived: true });

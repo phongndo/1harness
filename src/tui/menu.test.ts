@@ -28,6 +28,12 @@ function press(target: Menu, ...specs: string[]): string | undefined {
   return target.selected()?.label;
 }
 
+function hintLine(config: { filter?: boolean; narrows?: boolean; leave?: string }): string {
+  return stripVTControlCharacters(
+    new Menu({ title: "List", entries: [entry("/one")], ...config }).render(80, 5).at(-1) ?? "",
+  );
+}
+
 describe("Menu keys", () => {
   it("takes vim keys when it has no filter", () => {
     const list = menu(false);
@@ -129,6 +135,63 @@ describe("Menu layout", () => {
     const moved = list.render(120, 6).map((row) => stripVTControlCharacters(row));
     // Below the list, the selected entry whole: its label, then its detail wrapped.
     assert.deepEqual(moved.slice(6, 8), ["  short", `  ${"x".repeat(117)}…`]);
+  });
+
+  it("marks the selected row, and says where it is in a list too long to show", () => {
+    const entries = Array.from({ length: 20 }, (_, index) => entry(`/command${index}`));
+    const list = new Menu({ title: "Commands", entries });
+    list.move(2);
+    const rows = list.render(80, 5).map((row) => stripVTControlCharacters(row));
+    assert.ok(rows.some((row) => row.startsWith("› /command2")));
+    assert.ok(rows.some((row) => row.endsWith(" ↓ 15 more · 3 / 20 ─")));
+  });
+
+  it("counts as the title does, leaving out rows that are only headings", () => {
+    const entries = [
+      entry("Group", "", { inert: true }),
+      ...Array.from({ length: 20 }, (_, index) => entry(`/command${index}`)),
+    ];
+    const list = new Menu({ title: "Commands", entries });
+    const rows = list.render(80, 5).map((row) => stripVTControlCharacters(row));
+    assert.ok(rows.some((row) => row.endsWith(" 1 / 20 ─")));
+  });
+
+  it("says a heading once, for the first of the rows under it", () => {
+    const list = new Menu({
+      title: "Commands",
+      headings: true,
+      entries: [
+        entry("/one", "", { tag: "Threads" }),
+        entry("/two", "", { tag: "Threads" }),
+        entry("/three", "", { tag: "Model" }),
+      ],
+    });
+    const rows = list.render(60, 5).map((row) => stripVTControlCharacters(row));
+    assert.match(rows.find((row) => row.includes("/one")) ?? "", /Threads$/);
+    assert.doesNotMatch(rows.find((row) => row.includes("/two")) ?? "", /Threads/);
+    assert.match(rows.find((row) => row.includes("/three")) ?? "", /Model$/);
+  });
+
+  it("says typing narrows it, and what esc does", () => {
+    assert.doesNotMatch(hintLine({}), /type to filter/);
+    assert.match(hintLine({ narrows: true }), /type to filter/);
+    assert.match(hintLine({ filter: true, leave: "quit" }), /type to filter.*esc quit$/);
+  });
+
+  it("does not count a list it shows whole", () => {
+    const list = new Menu({ title: "Commands", entries: [entry("/one"), entry("/two")] });
+    const rows = list.render(80, 5).map((row) => stripVTControlCharacters(row));
+    assert.ok(!rows.some((row) => /\d \/ \d/.test(row)));
+  });
+
+  it("does not say twice an entry its row shows whole", () => {
+    const list = new Menu({
+      title: "Commands",
+      entries: [entry("/one", "short"), entry("/two", "x".repeat(120))],
+      describe: true,
+    });
+    const rows = list.render(80, 8).map((row) => stripVTControlCharacters(row));
+    assert.equal(rows.filter((row) => row.includes("short")).length, 1);
   });
 
   it("fits its rows, the whole-entry rows included, in the rows allowed", () => {

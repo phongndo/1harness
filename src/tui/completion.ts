@@ -347,7 +347,7 @@ export class Suggestions {
     }
     const title = sigil === "$" ? "Skills" : "Commands";
     if (this.#slash?.config.title === title) this.#slash.setEntries(entries);
-    else this.#slash = new Menu({ title, entries, describe: true });
+    else this.#slash = new Menu({ title, entries, describe: true, narrows: true, headings: true });
     // A name the user moved to stays chosen while the text is the same, as lists refresh.
     if (this.#slashMoved !== text) this.#slashMoved = null;
     if (exact !== null && this.#slashMoved === null) this.#slash.select(exact);

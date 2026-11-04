@@ -242,12 +242,17 @@ export function footerRows(state: FooterState, width: number, height: number): F
               : [];
     if (listed) list = { menu: listed, row: rows.length };
     if (shown.length > 0) rows.push(...shown, "");
-    // Rules above and below mark off what the composer holds.
-    const edge = style.rule("─".repeat(width));
-    rows.push(edge);
-    if (!panel)
-      cursor = { row: rows.length + layout.cursor.row - start, column: layout.cursor.column };
-    rows.push(...composer, edge, state.status);
+    if (panel && state.editor.empty) {
+      // With nothing to show and keys going to the panel, it would only look typed into.
+      rows.push(state.status);
+    } else {
+      // Rules above and below mark off what the composer holds.
+      const edge = style.rule("─".repeat(width));
+      rows.push(edge);
+      if (!panel)
+        cursor = { row: rows.length + layout.cursor.row - start, column: layout.cursor.column };
+      rows.push(...composer, edge, state.status);
+    }
   }
   if (rows.length > height) {
     const cut = rows.length - height;

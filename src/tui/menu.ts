@@ -31,6 +31,12 @@ export interface MenuConfig {
   describe: boolean;
   /** Counts the entries after the title; a question with a few answers leaves it out. */
   count: boolean;
+  /** Says that typing narrows it, where what is typed goes elsewhere, as to the composer. */
+  narrows: boolean;
+  /** What esc does, for the hint line. */
+  leave: string;
+  /** Tags name the group a row is in, so one says it for the rows that follow it. */
+  headings: boolean;
 }
 
 export type MenuResult = { kind: "choose"; index: number; save?: true } | { kind: "close" } | null;
@@ -142,6 +148,9 @@ export class Menu {
       bare: false,
       describe: false,
       count: true,
+      narrows: false,
+      leave: "close",
+      headings: false,
       ...config,
     };
     this.#entries = this.config.entries;
@@ -312,7 +321,10 @@ export class Menu {
         ? floor
         : Math.max(floor, Math.min(spare, Math.floor(width * LABEL_SHARE)));
     // Sized for most labels; a rare long one is cut, and shows whole when selected.
-    const labelWidth = Math.min(limit, most(widths((item) => item.label))) + 3;
+    // A short label past the rest would otherwise knock its row's detail out of line.
+    const longest = Math.max(0, ...widths((item) => item.label));
+    const sized = longest <= LABEL_LIMIT ? longest : most(widths((item) => item.label));
+    const labelWidth = Math.min(limit, sized) + 3;
     const cut = (item: MenuEntry) =>
       (visibleWidth(item.label) > labelWidth - 3 &&
         visibleWidth(item.label) + 3 >
@@ -335,12 +347,7 @@ export class Menu {
     this.#drawn = { row: rows.length, start, count: Math.min(shown, visible.length - start) };
     for (const [offset, { entry: item }] of visible.slice(start, start + shown).entries()) {
       const current = start + offset === this.#index && !item.inert;
-      const paint = (text: string) =>
-        current
-          ? style.bold(style.strong(text))
-          : item.inert
-            ? style.text(text)
-            : style.muted(text);
+      const paint = (text: string) => (current ? style.bold(style.strong(text)) : style.text(text));
       // A label longer than its column still shows whole where its row has room.
       const room =
         width - 2 - visibleWidth(item.detail) - (item.tag ? visibleWidth(item.tag) + 2 : 0);
@@ -351,26 +358,56 @@ export class Menu {
         own > labelWidth && own <= room && !describing
           ? pad(item.label, own)
           : pad(truncate(item.label, labelWidth - 3), labelWidth);
-      const detail = item.inert ? style.muted(item.detail) : paint(item.detail);
-      rows.push(spread(`  ${paint(label)}${detail}`, style.muted(item.tag), width));
+      // What cannot be chosen is there to be read, as how to install it.
+      const detail = current || item.inert ? paint(item.detail) : style.muted(item.detail);
+      // Under one heading, the rows after the first would only say it again.
+      const previous = visible[start + offset - 1]?.entry;
+      const tag = this.config.headings && previous?.tag === item.tag ? "" : item.tag;
+      // Bold alone is lost on a terminal or a pair of eyes that shows it faintly.
+      const gutter = current ? style.strong("› ") : "  ";
+      rows.push(spread(`${gutter}${paint(label)}${detail}`, style.muted(tag), width));
     }
     if (visible.length === 0) rows.push(truncate(style.muted("  No matches"), width));
     const chosen = this.selected();
     if (describing) {
-      const text = chosen && !chosen.inert ? `${chosen.label}  ${chosen.detail}` : "";
+      // An entry its row shows whole would only be said twice.
+      const whole =
+        chosen && !cut(chosen) && visibleWidth(chosen.label) <= labelWidth - 3 && !chosen.inert;
+      // Its row shows the detail whole where only the label is cut.
+      const detailFits =
+        chosen &&
+        2 +
+          labelWidth +
+          visibleWidth(chosen.detail) +
+          (chosen.tag ? visibleWidth(chosen.tag) + 2 : 0) <=
+          width;
+      const text =
+        chosen && !chosen.inert && !whole
+          ? detailFits
+            ? chosen.label
+            : `${chosen.label}  ${chosen.detail}`
+          : "";
       const lines = text ? wrap(`  ${style.soft(text)}`, width, "  ") : [];
       // A third row's worth is cut, with an ellipsis.
       const second = lines.length > 2 ? truncate(`${lines[1]} ${lines[2]}`, width) : lines[1];
       rows.push("", lines[0] ?? "", second ?? "");
     }
-    const keys = ["↑↓ navigate"];
+    const keys = ["↑↓ move"];
+    if (this.config.filter || this.config.narrows) keys.push("type to filter");
     if (this.#tabs.length > 0) keys.push("tab category");
     if (visible.some(({ entry: item }) => !item.inert)) {
       keys.push(`enter ${this.config.action}`);
       if (this.config.save) keys.push(`ctrl+s ${this.config.save}`);
     }
-    keys.push("esc close");
-    rows.push(rule(width), hints(keys, width));
+    keys.push(`esc ${this.config.leave}`);
+    // A list that says nothing of what lies past its last row reads as all there is.
+    // Group headings are rows but nothing to count, as the title's count knows.
+    const before = visible.slice(0, this.#index + 1).filter(({ entry: item }) => !item.inert);
+    const below = visible.slice(start + shown).filter(({ entry: item }) => !item.inert).length;
+    const place = `${before.length} / ${count}`;
+    const position =
+      visible.length > shown ? (below > 0 ? `↓ ${below} more · ${place}` : place) : "";
+    rows.push(rule(width, position), hints(keys, width));
     return rows;
   }
 
@@ -473,7 +510,9 @@ export function infoPanel(
       .flatMap((line) => wrap(line, Math.max(10, width - labelWidth)));
     wrapped.forEach((line, index) => {
       const head = index === 0 ? style.bold(style.text(pad(`  ${label}`, labelWidth))) : indent;
-      lines.push(truncate(head + style.muted(line), width));
+      // A warning among routine values should not read as one of them.
+      const paint = value.startsWith("⚠") ? style.attention : style.text;
+      lines.push(truncate(head + paint(line), width));
     });
   }
   lines.push(rule(width), hints(["esc close"], width));

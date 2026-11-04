@@ -187,7 +187,7 @@ const newThread: CommandDefinition = {
 const resume: CommandDefinition = {
   name: "resume",
   usage: "[id | words]",
-  description: "pick up a thread, by its ID, or search what threads said (also ctrl+t)",
+  description: "pick up a thread by its ID, or search what threads said (also ctrl+t)",
   group: "Threads",
   complete: (context) => ({
     start: 0,
@@ -306,8 +306,7 @@ const unqueue: CommandDefinition = {
 
 const reload: CommandDefinition = {
   name: "reload",
-  description:
-    "restart the harness's session, so it reads new skills, plugins, MCP servers, and config",
+  description: "restart the session, so it reads new skills, plugins, and MCP servers",
   group: "Threads",
   available: (context) => context.thread !== null && !context.thread.closed,
   async run(context) {
@@ -335,7 +334,7 @@ const model: CommandDefinition = {
       const options = await models(context);
       const current = options.findIndex((option) => matchesModel(option, context.info?.model));
       const index = await context.ui.pick(
-        "Models",
+        "Model for this thread",
         options.map((option, position) => ({
           label: option.label,
           detail: option.description,
@@ -556,7 +555,7 @@ function inputKeys(operation: OperationInfo): [string, string][] {
 const op: CommandDefinition = {
   name: "op",
   usage: "[operation] [key=value…]",
-  description: "do what agents do through 1harness's tools: open, steer, follow, or move threads",
+  description: "use 1harness's agent tools: open, steer, follow, or move threads",
   group: "Tools",
   complete: (context, args) => {
     const operations = context.lookup("operations", () => context.operations());
@@ -627,7 +626,7 @@ const row = (label: string, value: string): ReportSpan[] => [
 const contextView: CommandDefinition = {
   name: "context",
   usage: "[on | off] [tool]",
-  description: "what 1harness adds to this thread's context, and turn its tools on or off",
+  description: "see what 1harness adds to this thread, and turn its tools on or off",
   group: "Tools",
   available: (context) => context.thread !== null,
   complete: (_context, args) =>

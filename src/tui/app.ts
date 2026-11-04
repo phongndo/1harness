@@ -29,6 +29,7 @@ import {
   formatCost,
   formatTokens,
   plural,
+  MODE_DESCRIPTIONS,
 } from "../core/wording.ts";
 import type { ClientEvent, HostClient } from "../client/client.ts";
 import {
@@ -1183,6 +1184,7 @@ export class App {
     await this.#openFrom(
       new ResumeView(words ? `Threads mentioning ${words}` : "Resume", entries, {
         initial: this.#currentId,
+        elsewhere: true,
         cwd: this.#cwd(),
         home: homedir(),
         // What mentions the words, from every folder.
@@ -2536,7 +2538,7 @@ export class App {
       entries.push(entry(key, `/${name}`, { group: "Keys", inert: true }));
     this.#panel = {
       kind: "menu",
-      menu: new Menu({ title: "Commands", entries, tabs: true, action: "insert", describe: true }),
+      menu: new Menu({ title: "Help", entries, tabs: true, action: "insert", describe: true }),
       onDone: (index) => {
         if (index === null) return;
         // Into the composer, to add to or send; a command that does something now waits for enter.
@@ -2559,27 +2561,38 @@ export class App {
   async #chooseHarness(): Promise<HarnessId | null> {
     const line = this.#view.say("info", "Checking which harnesses are installed and signed in…");
     this.#renderNow();
-    let harnesses: HarnessInfo[];
+    let listed: HarnessInfo[];
+    let tally = "";
     try {
-      harnesses = await this.#client.call("harnesses.list", {});
-      const ready = harnesses.filter((harness) => harness.state === "ready").length;
-      line.text = `${ready} of ${harnesses.length} harnesses are ready.`;
+      listed = await this.#client.call("harnesses.list", {});
+      const ready = listed.filter((harness) => harness.state === "ready").length;
+      tally = ` · ${ready} of ${listed.length} ready`;
+      this.#view.transcript.remove(line);
     } catch (error) {
-      harnesses = this.#client.harnesses;
+      listed = this.#client.harnesses;
       line.level = "warning";
       line.text = `Could not check the harnesses: ${errorMessage(error)}`;
+      this.#view.transcript.touch(line);
     }
-    this.#view.transcript.touch(line);
+    // What can start now comes first, ahead of what would need signing in or installing.
+    const order = ["ready", "unchecked", "signed-out"];
+    const rank = (harness: HarnessInfo) => {
+      const at = order.indexOf(harness.state);
+      return at === -1 ? order.length : at;
+    };
+    const harnesses = listed.toSorted((a, b) => rank(a) - rank(b));
     let saved = false;
     const index = await this.#pick(
-      "Which harness should 1harness start?",
-      harnesses.map((harness) => pickEntry(harnessEntry(harness, null, this.#defaultHarness))),
+      `Which harness should 1harness start?${tally}`,
+      // One not installed cannot start, so choosing it would only lead to an error.
+      harnesses.map((harness) => ({
+        ...pickEntry(harnessEntry(harness, null, this.#defaultHarness)),
+        inert: harness.state === "missing",
+      })),
       {
-        initial: Math.max(
-          0,
-          harnesses.findIndex((harness) => harness.state === "ready"),
-        ),
         filter: true,
+        count: false,
+        leave: "quit",
         ...(this.#setDefault ? { save: "use and make default", onSave: () => (saved = true) } : {}),
       },
     );
@@ -2641,17 +2654,20 @@ export class App {
     if (!info || !current) return;
     const usage = current.usage;
     const model = info.model ?? this.#defaultModel();
+    // What can be changed and what can go wrong first; IDs are for looking up, last.
     const rows: [string, string][] = [
-      ["Thread", `${current.id}${current.title ? ` · ${current.title}` : ""} · ${current.status}`],
-      ["Harness", this.#harnessStatus(info.harness, info.version)],
-      ["Session", info.threadId ?? "starts with your first message"],
+      ["Thread", `${current.title ? `${current.title} · ` : ""}${current.status}`],
       ["Folder", info.cwd],
+      ["Harness", `${this.#harnessStatus(info.harness, info.version)} · /harness changes it`],
       [
         "Model",
-        `${model ?? "the harness's default"}${info.model === null && model ? " (default)" : ""}${info.effort ? ` · ${info.effort}` : ""}`,
+        `${model ?? "the harness's default"}${info.model === null && model ? " (default)" : ""}${info.effort ? ` · ${info.effort}` : ""} · /model changes it`,
       ],
-      ["Mode", `${info.runtimeMode}${info.interactionMode === "plan" ? " · plan" : ""}`],
-      ["1harness", `v${this.#version}`],
+      [
+        "Mode",
+        `${info.runtimeMode}${info.interactionMode === "plan" ? " · plan" : ""}: ${MODE_DESCRIPTIONS[info.runtimeMode]} · /mode changes it`,
+      ],
+      ["Server", this.#serverLine()],
     ];
     const context = usage ? contextUsed(usage) : null;
     if (context)
@@ -2663,7 +2679,11 @@ export class App {
         `${cached}% of input read from cache (${formatTokens(usage.cachedTokens ?? 0)} of ${formatTokens(usage.inputTokens)})`,
       ]);
     if (usage?.costUsd) rows.push(["Cost", formatCost(usage.costUsd)]);
-    rows.push(["Server", this.#serverLine()]);
+    rows.push(
+      ["Thread ID", current.id],
+      ["Session", info.threadId ?? "starts with your first message"],
+      ["1harness", `v${this.#version}`],
+    );
     this.#panel = { kind: "info", title: "Status", rows };
   }
 
@@ -2672,8 +2692,8 @@ export class App {
     const server = this.#server;
     if (server.inProcess)
       return this.#stored
-        ? "in this process: threads stop working when 1harness exits"
-        : "in this process, keeping nothing: threads end when 1harness exits";
+        ? "⚠ threads stop when 1harness exits · 1harness server start keeps them going"
+        : "⚠ threads end when 1harness exits · 1harness server start keeps them";
     const pid = server.pid ? ` · pid ${server.pid}` : "";
     if (server.local) return `this machine${pid} · ${server.address}`;
     return `${server.label}${pid} · ${server.address}${server.identity ? ` · as ${server.identity}` : ""}`;

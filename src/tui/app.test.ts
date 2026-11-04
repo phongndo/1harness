@@ -258,7 +258,7 @@ describe("extensions on screen", () => {
     await session.sees(/scripted/);
     await settle(50);
     await session.type("/help\r");
-    await session.sees("Commands");
+    await session.sees("Help");
     await session.type("\x1by");
     await settle(30);
     assert.doesNotMatch(session.terminal.text(), /ran ping/);
@@ -656,7 +656,10 @@ describe("App commands", () => {
     assert.match(status, /Harness\s+Scripted/);
     assert.match(status, /Session\s+native-\d+/);
     assert.match(status, /Model\s+big \(default\)/);
-    assert.match(status, /Server\s+in this process, keeping nothing/);
+    // The risk is read before the IDs, and says what to do about it.
+    assert.match(status, /Server\s+⚠ threads end when 1harness exits/);
+    assert.match(status, /1harness server start/);
+    assert.ok(status.indexOf("Server") < status.indexOf("Session"));
     await session.type("\x1b");
     await session.type("/mode\r");
     const modes = await session.sees("Permission modes 2");
@@ -763,9 +766,8 @@ describe("App threads and keys", () => {
     await session.type("\x14");
     const picker = await session.sees("enter resume");
     assert.match(picker, /Resume\s+◉ This folder\s+○ All\s+○ Archived/);
-    // Most recent first: the thread on screen, then the one before it.
-    assert.match(picker, /› now\s+beta\s+scripted\n\s+now\s+alpha\s+scripted/);
-    await session.type("\x1b[B");
+    // Most recent first, and on the one before the thread on screen, which needs no opening.
+    assert.match(picker, /\s+now\s+current\s+beta\s+scripted\n\s+› now\s+done\s+alpha\s+scripted/);
     await session.type("\r");
     await session.sees("Done with alpha");
     assert.doesNotMatch(session.terminal.text(), /Done with beta/);

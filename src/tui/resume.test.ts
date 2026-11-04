@@ -40,6 +40,22 @@ const view = () =>
   new ResumeView("Resume", ENTRIES, { initial: "t3", cwd: HERE, home: "/home/me" });
 const plain = (rows: string[]) => rows.map((row) => stripVTControlCharacters(row).trimEnd());
 
+describe("where a thread stands", () => {
+  it("is said in a column of its own, and starts on a thread other than this one", () => {
+    const list = new ResumeView(
+      "Resume",
+      [
+        { ...ENTRIES[0]!, id: "a", title: "here", cwd: HERE, state: "current" },
+        { ...ENTRIES[0]!, id: "b", title: "there", cwd: HERE, state: "needs you" },
+      ],
+      { initial: "a", elsewhere: true, cwd: HERE },
+    );
+    const rows = list.render(100, 12, NOW).map((row) => stripVTControlCharacters(row));
+    assert.match(rows.find((row) => row.includes("here")) ?? "", /current +here/);
+    assert.match(rows.find((row) => row.includes("there")) ?? "", /^ {2}› .*needs you +there/);
+  });
+});
+
 describe("ResumeView", () => {
   it("lists this folder's threads, a row each: age, title, and what it runs on", () => {
     const rows = plain(view().render(72, 20, NOW));
