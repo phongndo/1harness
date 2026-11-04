@@ -273,6 +273,8 @@ export class App {
   #revealWork = false;
   /** The view moved up to that work, and goes back down when details go off. */
   #revealedWork = false;
+  /** Rows of the transcript above the view, as the last frame had them. */
+  #above = 0;
   /**
    * ONEHARNESS_IMAGES and ONEHARNESS_PROGRAM_STATUS, read once: `1` or `0`
    * says whether the terminal shows pictures or takes status reports, over
@@ -2804,6 +2806,10 @@ export class App {
         footer = this.#footer(width, height);
       }
     }
+    if (view.top !== this.#above) {
+      this.#above = view.top;
+      footer = this.#footer(width, height);
+    }
     // What the mouse finds where: each row's target, and what it selected, shown so.
     this.#targets = view.targets;
     this.#pointer.drawn(view.rows, view.top);
@@ -2886,6 +2892,7 @@ export class App {
         runtimeMode: this.#settings.runtimeMode,
         server: this.#server.local ? null : this.#server.label,
         scroll: this.#view.scroll,
+        above: this.#above,
         details: this.#details,
         notes: [...this.#statusNotes.values()],
       },

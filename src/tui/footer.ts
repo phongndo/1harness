@@ -80,6 +80,10 @@ function activityLine(
   return spread(left, style.muted(hint), width);
 }
 
+function moreLines(count: number): string {
+  return `${count} more ${count === 1 ? "line" : "lines"}`;
+}
+
 /** What the status line shows, as the terminal has it when it draws. */
 export interface StatusLineState {
   /** A ctrl+c that one more exits after. */
@@ -101,6 +105,8 @@ export interface StatusLineState {
   notes?: readonly string[];
   /** Rows the view is scrolled up. */
   scroll: number;
+  /** Rows of the transcript above the top of the view. */
+  above: number;
   /** Whether tool calls show whole. */
   details: boolean;
 }
@@ -135,7 +141,13 @@ export function statusLine(state: StatusLineState, width: number): string {
   for (const note of state.notes ?? [])
     left += `${left === "" ? "" : style.muted(" · ")}${style.text(oneLineText(note))}`;
   // The right edge stays whole as the left is cut, so modes the keys toggle go there too.
-  const scrolled = state.scroll > 0 ? `↓ ${state.scroll} more lines · pgdn` : null;
+  // At the bottom, a reply can open mid-sentence with nothing to say more lies above it.
+  let scrolled =
+    state.scroll > 0
+      ? `↓ ${moreLines(state.scroll)} · pgdn`
+      : state.above > 0
+        ? `↑ ${moreLines(state.above)} · pgup`
+        : null;
   let details = state.details ? "details · ctrl+x" : null;
   const right = () =>
     [
@@ -153,6 +165,7 @@ export function statusLine(state: StatusLineState, width: number): string {
     () => (model = null),
     () => (details = null),
     () => (harness = null),
+    () => (scrolled = null),
   ];
   const leftWidth = visibleWidth(left);
   for (const drop of shed) {

@@ -27,6 +27,7 @@ const state: StatusLineState = {
   runtimeMode: "supervised",
   server: null,
   scroll: 0,
+  above: 0,
   details: false,
 };
 
@@ -42,6 +43,15 @@ describe("the status line", () => {
     assert.match(line(60), /^parser-app · main +supervised · codex · gpt-6 · ctx 25%$/);
     assert.match(line(40), /^parser-app · main +supervised · codex$/);
     assert.match(line(30), /^parser-app · main +supervised$/);
+  });
+
+  it("says when more of the transcript lies above the view", () => {
+    assert.match(line(100, { above: 19 }), /↑ 19 more lines · pgup/);
+    assert.match(
+      line(60, { above: 19 }),
+      /^parser-app · main +↑ 19 more lines · pgup {3}supervised$/,
+    );
+    assert.match(line(40, { above: 19 }), /^parser-app · main +supervised$/);
   });
 
   it("keeps the way back from details and a scroll beside the rest", () => {
