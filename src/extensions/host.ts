@@ -98,44 +98,49 @@ function extensionName(path: string): string {
 /** A JSON file of values, written on every change. */
 export class JsonStorage implements ExtensionStorage {
   #file: string;
-  #values: Record<string, unknown>;
+  #legacy: string | undefined;
 
   /** `legacy` is where the values were kept before, read when `file` has none yet. */
   constructor(file: string, legacy?: string) {
     this.#file = file;
-    this.#values = {};
-    for (const path of [file, legacy]) {
+    this.#legacy = legacy;
+  }
+
+  get<T>(key: string): T | undefined {
+    return this.#read()[key] as T | undefined;
+  }
+
+  set(key: string, value: unknown): void {
+    this.#write({ ...this.#read(), [key]: value });
+  }
+
+  delete(key: string): void {
+    const values = this.#read();
+    delete values[key];
+    this.#write(values);
+  }
+
+  keys(): string[] {
+    return Object.keys(this.#read());
+  }
+
+  // Read each time, because every folder's set of extensions has its own storage
+  // over the same file, and one must not write over what another saved.
+  #read(): Record<string, unknown> {
+    for (const path of [this.#file, this.#legacy]) {
       if (!path) continue;
       try {
-        this.#values = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-        break;
+        return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
       } catch {
         // Not there, or not readable: try the next.
       }
     }
+    return {};
   }
 
-  get<T>(key: string): T | undefined {
-    return this.#values[key] as T | undefined;
-  }
-
-  set(key: string, value: unknown): void {
-    this.#values[key] = value;
-    this.#save();
-  }
-
-  delete(key: string): void {
-    delete this.#values[key];
-    this.#save();
-  }
-
-  keys(): string[] {
-    return Object.keys(this.#values);
-  }
-
-  #save(): void {
+  #write(values: Record<string, unknown>): void {
     mkdirSync(dirname(this.#file), { recursive: true });
-    writeFileSync(this.#file, `${JSON.stringify(this.#values, null, 2)}\n`);
+    writeFileSync(this.#file, `${JSON.stringify(values, null, 2)}\n`);
   }
 }
 
@@ -174,6 +179,11 @@ export interface ExtensionHostOptions {
   operations?: {
     list(): Promise<OperationInfo[]>;
     call(name: string, input: Record<string, unknown>): Promise<unknown>;
+    delegate(
+      thread: Thread,
+      input: Record<string, unknown>,
+      options?: { cwd?: string; callId?: string },
+    ): Promise<unknown>;
   };
 }
 
@@ -561,6 +571,8 @@ export class ExtensionHost {
       acpAgent: acpDriver,
       operations: async () => (await this.#operationAccess()).list(),
       runOperation: async (name, input = {}) => (await this.#operationAccess()).call(name, input),
+      delegate: async (thread, input, options) =>
+        (await this.#operationAccess()).delegate(thread, input, options),
       registerToolRenderer: (render) => {
         this.#toolRenderers.push({ extension, render });
       },

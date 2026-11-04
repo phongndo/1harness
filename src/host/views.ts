@@ -201,7 +201,6 @@ export function threadRow(
     origin: managed.origin,
     forkedFrom: managed.forkedFrom,
     forkContext: managed.forkContext,
-    worktree: managed.worktree,
     state: managed.status === "closed" ? "closed" : thread.session ? "open" : "parked",
     info: { ...thread.info },
     capabilities: thread.capabilities,
