@@ -353,7 +353,8 @@ export class ChoicePrompt {
     for (const [index, option] of entries.entries()) {
       const current = index === this.#index;
       const paint = (text: string) =>
-        current ? style.bold(style.strong(text)) : style.muted(text);
+        // Faint would read as disabled, when these are the alternatives to compare.
+        current ? style.bold(style.strong(text)) : style.text(text);
       const number = String(index + 1).padStart(digits);
       const box =
         config.multiSelect && index !== this.#otherIndex
