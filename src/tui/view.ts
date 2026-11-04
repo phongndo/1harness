@@ -164,6 +164,8 @@ export class ThreadView {
   #refused = new Set<string>();
   /** Calls whose approval just closed, until the decision saying how arrives. */
   #answered: string[] = [];
+  /** Whether an approval has been seen open since the last decision, as read back it is not. */
+  #approvalSeen = false;
   /** Log entries applied, which the terminal's own lines are placed among. */
   #applied = 0;
   /** The terminal's own lines, and how many entries had been applied when each came. */
@@ -212,6 +214,7 @@ export class ThreadView {
         if (entry.kind === "approval" && ["declined", "dismissed"].includes(entry.outcome))
           this.#refuse();
         this.#answered = [];
+        this.#approvalSeen = false;
         this.transcript.add({
           kind: "decision",
           request: entry.kind,
@@ -225,16 +228,18 @@ export class ThreadView {
 
   /**
    * Marks the call just refused. The decision comes only after its approval has
-   * closed, so that is the call it last waited on. The log does not say which: read
-   * back, or for a request no call matched, it can only be told when one call is running.
+   * closed, so that is the call it last waited on. An approval seen open that matched
+   * no call was for none of them. The log does not say which: read back, it can only
+   * be told when one call of the turn is running.
    */
   #refuse(): void {
     const running = [...this.blocks].filter(
       ([id, block]) =>
         block.kind === "tools" &&
+        !block.settled &&
         block.items.some((item) => item.id === id && item.status === "running"),
     );
-    const only = running.length === 1 ? [running[0]![0]] : [];
+    const only = !this.#approvalSeen && running.length === 1 ? [running[0]![0]] : [];
     for (const id of this.#answered.length > 0 ? this.#answered : only) {
       const block = this.blocks.get(id);
       if (block?.kind !== "tools") continue;
@@ -253,6 +258,7 @@ export class ThreadView {
    */
   awaiting(requests: readonly HarnessRequest[]): void {
     const approvals = requests.filter((request) => request.kind === "approval");
+    if (approvals.length > 0) this.#approvalSeen = true;
     // Most updates come with nothing asked and nothing marked, and change nothing.
     if (approvals.length === 0 && this.#waiting.size === 0) return;
     const waiting = new Set<string>();
@@ -363,6 +369,8 @@ export class ThreadView {
     this.retry = null;
     this.outcome = null;
     if (this.turn) return;
+    // An approval an interrupt closed gets no decision, which must not fall to a later one.
+    this.#answered = [];
     this.turn = { startedAt: at, up: 0, down: 0, phase: "Thinking", heading: null };
     this.#turnStart = this.transcript.size;
   }
@@ -549,8 +557,9 @@ export class ThreadView {
 
   /** Shows an item; `message` is the one a `user_message` echoes, when the thread knows it. */
   item(arrived: Item, completed: boolean, busy: boolean, message?: Message): void {
+    // One that went on to succeed did run, as a second call one approval matched can.
     const item =
-      this.#refused.has(arrived.id) && "status" in arrived
+      this.#refused.has(arrived.id) && "status" in arrived && arrived.status !== "completed"
         ? ({ ...arrived, status: "declined" } as Item)
         : arrived;
     if (busy && item.kind !== "notice") this.startTurn();
