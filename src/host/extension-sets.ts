@@ -2,7 +2,7 @@ import { realpathSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { CommandRegistry, type CommandUI } from "../commands/registry.ts";
 import type { Thread } from "../core/thread.ts";
-import { ExtensionHost } from "../extensions/host.ts";
+import { ExtensionHost, type ExtensionHostOptions } from "../extensions/host.ts";
 
 /** How many folders' extensions stay loaded with nothing using them. */
 const EXTENSION_SETS = 16;
@@ -22,6 +22,8 @@ export interface ExtensionSetsOptions {
   ui: (thread: Thread | null) => CommandUI | null;
   /** The sets in use, by their hosts or keys, which are never closed to make room. */
   inUse: () => Iterable<ExtensionHost | string>;
+  /** How a set's extensions list and call operations, for its folder and modules. */
+  operations: (folder: string, modules: readonly string[]) => ExtensionHostOptions["operations"];
 }
 
 /**
@@ -47,12 +49,14 @@ export class ExtensionSets {
       this.#sets.set(key, set);
     } else {
       const commands = new CommandRegistry();
+      const operations = this.#options.operations(folder, flags);
       const host = new ExtensionHost({
         cwd: folder,
         configDir: this.#options.configDir(),
         stateDir: this.#options.stateDir(),
         commands,
         ui: this.#options.ui,
+        ...(operations ? { operations } : {}),
       });
       set = { key, host, commands, ready: host.loadAll(flags) };
       this.#sets.set(key, set);

@@ -285,6 +285,7 @@ export class Host {
         ...this.manager.list().flatMap((managed) => this.manager.extensionsOf(managed.id) ?? []),
         ...this.#clients.connected().map((client) => this.#sets.key(client.cwd, client.extensions)),
       ],
+      operations: (folder, modules) => this.#extensionOperations(folder, modules),
     });
     // Every session gets 1harness's own tools; its folder's extensions add theirs.
     this.tools = new ToolServer(() => this.#agentTools, options.version);
@@ -356,6 +357,29 @@ export class Host {
     const set = this.#sets.get(cwd, this.#modules(clientId));
     await set.ready;
     return set.host;
+  }
+
+  /**
+   * How a set's extensions call operations: as a client of their own in their
+   * folder, which a person's authority backs, since the person chose to run them.
+   */
+  #extensionOperations(folder: string, modules: readonly string[]) {
+    const client = () => {
+      const own = this.#clients.get(`extension:${[folder, ...modules].join("\0")}`);
+      own.cwd = folder;
+      own.extensions = [...modules];
+      return own;
+    };
+    return {
+      list: async () => {
+        await this.start();
+        return this.#operationList(client(), null);
+      },
+      call: async (name: string, input: Record<string, unknown>) => {
+        await this.start();
+        return this.#runOperation(client(), null, name, input);
+      },
+    };
   }
 
   /** The set whose commands a client sees: the thread's when it has one, else its folder's. */
@@ -1053,6 +1077,7 @@ export class Host {
       group: command.group,
       available,
       completes: command.complete !== undefined,
+      ...(command.shortcut ? { shortcut: command.shortcut.trim().toLowerCase() } : {}),
     };
   }
 

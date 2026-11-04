@@ -126,6 +126,8 @@ export interface CommandInfo {
   available: boolean;
   /** Whether `commands.complete` offers words for its arguments. */
   completes: boolean;
+  /** The key that runs it, such as `alt+r`. */
+  shortcut?: string;
 }
 
 /**
@@ -172,6 +174,8 @@ export type UiRequest =
       text: string;
     }
   | { id: string; method: "setInput"; text: string }
+  /** Short text for the status line under `key`; null takes it away. */
+  | { id: string; method: "status"; key: string; text: string | null }
   /** Show this thread, as one a command opened. */
   | { id: string; method: "show"; threadId: string }
   | { id: string; method: "exit" };

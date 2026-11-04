@@ -15,7 +15,8 @@ let natives = 0;
 /**
  * A harness for tests that plays a scripted turn for each message: reasoning
  * and a reply streamed in deltas, a command, and a todo list that keeps its ID
- * across turns, as Codex's does. A message ending in ASK waits for an approval.
+ * across turns, as Codex's does. A message ending in ASK waits for an approval;
+ * one ending in EDIT changes a file; one ending in TOOL calls an MCP tool.
  */
 export class ScriptedSession {
   readonly capabilities: Capabilities = {
@@ -93,6 +94,30 @@ export class ScriptedSession {
         status: "completed",
       },
     });
+    if (input.text.endsWith("EDIT"))
+      push({
+        type: "item.completed",
+        item: {
+          kind: "file_change",
+          id: id("edit"),
+          changes: [{ path: "parser.ts", kind: "update", diff: "" }],
+          status: "completed",
+        },
+      });
+    if (input.text.endsWith("TOOL"))
+      push({
+        type: "item.completed",
+        item: {
+          kind: "tool_call",
+          id: id("tool"),
+          tool: "search",
+          server: "docs",
+          category: "other",
+          summary: "",
+          output: "",
+          status: "completed",
+        },
+      });
     push({ type: "item.started", item: { kind: "assistant_message", id: id("reply"), text: "" } });
     for (const chunk of ["Done ", "with ", input.text]) {
       push({ type: "item.delta", itemId: id("reply"), chunk });

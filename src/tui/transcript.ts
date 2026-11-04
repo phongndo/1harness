@@ -1179,6 +1179,8 @@ function toolLine(item: ToolItem, settled: boolean, cwd: string, waiting = false
       );
     }
     case "tool_call": {
+      // An extension's choice, which says what this tool did better than its name can.
+      if (item.display) return style.muted(oneLineText(item.display));
       const target = item.summary ? ` ${shownPath(item.summary, cwd)}` : "";
       const failure =
         item.status === "failed" && item.output.trim() !== ""

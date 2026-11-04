@@ -101,6 +101,8 @@ export interface StatusLineState {
   runtimeMode: RuntimeMode;
   /** The server the terminal works through, where not this machine's. */
   server: string | null;
+  /** What extensions show here. */
+  notes?: readonly string[];
   /** Rows the view is scrolled up. */
   scroll: number;
   /** Whether tool calls show whole. */
@@ -136,6 +138,8 @@ export function statusLine(state: StatusLineState, width: number): string {
   let left = style.text(where.join(" · "));
   if (info?.interactionMode === "plan")
     left += `${where.length > 0 ? style.muted(" · ") : ""}${style.strong("plan")}`;
+  for (const note of state.notes ?? [])
+    left += `${left === "" ? "" : style.muted(" · ")}${style.text(oneLineText(note))}`;
   // The right edge stays whole as the left is cut, so modes the keys toggle go there too.
   const hint =
     state.scroll > 0

@@ -399,7 +399,7 @@ export class ThreadManager {
     thread.setWaker(async () => {
       await this.wake(managed.id);
     });
-    const detach = extensions.attach(thread);
+    const detach = extensions.attach(thread, managed.id);
     this.#cleanups.set(managed.id, () => {
       unsubscribe();
       detach();

@@ -246,6 +246,10 @@ export class App {
   #notes: string[];
   /** The harness's skills, which `$name` runs. */
   #skills: NativeCommand[] = [];
+  /** Commands by the key that runs them, such as `alt+r`. */
+  #shortcuts = new Map<string, string>();
+  /** What extensions show on the status line, by the key each chose. */
+  #statusNotes = new Map<string, string>();
   /** The commands version of the thread on screen whose commands were last loaded. */
   #commandsSeen = -1;
   /** Whether the host keeps threads, so one can be resumed by its 1harness ID. */
@@ -566,6 +570,7 @@ export class App {
           };
         },
         setInput: (text) => this.#editor.set(text),
+        setStatus: (key, text) => this.#setStatusNote(key, text),
         threads: (query) => this.#switchThread(query),
         lineage: () => this.#lineage(),
       },
@@ -1442,6 +1447,7 @@ export class App {
   #registerHostCommands(commands: CommandInfo[]): void {
     for (const undo of this.#hostCommands) undo();
     this.#hostCommands = [];
+    this.#shortcuts.clear();
     const builtin = new Set(
       [...BUILTIN_COMMANDS, ...this.#clientCommands()].flatMap((command) => [
         command.name,
@@ -1451,6 +1457,8 @@ export class App {
     for (const info of commands) {
       // 1harness's own commands keep their names.
       if (builtin.has(info.name)) continue;
+      if (info.shortcut && info.available && !this.#shortcuts.has(info.shortcut))
+        this.#shortcuts.set(info.shortcut, info.name);
       const definition: CommandDefinition = {
         name: info.name,
         aliases: info.aliases,
@@ -1738,6 +1746,9 @@ export class App {
       case "setInput":
         this.#editor.set(request.text);
         return;
+      case "status":
+        this.#setStatusNote(request.key, request.text);
+        return;
       case "show": {
         const thread = this.#client.threads.get(request.threadId);
         if (thread) this.#show(thread);
@@ -1747,6 +1758,12 @@ export class App {
         void this.#exit();
         return;
     }
+  }
+
+  #setStatusNote(key: string, text: string | null): void {
+    if (text) this.#statusNotes.set(key, text);
+    else this.#statusNotes.delete(key);
+    this.#schedule();
   }
 
   // Requests and pickers
@@ -1901,6 +1918,15 @@ export class App {
     const prompt = this.#requests.prompt;
     if (key.ctrl && key.name === "x" && !prompt && !this.#panel) {
       this.#details = !this.#details;
+      return;
+    }
+    // A command's key waits for a prompt or a list to close, like the command would.
+    const shortcut =
+      !prompt && !this.#panel && (key.ctrl || key.meta)
+        ? this.#shortcuts.get(`${key.ctrl ? "ctrl" : "alt"}+${key.name}`)
+        : undefined;
+    if (shortcut) {
+      void this.#command(`/${shortcut}`);
       return;
     }
     // Without a parent, alt+↑ is up.
@@ -2464,6 +2490,8 @@ export class App {
     }
     for (const [keys, description] of KEYS)
       entries.push(entry(keys, description, { group: "Keys", inert: true }));
+    for (const [key, name] of this.#shortcuts)
+      entries.push(entry(key, `/${name}`, { group: "Keys", inert: true }));
     this.#panel = {
       kind: "menu",
       menu: new Menu({ title: "Commands", entries, tabs: true, action: "insert", describe: true }),
@@ -2775,6 +2803,7 @@ export class App {
         server: this.#server.local ? null : this.#server.label,
         scroll: this.#view.scroll,
         details: this.#details,
+        notes: [...this.#statusNotes.values()],
       },
       width,
     );

@@ -122,6 +122,8 @@ async function start(
     onHarness?: (harness: string) => void;
     /** Where the host looks for harnesses. */
     env?: NodeJS.ProcessEnv;
+    /** Extension modules the terminal names, as `-x` does. */
+    extensions?: string[];
   } = {},
 ): Promise<Session> {
   const terminal = new Terminal();
@@ -137,10 +139,11 @@ async function start(
     idleCloseMs: 0,
     store: options.store ?? null,
     ...(options.env ? { env: options.env } : {}),
+    ...(options.extensions ? { extensions: options.extensions } : {}),
   });
   const client = new HostClient(
     new LocalConnection(host, "tui", { owns: true }),
-    { cwd: root, version: "test", extensions: [] },
+    { cwd: root, version: "test", extensions: options.extensions ?? [] },
     "tui",
   );
   const app = new App({
@@ -191,6 +194,87 @@ function rowsFrom(screen: string, text: string): string {
   assert.notEqual(at, -1, `the screen shows ${text}`);
   return screen.slice(at);
 }
+
+function extension(text: string): string {
+  const path = join(root, `screen-extension-${Math.random().toString(36).slice(2)}.ts`);
+  writeFileSync(path, text);
+  return path;
+}
+
+describe("extensions on screen", () => {
+  it("runs a command from its key, writes on the status line, and lists the key in /help", async () => {
+    const path = extension(`
+      export default function (api) {
+        api.registerCommand({
+          name: "ping",
+          description: "pings",
+          group: "Tools",
+          shortcut: "alt+y",
+          run(context) {
+            context.ui.setStatus("ping", "pinged once");
+            context.ui.notify("info", "ran ping");
+          },
+        });
+        api.registerCommand({
+          name: "clear-ping",
+          description: "clears",
+          group: "Tools",
+          run(context) {
+            context.ui.setStatus("ping", null);
+          },
+        });
+      }`);
+    const session = await start({ extensions: [path] });
+    await session.sees(/scripted/);
+    await settle(50);
+    await session.type("half typed");
+    await session.type("\x1by");
+    await session.sees("ran ping");
+    await session.sees("pinged once");
+    // The key's letter did not land in what was being typed.
+    assert.match(session.terminal.text(), /half typed\s/);
+    assert.doesNotMatch(session.terminal.text(), /half typedy/);
+
+    await session.type("\x15/clear-ping\r");
+    for (let tries = 0; tries < 100 && session.terminal.text().includes("pinged once"); tries++)
+      await settle(10);
+    assert.doesNotMatch(session.terminal.text(), /pinged once/);
+  });
+
+  it("takes no extension's key over a list that is open", async () => {
+    const path = extension(`
+      export default function (api) {
+        api.registerCommand({
+          name: "ping",
+          description: "pings",
+          group: "Tools",
+          shortcut: "alt+y",
+          run(context) { context.ui.notify("info", "ran ping"); },
+        });
+      }`);
+    const session = await start({ extensions: [path] });
+    await session.sees(/scripted/);
+    await settle(50);
+    await session.type("/help\r");
+    await session.sees("Commands");
+    await session.type("\x1by");
+    await settle(30);
+    assert.doesNotMatch(session.terminal.text(), /ran ping/);
+  });
+
+  it("shows a tool call as its renderer says", async () => {
+    const path = extension(`
+      export default function (api) {
+        api.registerToolRenderer((item) =>
+          item.tool === "search" ? "Looked through the docs for parsers" : undefined,
+        );
+      }`);
+    const session = await start({ extensions: [path], prompt: "go TOOL" });
+    await session.sees("Done with go TOOL");
+    await session.type("\x18");
+    await session.sees("Looked through the docs for parsers");
+  });
+});
 
 describe("App", () => {
   it("runs a prompt given on start, then says how to resume its thread on quitting", async () => {

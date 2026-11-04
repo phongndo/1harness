@@ -3,7 +3,12 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { registerHooks } from "node:module";
 import { pathToFileURL } from "node:url";
-import type { CommandRegistry, CommandUI, ReportSpan } from "../commands/registry.ts";
+import {
+  parseShortcut,
+  type CommandRegistry,
+  type CommandUI,
+  type ReportSpan,
+} from "../commands/registry.ts";
 import type { NoticeLevel } from "../core/events.ts";
 import type {
   HarnessRequest,
@@ -14,7 +19,7 @@ import type {
 } from "../core/events.ts";
 import { loadMcpConfig } from "../core/mcp-config.ts";
 import { errorMessage } from "../core/errors.ts";
-import { type Thread, type ThreadEvent } from "../core/thread.ts";
+import { type Thread, type ThreadEvent, type ToolRenderer } from "../core/thread.ts";
 import {
   choose,
   type ExtensionAPI,
@@ -26,7 +31,12 @@ import {
   type ToolDefinition,
 } from "./api.ts";
 import type { ToolGrant, ToolServer } from "./tool-server.ts";
-import { CALLER_KINDS, OPERATION_NAME, type Operation } from "../operations/operation.ts";
+import {
+  CALLER_KINDS,
+  OPERATION_NAME,
+  type Operation,
+  type OperationInfo,
+} from "../operations/operation.ts";
 import { agentTool, toolOperation } from "../operations/tools.ts";
 import { acpDriver, registerDriver } from "../drivers/index.ts";
 
@@ -179,6 +189,11 @@ export interface ExtensionHostOptions {
    * `--print`; with a null thread, the UI for notices about extensions.
    */
   ui: CommandUI | null | ((thread: Thread | null) => CommandUI | null);
+  /** Lists and calls operations for extensions; without it, they cannot. */
+  operations?: {
+    list(): Promise<OperationInfo[]>;
+    call(name: string, input: Record<string, unknown>): Promise<unknown>;
+  };
 }
 
 /**
@@ -197,6 +212,11 @@ export class ExtensionHost {
   #inputs: { extension: string; handler: InputHandler }[] = [];
   #requests: { extension: string; handler: RequestHandler }[] = [];
   #toolChecks: { extension: string; handler: ToolCallHandler }[] = [];
+  #toolRenderers: { extension: string; render: ToolRenderer }[] = [];
+  /** The IDs of the threads attached, for their handlers' context. */
+  #threadIds = new WeakMap<Thread, string>();
+  /** A load is under way, which an operation would have to wait for. */
+  #loading = false;
   #registrations = new Map<LoadedExtension, Registrations>();
   /** Modules named on the command line, loaded again on reload. */
   #extra: readonly string[] = [];
@@ -288,7 +308,12 @@ export class ExtensionHost {
       ),
       ...extra.map((path) => ({ path: resolve(path), scope: "flag" as const })),
     ];
-    for (const source of sources) await this.load(source);
+    this.#loading = true;
+    try {
+      for (const source of sources) await this.load(source);
+    } finally {
+      this.#loading = false;
+    }
   }
 
   async trustProject(): Promise<void> {
@@ -352,7 +377,8 @@ export class ExtensionHost {
   }
 
   /** Connects the extensions' handlers to a thread; returns a function that disconnects them. */
-  attach(thread: Thread): () => void {
+  attach(thread: Thread, id: string | null = null): () => void {
+    if (id) this.#threadIds.set(thread, id);
     const context = this.#context(thread);
     const unsubscribe = thread.subscribe((event) => {
       for (const entry of this.#events) {
@@ -362,10 +388,12 @@ export class ExtensionHost {
     });
     const removeInput = thread.addInputHandler((input) => this.#filterInput(input, context));
     const removeRequest = thread.addRequestHandler((request) => this.#answer(request, context));
+    const removeRenderer = thread.addToolRenderer((item) => this.#renderTool(item));
     return () => {
       unsubscribe();
       removeInput();
       removeRequest();
+      removeRenderer();
     };
   }
 
@@ -380,6 +408,7 @@ export class ExtensionHost {
     this.#inputs = others(this.#inputs);
     this.#requests = others(this.#requests);
     this.#toolChecks = others(this.#toolChecks);
+    this.#toolRenderers = others(this.#toolRenderers);
     this.extensions.splice(this.extensions.indexOf(record), 1);
   }
 
@@ -442,6 +471,7 @@ export class ExtensionHost {
       ),
       registerCommand: (command) => {
         if (!this.#options.commands) return;
+        if (command.shortcut) parseShortcut(command.shortcut);
         this.#registrations.get(record)?.undo.push(this.#options.commands.register(command));
         record.commands.push(command.name);
       },
@@ -463,6 +493,11 @@ export class ExtensionHost {
         this.#registrations.get(record)?.undo.push(registerDriver(driver));
       },
       acpAgent: acpDriver,
+      operations: async () => (await this.#operationAccess()).list(),
+      runOperation: async (name, input = {}) => (await this.#operationAccess()).call(name, input),
+      registerToolRenderer: (render) => {
+        this.#toolRenderers.push({ extension, render });
+      },
       on: (type, handler) => {
         // Only events of `type` reach it, so the narrower parameter is safe.
         this.#events.push({ extension, type, handler: handler as unknown as AnyEventHandler });
@@ -478,6 +513,28 @@ export class ExtensionHost {
       },
       choose,
     };
+  }
+
+  /** What extensions call operations through, once they can. */
+  async #operationAccess(): Promise<NonNullable<ExtensionHostOptions["operations"]>> {
+    const access = this.#options.operations;
+    if (!access) throw new Error("operations are not available here");
+    // Operations wait for the folder's extensions, so one called while they load would wait for itself.
+    if (this.#loading) throw new Error("operations are not available while extensions load");
+    return access;
+  }
+
+  /** The line an extension chooses for a tool call; one that fails leaves it to the next. */
+  #renderTool(item: Parameters<ToolRenderer>[0]): string | undefined {
+    for (const entry of this.#toolRenderers) {
+      try {
+        const line = entry.render(item);
+        if (line) return line;
+      } catch (error) {
+        this.#notify("warning", `Extension ${entry.extension} failed: ${errorMessage(error)}`);
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -540,8 +597,12 @@ export class ExtensionHost {
   /** A handler's context, whose UI is whichever client shows the thread when it asks. */
   #context(thread: Thread): ExtensionContext {
     const ui = () => this.#ui(thread);
+    const id = () => this.#threadIds.get(thread) ?? null;
     return {
       thread,
+      get threadId() {
+        return id();
+      },
       get ui() {
         return ui();
       },
