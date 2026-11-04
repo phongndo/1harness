@@ -588,6 +588,44 @@ describe("Switching harness", () => {
     assert.equal(thread.runs.at(-1)?.status, "completed");
   });
 
+  it("sizes a handoff to the session receiving it, and only that session", async () => {
+    const thread = await manager.create({ harness: "fake", settings: settings() });
+    const big = "x".repeat(20_000);
+    // Five turns at 150,000 tokens each leave fake's 1,000,000 window with no room.
+    for (let turn = 0; turn < 5; turn++) {
+      thread.thread.send({ text: `turn ${turn} ${big}` });
+      await manager.wait(thread.id, 1000);
+    }
+    await manager.switchHarness(thread.id, "fake-b");
+    assert.equal(manager.visits(thread.id).get("fake")?.contextWindow, 1_000_000);
+    const away = sessionOf(thread);
+    thread.thread.send({ text: "go on" });
+    await manager.wait(thread.id, 1000);
+    // fake-b is new to this thread, so what fake reported says nothing of its window.
+    const fresh = away.prompts[0] ?? "";
+    assert.match(fresh, /User: turn 4 x{100}/);
+    assert.doesNotMatch(fresh, /clipped/);
+
+    thread.thread.send({ text: `long ${big}` });
+    await manager.wait(thread.id, 1000);
+    // Back on fake, its own thread is full, and a lot of the handoff no longer fits.
+    await manager.switchHarness(thread.id, "fake");
+    const back = sessionOf(thread);
+    thread.thread.send({ text: "and now" });
+    await manager.wait(thread.id, 1000);
+    const delta = back.prompts[0] ?? "";
+    assert.match(delta, /User: long x{100}x*… \(clipped: the first 1000 of 20005 characters\)/);
+    assert.ok(delta.length < 3_000, `got ${delta.length}`);
+
+    // Starting over on fake uses a new session of the same window, with all of it free.
+    await manager.switchHarness(thread.id, "fake", { fresh: true });
+    const again = sessionOf(thread);
+    thread.thread.send({ text: "once more" });
+    await manager.wait(thread.id, 1000);
+    assert.doesNotMatch(again.prompts[0] ?? "", /clipped/);
+    assert.ok((again.prompts[0] ?? "").length > 20_000);
+  });
+
   it("keeps a handoff that was never sent for the next time the harness is used", async () => {
     const thread = await manager.create({ harness: "fake", settings: settings() });
     thread.thread.send({ text: "one" });
@@ -714,19 +752,18 @@ describe("Switching harness", () => {
 });
 
 describe("thread_read", () => {
-  it("reads a range of runs in pages that fit, with their commands", async () => {
+  it("reads a range of runs in pages that fit", async () => {
     const thread = await manager.create({ harness: "fake", settings: settings() });
     for (const text of ["one CMD", "two", "three", "four"]) {
       thread.thread.send({ text });
       await manager.wait(thread.id, 1000);
     }
     const range = await call("thread_read", thread, { threadId: thread.id, fromRun: 1, toRun: 2 });
-    const runs = range["runs"] as { run: number; commands: unknown[] }[];
+    const runs = range["runs"] as { run: number }[];
     assert.deepEqual(
       runs.map((run) => run.run),
       [1, 2],
     );
-    assert.deepEqual(runs[0]?.commands, [{ command: "pnpm test", exitCode: 1 }]);
     assert.equal(range["moreRuns"], undefined);
     await assert.rejects(
       call("thread_read", thread, { threadId: thread.id, fromRun: 0 }),
@@ -745,6 +782,119 @@ describe("thread_read", () => {
       [3, 4],
     );
     assert.deepEqual(page["moreRuns"], { fromRun: 1, toRun: 2 });
+  });
+
+  it("returns the conversation by default, and commands and files when asked", async () => {
+    const thread = await manager.create({ harness: "fake", settings: settings() });
+    thread.thread.send({ text: "one CMD" });
+    await manager.wait(thread.id, 1000);
+    const [plain] = (await call("thread_read", thread, { threadId: thread.id }))["runs"] as Record<
+      string,
+      unknown
+    >[];
+    assert.deepEqual(plain, {
+      run: 1,
+      harness: "fake",
+      status: "completed",
+      startedBy: "user",
+      input: "one CMD",
+      result: "done: one CMD",
+    });
+    const [active] = (
+      await call("thread_read", thread, { threadId: thread.id, detail: "activity" })
+    )["runs"] as Record<string, unknown>[];
+    assert.deepEqual(active, {
+      ...plain,
+      filesChanged: [],
+      commands: [{ command: "pnpm test", exitCode: 1 }],
+      error: null,
+    });
+    await assert.rejects(
+      call("thread_read", thread, { threadId: thread.id, detail: "everything" }),
+      /detail must be messages or activity/,
+    );
+  });
+
+  it("cuts long fields each on their own, and reads on with offset", async () => {
+    const thread = await manager.create({ harness: "fake", settings: settings() });
+    const input = "a".repeat(5_000) + "b".repeat(5_000) + "c".repeat(5_000);
+    thread.thread.send({ text: input });
+    await manager.wait(thread.id, 1000);
+    const read = async (extra: Record<string, unknown>) =>
+      (
+        (await call("thread_read", thread, { threadId: thread.id, ...extra }))["runs"] as {
+          input: string;
+          result: string;
+        }[]
+      )[0]!;
+
+    const first = await read({});
+    const reply = `done: ${input}`;
+    assert.ok(
+      first.input.startsWith("a".repeat(5_000) + "b".repeat(3_000) + "\n… (cut at 8000 of 15000"),
+    );
+    const hint = `read on with thread_read {"threadId":"${thread.id}","fromRun":1,"toRun":1,"offset":8000})`;
+    assert.ok(first.input.endsWith(hint));
+    assert.ok(first.result.includes(`… (cut at 8000 of ${reply.length} characters`));
+
+    // What the cut says to call reads the rest, with nothing lost at the join.
+    const second = await read({ fromRun: 1, toRun: 1, offset: 8_000 });
+    assert.equal(first.input.slice(0, 8_000) + second.input, input);
+    assert.equal(second.result, reply.slice(8_000));
+    const past = await read({ fromRun: 1, toRun: 1, offset: 20_000 });
+    assert.equal(past.input, "(no more: 15000 characters in all)");
+
+    const small = await read({ maxCharsPerRun: 10 });
+    assert.match(small.input, /^a{10}\n… \(cut at 10 of 15000/);
+    // A very large limit stops short of what one read may return.
+    const huge = await read({ maxCharsPerRun: 1_000_000 });
+    assert.match(huge.input, /^a{5000}b{5000}c{5000}$/);
+    const whole = await manager.create({ harness: "fake", settings: settings() });
+    whole.thread.send({ text: "x".repeat(50_000) });
+    await manager.wait(whole.id, 1000);
+    const [capped] = (
+      await call("thread_read", whole, { threadId: whole.id, maxCharsPerRun: 1_000_000 })
+    )["runs"] as { input: string }[];
+    assert.match(capped?.input ?? "", /\n… \(cut at 20000 of 50000/);
+
+    for (const bad of [
+      { offset: 5 },
+      { offset: 5, fromRun: 1 },
+      { offset: 5, fromRun: 1, toRun: 2 },
+    ])
+      await assert.rejects(read(bad), /offset reads on in one run/);
+    await assert.rejects(read({ maxCharsPerRun: 0 }), /maxCharsPerRun must be a whole number/);
+    await assert.rejects(
+      read({ offset: -1, fromRun: 1, toRun: 1 }),
+      /offset must be a whole number/,
+    );
+  });
+
+  it("never splits a surrogate pair, cutting or reading on", async () => {
+    const thread = await manager.create({ harness: "fake", settings: settings() });
+    const input = `x${"😀".repeat(5_000)}`;
+    thread.thread.send({ text: input });
+    await manager.wait(thread.id, 1000);
+    const read = async (extra: Record<string, unknown>) =>
+      (
+        (await call("thread_read", thread, { threadId: thread.id, ...extra }))["runs"] as {
+          input: string;
+        }[]
+      )[0]!.input;
+
+    // 1 + 2n ends between pairs, so an even limit from an odd start is the case that splits.
+    const cut = await read({ maxCharsPerRun: 100 });
+    assert.ok(cut.isWellFormed());
+    assert.match(cut, /^x😀{49}\n… \(cut at 99 of 10001/u);
+    const on = await read({ maxCharsPerRun: 100, fromRun: 1, toRun: 1, offset: 99 });
+    assert.match(on, /^😀{50}\n… \(cut at 199 of 10001/u);
+    // An offset inside a pair starts at the pair.
+    assert.match(await read({ maxCharsPerRun: 4, fromRun: 1, toRun: 1, offset: 2 }), /^😀{2}\n/u);
+    // A limit narrower than a pair still gets through it.
+    assert.match(
+      await read({ maxCharsPerRun: 1, fromRun: 1, toRun: 1, offset: 1 }),
+      /^😀\n… \(cut at 3 /u,
+    );
   });
 });
 

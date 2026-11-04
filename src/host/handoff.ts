@@ -1,14 +1,43 @@
 import type { HarnessId } from "../core/events.ts";
 import { looksLikeThreadId } from "../core/thread-id.ts";
+import { safeCut } from "../core/wording.ts";
 import type { RunRecord } from "./manager.ts";
 
-/** About how much of a handoff the turns may take, so it stays a small part of a context window. */
+/** The most characters a handoff takes, so it stays a small part of a context window. */
 const BUDGET = 24_000;
-/** The most of one turn's message or reply a handoff quotes. */
-const FIELD_LIMIT = 2_000;
+const CHARS_PER_TOKEN = 4;
+/** Tokens a session keeps free for its own work, or a quarter of its window if that is more. */
+const RESERVE_TOKENS = 16_000;
 /** How many of a turn's commands a handoff lists, the latest ones. */
 const COMMAND_COUNT = 8;
 const COMMAND_LIMIT = 160;
+/** The start of the latest message a handoff keeps even with no room, as it may be the request. */
+const MIN_START = 1_000;
+/** Budget held back for the note on what is left out, which is written after choosing. */
+const NOTE_ROOM = 320;
+/** How many ranges of left-out turns the note names, the newest ones. */
+const NOTE_RANGES = 8;
+
+/** What is known of the session a handoff goes to; null where it is not known. */
+export interface Receiver {
+  contextWindow: number | null;
+  /** How much of the window it has used: 0 for a new session. */
+  contextTokens: number | null;
+}
+
+/** About how many tokens a text takes. */
+export function tokensIn(text: string | null): number {
+  return text ? Math.ceil(text.length / CHARS_PER_TOKEN) : 0;
+}
+
+/** The characters a handoff may take: the cap, or the room the receiver has if that is less. */
+export function handoffBudget(receiver: Receiver | undefined): number {
+  const { contextWindow: window, contextTokens: used } = receiver ?? {};
+  if (!window || used === null || used === undefined) return BUDGET;
+  const reserve = Math.max(RESERVE_TOKENS, window / 4);
+  const room = Math.floor((window - used - reserve) * CHARS_PER_TOKEN);
+  return Math.max(0, Math.min(BUDGET, room));
+}
 
 export interface HandoffOptions {
   /** The 1harness thread ID, which `thread_read` takes. */
@@ -21,6 +50,8 @@ export interface HandoffOptions {
   resumed: boolean;
   /** A new thread starts from thread `threadId`'s turns, as `/fork` makes one. */
   forked?: boolean;
+  /** The session it goes to, where that is known; it is never the session leaving. */
+  receiver?: Receiver;
   /** A harness's name as people know it, such as `Claude Code`. */
   label(harness: HarnessId): string;
 }
@@ -42,12 +73,6 @@ export function stripHandoff(text: string): string {
   if (!text.startsWith(OPEN)) return text;
   const end = text.indexOf(`${CLOSE}${TRAILER}`);
   return end === -1 ? text : text.slice(end + CLOSE.length + TRAILER.length);
-}
-
-function clip(text: string): string {
-  const trimmed = defuse(text.trim());
-  if (trimmed.length <= FIELD_LIMIT) return trimmed;
-  return `${trimmed.slice(0, FIELD_LIMIT)}… (${trimmed.length - FIELD_LIMIT} more characters)`;
 }
 
 /** Who sent the message that started a run. */
@@ -81,18 +106,114 @@ function describeCommands(commands: RunRecord["commands"]): string | null {
   return `Commands${earlier > 0 ? ` (latest ${shown.length} of ${commands.length})` : ""}: ${shown.join("; ")}`;
 }
 
-function describeRun(run: RunRecord, label: (harness: HarnessId) => string): string {
+/** Part of a turn that goes in whole or not at all, with a stub saying so in its place. */
+interface Part {
+  whole: string;
+  stub: string;
+  taken: boolean;
+}
+
+interface Turn {
+  run: RunRecord;
+  head: string;
+  input: Part;
+  reply: Part;
+  /** Its commands and files changed. */
+  activity: Part;
+  /** Some of it is in the handoff. */
+  shown: boolean;
+}
+
+/** A message as a handoff quotes it; having nothing to quote, it has nothing to leave out. */
+function messagePart(name: string, text: string | null): Part {
+  const quoted = text?.trim() ? defuse(text.trim()) : null;
+  const whole = `${name}: ${quoted ?? "(none)"}`;
+  return quoted === null
+    ? { whole, stub: whole, taken: true }
+    : { whole, stub: `${name}: (left out, ${quoted.length} characters)`, taken: false };
+}
+
+function describeTurn(run: RunRecord, label: (harness: HarnessId) => string): Turn {
   const outcome =
     run.status === "completed" ? "" : ` · ${run.status}${run.error ? `: ${run.error}` : ""}`;
-  const lines = [
-    `Turn ${run.index} · ${label(run.harness)}${outcome}`,
-    `${sender(run)}: ${run.input.trim() ? clip(run.input) : "(none)"}`,
-    `Reply: ${run.result?.trim() ? clip(run.result) : "(none)"}`,
-  ];
   const commands = describeCommands(run.commands);
-  if (commands) lines.push(commands);
-  if (run.files.length > 0) lines.push(`Files changed: ${defuse(run.files.join(", "))}`);
-  return lines.join("\n");
+  const activity = [
+    ...(commands ? [commands] : []),
+    ...(run.files.length > 0 ? [`Files changed: ${defuse(run.files.join(", "))}`] : []),
+  ].join("\n");
+  return {
+    run,
+    head: `Turn ${run.index} · ${label(run.harness)}${outcome}`,
+    input: messagePart(sender(run), run.input),
+    reply: messagePart("Reply", run.result),
+    activity: activity
+      ? { whole: activity, stub: "Commands and files: (left out)", taken: false }
+      : { whole: "", stub: "", taken: true },
+    shown: false,
+  };
+}
+
+/** A turn as it stands in the handoff. */
+function renderTurn({ head, input, reply, activity }: Turn): string {
+  const lines = [input, reply, activity].map((part) => (part.taken ? part.whole : part.stub));
+  return [head, ...lines.filter(Boolean)].join("\n");
+}
+
+/** A result coming back from another thread is no one asking for anything. */
+function isRequest({ run }: Turn): boolean {
+  return run.origin?.type !== "report" && run.input.trim() !== "";
+}
+
+/**
+ * Marks what fits in `budget`: the latest request, the latest reply, the
+ * original request when the harness never saw it, then the rest from the newest
+ * turn back. Whatever does not fit whole stays out, and smaller, older turns may
+ * still fit after it. With nothing chosen at all, the latest request keeps a
+ * clipped start, so a handoff always says what was asked.
+ */
+function choose(turns: readonly Turn[], budget: number, pinFirst: boolean): void {
+  let used = 0;
+  const take = (turn: Turn, ...parts: Part[]): void => {
+    const growth = parts.reduce((sum, part) => sum + part.whole.length - part.stub.length, 0);
+    // Stubs go in as soon as the turn does, so they count from then on.
+    const size = growth + (turn.shown ? 0 : renderTurn(turn).length + 2);
+    if (used + size > budget) return;
+    used += size;
+    turn.shown = true;
+    for (const part of parts) part.taken = true;
+  };
+  const requests = turns.filter(isRequest);
+  const [firstRequest, latestRequest] = [requests[0], requests.at(-1)];
+  if (latestRequest) take(latestRequest, latestRequest.input);
+  const latestReply = turns.findLast((turn) => !turn.reply.taken);
+  if (latestReply) take(latestReply, latestReply.reply);
+  if (pinFirst && firstRequest && !firstRequest.input.taken) take(firstRequest, firstRequest.input);
+  for (const turn of turns.toReversed()) {
+    const parts = [turn.input, turn.reply, turn.activity].filter((part) => !part.taken);
+    if (turn.shown) for (const part of parts) take(turn, part);
+    else take(turn, ...parts);
+  }
+  if (latestRequest && !turns.some((turn) => turn.shown)) {
+    latestRequest.shown = true;
+    latestRequest.input = clippedPart(latestRequest, budget);
+  }
+}
+
+/**
+ * The start of a turn's message, marked as clipped, in what budget the turn has.
+ * Its whole is still left out, so it counts as not taken.
+ */
+function clippedPart(turn: Turn, budget: number): Part {
+  const name = sender(turn.run);
+  const quoted = defuse(turn.run.input.trim());
+  const mark = (end: number) => `… (clipped: the first ${end} of ${quoted.length} characters)`;
+  const rest = renderTurn(turn).length - turn.input.stub.length;
+  const room = budget - rest - name.length - 2 - mark(quoted.length).length;
+  const end = Math.max(MIN_START, room);
+  if (end >= quoted.length) return { ...turn.input, taken: true };
+  const cut = safeCut(quoted, end);
+  const text = `${name}: ${quoted.slice(0, cut)}${mark(cut)}`;
+  return { whole: text, stub: text, taken: false };
 }
 
 function list(names: string[]): string {
@@ -101,36 +222,41 @@ function list(names: string[]): string {
     : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
 }
 
-/** Where turns are left out, and the call that reads them. */
-function gap(threadId: string, from: number, to: number): string {
-  const which = from === to ? `Turn ${from} is` : `Turns ${from}–${to} are`;
-  return `[${which} left out here. Read ${from === to ? "it" : "them"} only if you need ${from === to ? "it" : "them"}: thread_read {"threadId": "${threadId}", "fromRun": ${from}, "toRun": ${to}}]`;
+/** Consecutive run numbers as ranges, such as `2–9`, `11`. */
+function ranges(indexes: readonly number[]): [number, number][] {
+  const found: [number, number][] = [];
+  for (const index of indexes) {
+    const last = found.at(-1);
+    if (last && last[1] === index - 1) last[1] = index;
+    else found.push([index, index]);
+  }
+  return found;
 }
 
-/**
- * Which turns fit: always the latest, then the thread's first turn when it is
- * among them, since the harness never saw the original request, then as many
- * of the newest as the budget allows. Kept turns stay whole but for long
- * fields, so the left-out ones form one range.
- */
-function select(blocks: readonly string[], pinFirst: boolean): Set<number> {
-  const kept = new Set<number>();
-  const last = blocks.length - 1;
-  let used = blocks[last]?.length ?? 0;
-  kept.add(last);
-  const first = blocks[0]?.length ?? 0;
-  if (pinFirst && last > 0 && used + first <= BUDGET) {
-    kept.add(0);
-    used += first;
-  }
-  for (let index = last - 1; index >= 0; index--) {
-    if (kept.has(index)) continue;
-    const size = blocks[index]?.length ?? 0;
-    if (used + size > BUDGET) break;
-    kept.add(index);
-    used += size;
-  }
-  return kept;
+/** How much was left out, and the call that reads it. Null when nothing was. */
+function leftOutNote(threadId: string, turns: readonly Turn[]): string | null {
+  const absent = turns.filter((turn) => !turn.shown).map((turn) => turn.run.index);
+  const partial = turns
+    .filter(
+      ({ shown, input, reply, activity }) =>
+        shown && !(input.taken && reply.taken && activity.taken),
+    )
+    .map((turn) => turn.run.index);
+  if (absent.length === 0 && partial.length === 0) return null;
+  const all = ranges(absent);
+  const named = all
+    .slice(-NOTE_RANGES)
+    .map(([from, to]) => (from === to ? `${from}` : `${from}–${to}`));
+  const parts =
+    partial.length > 0
+      ? `parts of ${partial.length === 1 ? "turn" : "turns"} ${partial.join(", ")}`
+      : "";
+  const what =
+    absent.length > 0
+      ? `${absent.length} of ${turns.length} ${turns.length === 1 ? "turn" : "turns"} left out (${all.length > named.length ? "…, " : ""}${named.join(", ")})${parts && `, and ${parts}`}`
+      : `Left out: ${parts}`;
+  const [from, to] = all.at(-1) ?? [partial.at(-1), partial.at(-1)];
+  return `[${what}. Read what you need: thread_read {"threadId": "${threadId}", "fromRun": ${from}, "toRun": ${to}}]`;
 }
 
 /** What is inside a handoff's tags. */
@@ -158,9 +284,6 @@ export function combineHandoffs(first: string | null, second: string | null): st
 export function handoffText(options: HandoffOptions): string | null {
   const runs = options.runs.filter((run) => run.status !== "running");
   if (runs.length === 0) return null;
-  const blocks = runs.map((run) => describeRun(run, options.label));
-  // A resumed thread may have seen nothing, such as one whose handoff never went out.
-  const kept = select(blocks, runs[0]?.index === 1);
   const others = list([
     ...new Set(
       runs.filter((run) => run.harness !== options.to).map((run) => options.label(run.harness)),
@@ -175,21 +298,14 @@ export function handoffText(options: HandoffOptions): string | null {
     : options.resumed
       ? `You are back on 1harness thread ${id}.${others ? ` While you were away it ran on ${others}.` : ""} Below are the turns you missed, oldest first. ${history} The files in the working folder already reflect them.`
       : `1harness thread ${id} has moved to you (${options.label(options.to)})${others ? ` from ${others}` : ""}. Below are its earlier turns, oldest first, which you have not seen. ${history} The working folder is the same, so its files and \`git status\` show where the work stands.`;
-  const body: string[] = [];
-  let skipped: number[] = [];
-  const closeGap = () => {
-    const [from, to] = [skipped[0], skipped.at(-1)];
-    if (from !== undefined && to !== undefined) body.push(gap(id, from, to));
-    skipped = [];
-  };
-  runs.forEach((run, index) => {
-    if (!kept.has(index)) {
-      skipped.push(run.index);
-      return;
-    }
-    closeGap();
-    body.push(blocks[index] ?? "");
-  });
-  closeGap();
+  const turns = runs.map((run) => describeTurn(run, options.label));
+  const frame = [OPEN, intro, "", "", CLOSE].join("\n").length + TRAILER.length;
+  // A resumed thread may have seen nothing, such as one whose handoff never went out.
+  choose(turns, handoffBudget(options.receiver) - frame - NOTE_ROOM, runs[0]?.index === 1);
+  const note = leftOutNote(id, turns);
+  const body = [
+    ...(note ? [note] : []),
+    ...turns.filter((turn) => turn.shown).map((turn) => renderTurn(turn)),
+  ];
   return `${[OPEN, intro, "", body.join("\n\n"), CLOSE].join("\n")}${TRAILER.trimEnd()}`;
 }

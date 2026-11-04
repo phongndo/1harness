@@ -1610,6 +1610,11 @@ export class Host {
           runs: source.runs.slice(0, last),
           resumed: false,
           forked: true,
+          // A new session of the same harness and model, so it has the same window.
+          receiver: {
+            contextWindow: (live ? live.thread.usage : row.usage)?.contextWindow ?? null,
+            contextTokens: 0,
+          },
           label,
         });
         const managed = await this.manager.create({

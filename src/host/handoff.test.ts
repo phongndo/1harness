@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { handoffText, stripHandoff } from "./handoff.ts";
+import { handoffBudget, handoffText, stripHandoff } from "./handoff.ts";
 import type { RunRecord } from "./manager.ts";
 
 function run(index: number, overrides: Partial<RunRecord> = {}): RunRecord {
@@ -22,6 +22,11 @@ function run(index: number, overrides: Partial<RunRecord> = {}): RunRecord {
 }
 
 const label = (harness: string) => ({ claude: "Claude Code", codex: "Codex" })[harness] ?? harness;
+
+const shown = (text: string) =>
+  [...text.matchAll(/^Turn (\d+) ·/gm)].map((match) => Number(match[1]));
+const filler = (size: number) => "x".repeat(size);
+const room = (tokens: number) => ({ contextWindow: 100_000, contextTokens: 75_000 - tokens });
 
 describe("handoffText", () => {
   it("says who sent each turn, how it ended, and which files it changed", () => {
@@ -60,34 +65,193 @@ describe("handoffText", () => {
     assert.doesNotMatch(text, /Turn 4/);
   });
 
-  it("keeps the original request and the newest turns, naming the call for the rest", () => {
-    const long = "x".repeat(5_000);
+  it("chooses the latest message and reply, the first message, then the newest turns", () => {
+    const big = "x".repeat(5_000);
     const runs = Array.from({ length: 20 }, (_, index) =>
-      run(index + 1, { input: long, result: long }),
+      run(index + 1, { input: big, result: big }),
     );
     const text = handoffText({ threadId: "t7", to: "codex", resumed: false, label, runs });
     assert.ok(text);
-    assert.ok(text.length < 30_000);
-    const turns = [...text.matchAll(/^Turn (\d+) ·/gm)].map((match) => Number(match[1]));
-    assert.equal(turns[0], 1);
-    assert.equal(turns.at(-1), 20);
-    // The turns left out form one range, with the exact call that reads them.
-    const missing = Array.from({ length: 20 }, (_, index) => index + 1).filter(
-      (index) => !turns.includes(index),
-    );
-    assert.ok(missing.length > 0);
-    const [from, to] = [missing[0], missing.at(-1)];
-    assert.deepEqual(
-      missing,
-      Array.from({ length: to! - from! + 1 }, (_, index) => from! + index),
-    );
+    // Latest turn, then the first, whose reply also fits; the next newest does not fit.
+    assert.deepEqual(shown(text), [1, 20]);
+    assert.ok(text.length <= 24_000);
+    assert.ok(text.includes(`Reply: ${big}`), "whole, not clipped");
+    assert.doesNotMatch(text, /clipped/);
     assert.ok(
       text.includes(
-        `[Turns ${from}–${to} are left out here. Read them only if you need them: thread_read {"threadId": "t7", "fromRun": ${from}, "toRun": ${to}}]`,
+        `[18 of 20 turns left out (2–19). Read what you need: thread_read {"threadId": "t7", "fromRun": 2, "toRun": 19}]`,
       ),
     );
-    // Long messages are cut, with how much was left out.
-    assert.match(text, /x… \(3000 more characters\)/);
+  });
+
+  it("puts the priorities in order when only some of them fit", () => {
+    const runs = [
+      run(1, { input: `FIRST${filler(6_000)}`, result: "first reply" }),
+      run(2, { input: filler(5_000), result: "small reply" }),
+      run(3, { input: `LATEST${filler(6_000)}`, result: `REPLY${filler(6_000)}` }),
+    ];
+    const handoff = (tokens: number) => {
+      const receiver = room(tokens);
+      const text = handoffText({
+        threadId: "t7",
+        to: "codex",
+        resumed: false,
+        label,
+        runs,
+        receiver,
+      });
+      assert.ok(text && text.length <= tokens * 4);
+      return text;
+    };
+    // Only the latest message fits; its reply stands as left out, and nothing older is shown.
+    const one = handoff(2_000);
+    assert.match(one, /User: LATEST/);
+    assert.match(one, /Reply: \(left out, 6005 characters\)/);
+    assert.deepEqual(shown(one), [3]);
+    // Then the latest reply.
+    const two = handoff(4_000);
+    assert.match(two, /User: LATEST/);
+    assert.match(two, /Reply: REPLY/);
+    assert.deepEqual(shown(two), [3]);
+    // Then the first message, ahead of the newer turn 2, which then no longer fits.
+    const three = handoff(5_000);
+    assert.match(three, /User: FIRST/);
+    assert.deepEqual(shown(three), [1, 3]);
+    assert.ok(three.indexOf("User: FIRST") < three.indexOf("User: LATEST"), "oldest first");
+    assert.match(three, /\[1 of 3 turns left out \(2\)\. /);
+    // With room for it all, nothing is left out, and nothing says so.
+    const all = handoff(6_000);
+    assert.deepEqual(shown(all), [1, 2, 3]);
+    assert.doesNotMatch(all, /left out/);
+  });
+
+  it("takes smaller, older turns past one too big to fit", () => {
+    const runs = [
+      run(1),
+      run(2, { input: "x".repeat(30_000) }),
+      run(3),
+      run(4, { result: "y".repeat(30_000) }),
+      run(5),
+    ];
+    const text = handoffText({ threadId: "t7", to: "codex", resumed: false, label, runs });
+    assert.ok(text);
+    assert.deepEqual(shown(text), [1, 3, 5]);
+    assert.match(text, /\[2 of 5 turns left out \(2, 4\)\. /);
+    assert.match(text, /"fromRun": 4, "toRun": 4/);
+  });
+
+  it("leaves a message out whole when another was chosen, and says so", () => {
+    const runs = [run(1, { input: "x".repeat(30_000), result: "the reply" })];
+    const text = handoffText({ threadId: "t7", to: "codex", resumed: false, label, runs });
+    assert.ok(text);
+    assert.match(text, /User: \(left out, 30000 characters\)\nReply: the reply/);
+    assert.match(text, /\[Left out: parts of turn 1\. Read what you need: thread_read/);
+    assert.doesNotMatch(text, /clipped/);
+  });
+
+  it("keeps a clipped start of the latest message when nothing else fits", () => {
+    // A pair across the cut comes out whole or not at all.
+    const input = "😀".repeat(20_000);
+    const runs = [run(1, { input, result: "z".repeat(50_000) })];
+    const text = handoffText({ threadId: "t7", to: "codex", resumed: false, label, runs });
+    assert.ok(text);
+    assert.ok(text.length <= 24_000);
+    assert.ok(text.isWellFormed());
+    assert.match(text, /User: 😀+… \(clipped: the first \d+ of 40000 characters\)/u);
+    assert.match(text, /Reply: \(left out, 50000 characters\)/);
+    assert.match(text, /\[Left out: parts of turn 1\. /);
+  });
+
+  it("keeps the start of the request even with no room at all", () => {
+    const text = handoffText({
+      threadId: "t7",
+      to: "codex",
+      resumed: true,
+      label,
+      runs: [run(9, { input: "y".repeat(5_000), result: null })],
+      receiver: { contextWindow: 100_000, contextTokens: 99_000 },
+    });
+    assert.match(text!, /User: y{1000}… \(clipped: the first 1000 of 5000 characters\)/);
+    const short = handoffText({
+      threadId: "t7",
+      to: "codex",
+      resumed: true,
+      label,
+      runs: [run(9, { input: "short", result: null })],
+      receiver: { contextWindow: 100_000, contextTokens: 99_000 },
+    });
+    assert.match(short!, /User: short\n/);
+    assert.doesNotMatch(short!, /left out/i);
+  });
+
+  it("does not count a thread's incoming results as what the user asked", () => {
+    const runs = [
+      run(1, { input: "the request", result: null }),
+      run(2, {
+        origin: { type: "report", from: "t9", status: "completed", result: "ok" },
+        input: "x".repeat(30_000),
+        result: "ok",
+      }),
+    ];
+    const text = handoffText({ threadId: "t7", to: "codex", resumed: false, label, runs });
+    assert.match(text!, /User: the request/);
+    assert.doesNotMatch(text!, /clipped/);
+  });
+
+  it("counts commands and files against the budget, as they were", () => {
+    const commands = Array.from({ length: 30 }, (_, index) => ({
+      command: `step ${index} ${"c".repeat(400)}`,
+      exitCode: 0,
+    }));
+    const text = handoffText({
+      threadId: "t7",
+      to: "codex",
+      resumed: false,
+      label,
+      runs: [run(1, { commands, files: ["a.ts"] })],
+    });
+    assert.ok(text);
+    assert.match(text, /Commands \(latest 8 of 30\): `step 22 c+…` → exit 0/);
+    assert.match(text, /Files changed: a\.ts/);
+    const crowded = handoffText({
+      threadId: "t7",
+      to: "codex",
+      resumed: false,
+      label,
+      runs: [run(1, { files: ["f".repeat(30_000)] })],
+    });
+    assert.ok(crowded!.length <= 24_000);
+    assert.match(crowded!, /Commands and files: \(left out\)/);
+  });
+
+  it("budgets for the room the receiving session has, under the cap", () => {
+    assert.equal(handoffBudget(undefined), 24_000);
+    // An unknown window, or a resumed session's unknown use of it, leaves the cap.
+    assert.equal(handoffBudget({ contextWindow: null, contextTokens: 0 }), 24_000);
+    assert.equal(handoffBudget({ contextWindow: 200_000, contextTokens: null }), 24_000);
+    assert.equal(handoffBudget({ contextWindow: 200_000, contextTokens: 0 }), 24_000);
+    // A quarter of the window is held back: 200,000 − 145,000 − 50,000 = 5,000 tokens.
+    assert.equal(handoffBudget({ contextWindow: 200_000, contextTokens: 145_000 }), 20_000);
+    // Of a small window, 16,000 tokens is more than a quarter: 40,000 − 22,000 − 16,000.
+    assert.equal(handoffBudget({ contextWindow: 40_000, contextTokens: 22_000 }), 8_000);
+    assert.equal(handoffBudget({ contextWindow: 200_000, contextTokens: 199_000 }), 0);
+
+    const runs = Array.from({ length: 10 }, (_, index) =>
+      run(index + 1, { input: "x".repeat(1_500), result: "x".repeat(1_500) }),
+    );
+    const handoff = (receiver?: { contextWindow: number; contextTokens: number }) =>
+      handoffText({
+        threadId: "t7",
+        to: "codex",
+        resumed: true,
+        label,
+        runs,
+        ...(receiver ? { receiver } : {}),
+      })!;
+    assert.equal(shown(handoff()).length, 8);
+    const tight = handoff({ contextWindow: 200_000, contextTokens: 148_000 });
+    assert.ok(tight.length <= 8_000);
+    assert.deepEqual(shown(tight), [1, 10]);
   });
 
   it("does not pin the first turn for a harness that resumes, since it saw it", () => {
@@ -101,9 +265,8 @@ describe("handoffText", () => {
       text,
       /You are back on 1harness thread t7\. While you were away it ran on Codex\./,
     );
-    assert.match(text, /^\[Turns 11–\d+ are left out here/m);
-    assert.match(text, /Turn 30 · Codex/);
-    assert.doesNotMatch(text, /Turn 11 ·/);
+    assert.deepEqual(shown(text), [29, 30]);
+    assert.match(text, /\[18 of 20 turns left out \(11–28\)\. /);
   });
 
   it("pins the original request for a resumed thread that never saw it", () => {

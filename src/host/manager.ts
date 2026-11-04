@@ -20,7 +20,7 @@ import { createSession, drivers, findDriver, harnessName as label } from "../dri
 import type { ExtensionHost } from "../extensions/host.ts";
 import type { ToolGrant, ToolServer } from "../extensions/tool-server.ts";
 import { newThreadId } from "../core/thread-id.ts";
-import { combineHandoffs, handoffText, stripHandoff } from "./handoff.ts";
+import { combineHandoffs, handoffText, stripHandoff, tokensIn } from "./handoff.ts";
 
 /**
  * `parked` is a thread whose session ended, as an idle one is closed: it keeps
@@ -188,6 +188,8 @@ export interface Visit {
   effort: string | null;
   /** How much context its thread held when the thread left, when the harness said. */
   contextTokens: number | null;
+  /** How large that context can get, when the harness said. */
+  contextWindow: number | null;
   leftAt: number;
 }
 
@@ -608,6 +610,7 @@ export class ThreadManager {
       model: thread.info.model,
       effort: thread.info.effort,
       contextTokens: thread.usage?.contextTokens ?? null,
+      contextWindow: thread.usage?.contextWindow ?? null,
       leftAt: at,
     };
   }
@@ -652,19 +655,28 @@ export class ThreadManager {
     };
     const extensions = this.#extensions.get(id)!;
     const toolPolicy = extensions.toolPolicy(() => thread);
+    // A harness and model keep their window across sessions, and only their own usage says it:
+    // a harness new to this thread has an unknown one, whatever the harness leaving reported.
+    const contextWindow = same ? leaving.contextWindow : (earlier?.contextWindow ?? null);
     const plans = [
       ...(earlier?.native ? [{ resume: earlier.native, seen: earlier.runs }] : []),
       { resume: null, seen: 0 },
     ].map((plan) => {
       const unseen = managed.runs.slice(plan.seen);
+      // A harness thread that saw none of a fork's runs never got the turns it was forked from.
+      const forkContext = plan.seen === 0 ? managed.forkContext : null;
+      const held = plan.resume === null ? 0 : (earlier?.contextTokens ?? null);
       const handoff = combineHandoffs(
-        // A harness thread that saw none of a fork's runs never got the turns it was forked from.
-        plan.seen === 0 ? managed.forkContext : null,
+        forkContext,
         handoffText({
           threadId: id,
           to: harness,
           runs: unseen,
           resumed: plan.resume !== null,
+          receiver: {
+            contextWindow,
+            contextTokens: held === null ? null : held + tokensIn(forkContext),
+          },
           label,
         }),
       );

@@ -223,3 +223,11 @@ export const HARNESS_STATES: Record<HarnessState, string> = {
   missing: "not installed",
   unchecked: "installed",
 };
+
+/** `at`, moved back if it falls inside a surrogate pair, so a cut never leaves half a character. */
+export function safeCut(text: string, at: number): number {
+  if (at <= 0 || at >= text.length) return at;
+  const [before, after] = [text.charCodeAt(at - 1), text.charCodeAt(at)];
+  const inside = before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff;
+  return inside ? at - 1 : at;
+}

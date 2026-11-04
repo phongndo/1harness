@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS visits (
   model TEXT,
   effort TEXT,
   context_tokens INTEGER,
+  context_window INTEGER,
   left_at INTEGER NOT NULL,
   PRIMARY KEY (thread_id, harness)
 );
@@ -241,6 +242,11 @@ export class Store {
     if (!columns.has("usage")) this.#db.exec("ALTER TABLE threads ADD COLUMN usage TEXT");
     if (!columns.has("named"))
       this.#db.exec("ALTER TABLE threads ADD COLUMN named INTEGER NOT NULL DEFAULT 0");
+    const visitColumns = new Set(
+      this.#all("PRAGMA table_info(visits)").map((row) => String(row["name"])),
+    );
+    if (!visitColumns.has("context_window"))
+      this.#db.exec("ALTER TABLE visits ADD COLUMN context_window INTEGER");
     const version = this.#meta("schema");
     if (version === null) this.#setMeta("schema", String(SCHEMA_VERSION));
     else if (Number(version) > SCHEMA_VERSION)
@@ -512,11 +518,12 @@ export class Store {
 
   saveVisit(threadId: string, harness: HarnessId, visit: Visit): void {
     this.#run(
-      `INSERT INTO visits (thread_id, harness, native, runs, model, effort, context_tokens, left_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO visits (thread_id, harness, native, runs, model, effort, context_tokens, context_window, left_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (thread_id, harness) DO UPDATE SET native = excluded.native,
          runs = excluded.runs, model = excluded.model, effort = excluded.effort,
-         context_tokens = excluded.context_tokens, left_at = excluded.left_at`,
+         context_tokens = excluded.context_tokens, context_window = excluded.context_window,
+         left_at = excluded.left_at`,
       threadId,
       harness,
       visit.native,
@@ -524,6 +531,7 @@ export class Store {
       visit.model,
       visit.effort,
       visit.contextTokens,
+      visit.contextWindow,
       visit.leftAt,
     );
   }
@@ -538,6 +546,7 @@ export class Store {
           model: row["model"] === null ? null : String(row["model"]),
           effort: row["effort"] === null ? null : String(row["effort"]),
           contextTokens: row["context_tokens"] === null ? null : Number(row["context_tokens"]),
+          contextWindow: row["context_window"] === null ? null : Number(row["context_window"]),
           leftAt: Number(row["left_at"]),
         },
       ]),
