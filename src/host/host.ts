@@ -83,6 +83,7 @@ import { contextOperations } from "./context.ts";
 import { ExtensionSets, type ExtensionSet } from "./extension-sets.ts";
 import { hostOperations } from "./operations.ts";
 import { Orchestrator } from "./orchestrator.ts";
+import { releaseWorktree, type Worktree } from "./worktree.ts";
 import { Scope } from "./scope.ts";
 import { savePastedImages, sendText } from "./send.ts";
 import { StoreWriter } from "./store-writer.ts";
@@ -196,6 +197,13 @@ function sessionHandle(thread: Thread): SessionHandle {
     capabilities: { get: () => thread.capabilities },
     info: { get: () => thread.info },
   }) as unknown as SessionHandle;
+}
+
+/** A worktree that stayed when its thread went, because it holds work. */
+type KeptWorktree = NonNullable<Result<"thread.forget">["keptWorktrees"]>[number];
+
+function keptWorktreeText({ threadId, path, branch, reason }: KeptWorktree): string {
+  return `Kept the worktree of thread ${shortThreadId(threadId)}, ${path} on branch ${branch}: ${reason}.`;
 }
 
 /**
@@ -316,7 +324,12 @@ export class Host {
       const row = this.#stored(id);
       return row && { ...row, status: "closed", thread: { info: row.info, requests: [] } };
     });
-    this.orchestrator = new Orchestrator(this.manager, options.env, this.#scope);
+    this.orchestrator = new Orchestrator(
+      this.manager,
+      options.env,
+      this.#scope,
+      options.stateDir ?? stateDir(),
+    );
     // Through the host, so clients hear of what a delegation's check finds.
     this.orchestrator.checkHarness = async (driver) =>
       (await this.#checkHarnesses(driver.id)).find((harness) => harness.id === driver.id) ??
@@ -428,8 +441,17 @@ export class Host {
     const store = this.#store;
     if (!store) return;
     const days = this.#options.retainClosedDays;
-    if (days)
-      for (const id of store.closedBefore(Date.now() - days * 86_400_000)) store.deleteThread(id);
+    if (days) {
+      const expired = new Set(store.closedBefore(Date.now() - days * 86_400_000));
+      for (const id of expired) {
+        const worktree = store.thread(id)?.worktree;
+        const kept = worktree && (await this.#releaseWorktree(id, worktree, expired));
+        // Nothing else records where the work is, so its thread stays until someone forgets it.
+        // Said to the log too, as nobody may be connected yet when the server starts.
+        if (kept) console.error(`1harness: ${keptWorktreeText(kept)}`);
+        else store.deleteThread(id);
+      }
+    }
     const rows = store.liveThreads();
     const interrupted = new Set<string>();
     const saved: RestoredThread[] = [];
@@ -449,7 +471,7 @@ export class Host {
       if (runs.some((run) => run.status === "running")) interrupted.add(row.id);
       saved.push({
         ...this.#restored(row, runs),
-        extensions: await this.#extensionsFor(row.cwd, null),
+        extensions: await this.#extensionsFor(this.#extensionFolder(row), null),
       });
     }
     for (const managed of this.manager.restore(saved)) {
@@ -490,6 +512,46 @@ export class Host {
     this.#writer?.schedule();
   }
 
+  /**
+   * The folder whose extensions a stored thread comes back with. As when it was
+   * started, a delegated thread has those of the thread that started it, so a
+   * worktree of a trusted folder keeps that folder's trust, and its own files
+   * and every other folder earn none: no agent gets to write what 1harness
+   * would load, and a thread opened in such a folder by hand is not trusted.
+   */
+  #extensionFolder(row: ThreadRow): string {
+    const parent = row.parentId ? this.#store?.thread(row.parentId) : null;
+    return parent && (row.worktree || row.cwd === parent.cwd)
+      ? this.#extensionFolder(parent)
+      : row.cwd;
+  }
+
+  /**
+   * Removes the worktree of a thread that is going, unless it holds work or a
+   * thread that is not going, in `leaving`, works there too. Says what stays.
+   */
+  async #releaseWorktree(
+    threadId: string,
+    worktree: Worktree,
+    leaving: ReadonlySet<string>,
+  ): Promise<KeptWorktree | null> {
+    const { path, branch } = worktree;
+    const others = [
+      ...this.manager
+        .list()
+        .filter((thread) => thread.thread.info.cwd === path)
+        .map((thread) => thread.id),
+      ...(this.#store?.threadsIn(path) ?? []),
+    ].filter((id) => !leaving.has(id));
+    const reason = others[0]
+      ? `thread ${shortThreadId(others[0])} works there too`
+      : await releaseWorktree(worktree);
+    if (reason === null) return null;
+    const kept = { threadId, path, branch, reason };
+    this.#clients.broadcast("warning", keptWorktreeText(kept));
+    return kept;
+  }
+
   #restored(row: ThreadRow, runs: RunRecord[]): RestoredThread {
     const store = this.#store!;
     this.#marks.set(row.id, {
@@ -506,6 +568,7 @@ export class Host {
       origin: row.origin,
       forkedFrom: row.forkedFrom,
       forkContext: row.forkContext,
+      worktree: row.worktree,
       createdAt: row.createdAt,
       error: row.error,
       runs,
@@ -556,7 +619,7 @@ export class Host {
     if (!store || !found) return null;
     // Its extensions first: from here on nothing waits, so the thread is never missing
     // for a call that comes meanwhile, and a second reopen finds it back.
-    const extensions = await this.#extensionsFor(found.cwd, null);
+    const extensions = await this.#extensionsFor(this.#extensionFolder(found), null);
     const existing = this.manager.get(id);
     if (existing) {
       if (existing.status !== "closed") return existing;
@@ -1651,6 +1714,13 @@ export class Host {
           ]),
         ];
         if (managed) await this.manager.close(threadId);
+        // While the threads still say where their worktrees are, should this be cut short.
+        const keptWorktrees = [];
+        for (const id of ids) {
+          const worktree = this.manager.get(id)?.worktree ?? this.#store?.thread(id)?.worktree;
+          const kept = worktree && (await this.#releaseWorktree(id, worktree, new Set(ids)));
+          if (kept) keptWorktrees.push(kept);
+        }
         this.orchestrator.forgetTasks(ids);
         for (const id of ids.toReversed()) {
           if (this.manager.get(id)) {
@@ -1658,7 +1728,7 @@ export class Host {
             this.manager.forget(id);
           } else this.#writer?.delete(id);
         }
-        return { forgotten: ids };
+        return { forgotten: ids, ...(keptWorktrees.length > 0 ? { keptWorktrees } : {}) };
       },
     };
   }

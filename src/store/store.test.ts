@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
+import { after, describe, it } from "node:test";
 import type { Capabilities, SessionInfo } from "../core/events.ts";
 import { Store, StoreLocked, type ThreadRow } from "./store.ts";
 
@@ -41,6 +41,7 @@ function row(id: string, overrides: Partial<ThreadRow> = {}): ThreadRow {
     origin: "user",
     forkedFrom: null,
     forkContext: null,
+    worktree: null,
     state: "open",
     info,
     capabilities,
@@ -100,6 +101,26 @@ describe("Store", () => {
     assert.throws(() => Store.open(path), StoreLocked);
     owner.close();
     Store.open(path).close();
+  });
+
+  it("adds the worktree column to a store from before it, and keeps what is saved there", () => {
+    const path = join(root, "worktree.db");
+    const worktree = { path: "/state/worktrees/t1", branch: "1h/t1", base: "abc", repo: "/r/.git" };
+    Store.open(path).close();
+    const old = new DatabaseSync(path);
+    old.exec("ALTER TABLE threads DROP COLUMN worktree");
+    old.close();
+    let store = Store.open(path);
+    store.saveThread(row("t0"));
+    store.saveThread(row("t1", { worktree }));
+    store.close();
+    store = Store.open(path);
+    assert.equal(store.thread("t0")?.worktree, null);
+    assert.deepEqual(store.thread("t1")?.worktree, worktree);
+    assert.deepEqual(store.threadsIn("/work").toSorted(), ["t0", "t1"]);
+    store.saveThread(row("t1", { worktree: null }));
+    assert.equal(store.thread("t1")?.worktree, null);
+    store.close();
   });
 
   it("keeps queued messages in order until sent or dropped", () => {

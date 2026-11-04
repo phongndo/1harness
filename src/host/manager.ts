@@ -21,6 +21,7 @@ import type { ExtensionHost } from "../extensions/host.ts";
 import type { ToolGrant, ToolServer } from "../extensions/tool-server.ts";
 import { newThreadId } from "../core/thread-id.ts";
 import { combineHandoffs, handoffText, stripHandoff, tokensIn } from "./handoff.ts";
+import type { Worktree } from "./worktree.ts";
 
 /**
  * `parked` is a thread whose session ended, as an idle one is closed: it keeps
@@ -75,6 +76,8 @@ export interface ManagedThread {
    * that has seen none of its runs gets first.
    */
   readonly forkContext: string | null;
+  /** The git worktree 1harness made for it, where it works; `dropWorktree` clears it. */
+  worktree: Worktree | null;
   readonly thread: Thread;
   readonly createdAt: number;
   status: ThreadStatus;
@@ -99,6 +102,8 @@ export type ManagerEvent =
 export type ManagerListener = (event: ManagerEvent) => void;
 
 export interface CreateThreadOptions {
+  /** Its ID, when something named for it had to exist before it could start. */
+  id?: string;
   harness: HarnessId;
   settings: SessionOptions;
   title?: string;
@@ -110,6 +115,7 @@ export interface CreateThreadOptions {
   openedBy?: string | null;
   /** The thread it is forked from, and the handoff of that thread's turns it starts with. */
   fork?: { from: string; handoff: string | null };
+  worktree?: Worktree | null;
 }
 
 /**
@@ -144,6 +150,7 @@ export interface RestoredThread {
   origin: "user" | "delegated";
   forkedFrom: string | null;
   forkContext: string | null;
+  worktree: Worktree | null;
   createdAt: number;
   error: string | null;
   runs: RunRecord[];
@@ -299,7 +306,7 @@ export class ThreadManager {
     const parent = options.parentId ? this.#extensions.get(options.parentId) : undefined;
     const extensions =
       parent ?? (await this.#extensionsFor(options.settings.cwd, options.openedBy ?? null));
-    const id = newThreadId();
+    const id = options.id ?? newThreadId();
     const servers = await this.#connectServers(id, extensions);
     let created: Thread | null = null;
     const toolPolicy = extensions.toolPolicy(() => created);
@@ -329,6 +336,7 @@ export class ThreadManager {
       openedBy: options.openedBy ?? null,
       forkedFrom: options.fork?.from ?? null,
       forkContext: options.fork?.handoff ?? null,
+      worktree: options.worktree ?? null,
       thread,
       createdAt: Date.now(),
       status: "starting",
@@ -581,6 +589,14 @@ export class ThreadManager {
     managed.title = title;
     managed.named = true;
     this.#refresh(managed);
+  }
+
+  /** A thread no longer has the worktree it was given, as one that failed to start gave it back. */
+  dropWorktree(id: string): void {
+    const managed = this.#threads.get(id);
+    if (!managed) return;
+    managed.worktree = null;
+    this.#emit({ type: "thread.updated", thread: managed });
   }
 
   /** Drops a closed thread from memory, such as one with nothing in it. */

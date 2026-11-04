@@ -383,7 +383,8 @@ export function hostOperations(host: HostAccess): Operation[] {
     },
     {
       name: "thread_forget",
-      description: "Deletes a thread, and the threads it started, for good.",
+      description:
+        "Deletes a thread, and the threads it started, for good. Their worktrees go too, unless they hold work: those stay, and the result names them.",
       inputSchema: { type: "object", properties: { threadId: THREAD_ID }, required: ["threadId"] },
       effect: "act",
       callers: ["user"],
