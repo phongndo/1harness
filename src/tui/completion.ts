@@ -83,7 +83,7 @@ export interface SuggestionsHost {
   /** 1harness's commands the thread on screen can run, in menu order. */
   available(): CommandDefinition[];
   isAvailable(command: CommandDefinition): boolean;
-  /** The harness's skills, listed after `$`. */
+  /** The skills to list after `$`: the harness's, and those 1harness offers. */
   skills(): readonly NativeCommand[];
   /** The folder files are mentioned from. */
   cwd(): string;

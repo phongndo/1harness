@@ -124,6 +124,8 @@ async function start(
     env?: NodeJS.ProcessEnv;
     /** Extension modules the terminal names, as `-x` does. */
     extensions?: string[];
+    /** The config folder, for a test that needs its own. */
+    configDir?: string;
   } = {},
 ): Promise<Session> {
   const terminal = new Terminal();
@@ -134,7 +136,7 @@ async function start(
   const host = new Host({
     version: "test",
     cwd: root,
-    configDir: join(root, "config"),
+    configDir: options.configDir ?? join(root, "config"),
     stateDir: join(root, "state"),
     idleCloseMs: 0,
     store: options.store ?? null,
@@ -273,6 +275,27 @@ describe("extensions on screen", () => {
     await session.sees("Done with go TOOL");
     await session.type("\x18");
     await session.sees("Looked through the docs for parsers");
+  });
+});
+
+describe("skills on screen", () => {
+  it("sends a skill 1harness offers with $, and leaves other dollars as messages", async () => {
+    const config = join(root, "skills-config");
+    mkdirSync(join(config, "skills", "tidy"), { recursive: true });
+    writeFileSync(
+      join(config, "skills", "tidy", "SKILL.md"),
+      "---\ndescription: Tidies a file\n---\nTidy it well.\n",
+    );
+    const session = await start({ configDir: config });
+    await session.sees(/scripted/);
+    await settle(50);
+    await session.type("$ti");
+    await session.sees("Tidies a file");
+    await session.type("\x15$tidy the parser\r");
+    await session.sees("Tidy it well");
+    await session.sees(/Done with <skill name="tidy"/);
+    await session.type("$5 a month\r");
+    await session.sees("Done with $5 a month");
   });
 });
 

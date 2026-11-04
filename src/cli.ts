@@ -38,6 +38,7 @@ import { threadsCommand } from "./client/threads-cli.ts";
 import { ACP_HELP, serveAcp } from "./client/acp-agent.ts";
 import { MCP_HELP, mcpBridge } from "./client/mcp-bridge.ts";
 import { opCommand } from "./client/ops-cli.ts";
+import { packagesCommand } from "./client/packages-cli.ts";
 import { watch } from "./client/watch.ts";
 import { Store, StoreLocked } from "./store/store.ts";
 import { App, type ServerInfo } from "./tui/app.ts";
@@ -55,6 +56,7 @@ Usage: 1harness [options] [prompt]
        1harness mcp                serve that to agents 1harness does not run, as an MCP server
        1harness acp                be an Agent Client Protocol agent for editors, over every harness
        1harness hosts <command>    name servers on other machines, for -S
+       1harness packages <command> install extensions and skills from npm, git, or a folder
        1harness whoami             who the server takes you to be
 
 Threads run in the 1harness server, which keeps them working after the
@@ -77,7 +79,8 @@ Options:
                          or a socket path (default: ONEHARNESS_SERVER, else this machine's)
   -r, --resume <id>      reopen a thread: 1harness's, such as 3f9c2a1b, or a harness's own
   -x, --extension <path> load an extension module (repeatable); others load from
-                         ~/.config/1harness/extensions and a trusted .1harness/extensions
+                         ~/.config/1harness/extensions, installed packages, and a trusted
+                         .1harness/extensions
   -p, --print            run the prompt once without the UI and print the reply;
                          approvals are declined unless the mode allows the action
   -h, --help             show this help
@@ -435,6 +438,11 @@ try {
     await acp(rest, server, version);
   } else if (command === "hosts") {
     process.exitCode = await hostsCommand(rest);
+  } else if (command === "packages") {
+    process.exitCode = await packagesCommand(rest, {
+      configDir: configDir(),
+      stateDir: stateDir(),
+    });
   } else if (command === "whoami") {
     process.exitCode = await whoami(server);
   } else {
