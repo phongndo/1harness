@@ -10,6 +10,7 @@ import {
   type CommandDefinition,
   type Completions,
   type PickEntry,
+  type ReportSpan,
 } from "./registry.ts";
 import { parseInput } from "../operations/input.ts";
 import type { OperationInfo } from "../operations/operation.ts";
@@ -603,6 +604,88 @@ const op: CommandDefinition = {
   },
 };
 
+/** What `thread_context` says of a thread, as `/context` shows it. */
+interface ThreadContext {
+  tools: { name: string; source: string; tokens: number; offered: boolean }[];
+  toolTokens: number;
+  servers: string[];
+  handoffTokens: number;
+  forkTokens: number;
+}
+
+const tokens = (count: number) => `~${count.toLocaleString("en-US")} tokens`;
+
+const row = (label: string, value: string): ReportSpan[] => [
+  { text: `${label}  `, tone: "strong" },
+  { text: value, tone: "text" },
+];
+
+const contextView: CommandDefinition = {
+  name: "context",
+  usage: "[on | off] [tool]",
+  description: "what 1harness adds to this thread's context, and turn its tools on or off",
+  group: "Tools",
+  available: (context) => context.thread !== null,
+  complete: (_context, args) =>
+    args.includes(" ")
+      ? null
+      : {
+          start: 0,
+          items: [
+            completion("off", "stop offering 1harness's tools, or one", true),
+            completion("on", "offer them again, or one", true),
+          ],
+        },
+  run: async (context, args) => {
+    const [action, tool] = args.split(/\s+/).filter(Boolean);
+    if (action === "on" || action === "off") {
+      await context.runOperation("tools_set", {
+        enabled: action === "on",
+        ...(tool ? { tool } : {}),
+      });
+      context.ui.notify(
+        "info",
+        `${tool ?? "1harness's tools"} ${action === "on" ? "offered" : "not offered"} from now on; /reload shows this thread the change`,
+      );
+      return;
+    }
+    if (action !== undefined) throw new Error("Usage: /context [on | off] [tool]");
+    const thread = context.thread;
+    if (!thread) throw new Error("No thread");
+    const found = (await context.runOperation("thread_context", {
+      threadId: thread.id,
+    })) as ThreadContext;
+    const width = Math.max(0, ...found.tools.map((entry) => entry.name.length));
+    const offered = found.tools.filter((entry) => entry.offered).length;
+    const lines: ReportSpan[][] = [
+      row("Tools", `${offered} of ${found.tools.length}, ${tokens(found.toolTokens)}`),
+      ...found.tools.map((entry): ReportSpan[] => [
+        { text: `  ${entry.name.padEnd(width)}  `, tone: entry.offered ? "soft" : "muted" },
+        {
+          text: entry.offered ? `${entry.source}, ~${entry.tokens}` : `${entry.source}, off`,
+          tone: "muted",
+        },
+      ]),
+      row("MCP servers", found.servers.join(", ") || "none"),
+      row(
+        "Waiting handoff",
+        found.handoffTokens > 0 ? `${tokens(found.handoffTokens)}, with the next message` : "none",
+      ),
+    ];
+    if (found.forkTokens > 0) lines.push(row("Forked from", tokens(found.forkTokens)));
+    lines.push(
+      [],
+      [
+        {
+          text: "Estimates; the harness's own prompt and tools are not counted. /context off offers none of these.",
+          tone: "muted",
+        },
+      ],
+    );
+    context.ui.report({ title: "What 1harness adds to this thread's context", lines });
+  },
+};
+
 export const BUILTIN_COMMANDS: readonly CommandDefinition[] = [
   quit,
   newThread,
@@ -617,5 +700,6 @@ export const BUILTIN_COMMANDS: readonly CommandDefinition[] = [
   mode,
   plan,
   mcp,
+  contextView,
   op,
 ];

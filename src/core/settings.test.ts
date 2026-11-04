@@ -4,19 +4,55 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { fitRuntimeMode } from "./events.ts";
-import { loadLastHarness, loadSettings, saveLastHarness, saveSettings } from "./settings.ts";
+import {
+  loadLastHarness,
+  loadSettings,
+  saveLastHarness,
+  saveSettings,
+  toolDisabled,
+} from "./settings.ts";
 
 describe("loadSettings", () => {
+  it("reads which tools are not offered, and says when it cannot", () => {
+    const dir = mkdtempSync(join(tmpdir(), "1harness-settings-"));
+    try {
+      writeFileSync(join(dir, "settings.json"), '{ "disabledTools": ["delegate_task"] }');
+      const { settings } = loadSettings(dir);
+      assert.deepEqual(settings.disabledTools, ["delegate_task"]);
+      assert.equal(toolDisabled(settings, "delegate_task"), true);
+      assert.equal(toolDisabled(settings, "thread_read"), false);
+      assert.equal(toolDisabled({ disabledTools: ["*"] }, "thread_read"), true);
+      writeFileSync(join(dir, "settings.json"), '{ "disabledTools": "all" }');
+      const bad = loadSettings(dir);
+      assert.deepEqual(bad.settings.disabledTools, []);
+      assert.match(bad.warnings[0] ?? "", /disabledTools must be a list/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("reads the start mode", () => {
     const dir = mkdtempSync(join(tmpdir(), "1harness-settings-"));
     try {
       assert.deepEqual(loadSettings(dir), {
-        settings: { harness: null, mode: null, retainClosedDays: null, agentMode: null },
+        settings: {
+          harness: null,
+          mode: null,
+          retainClosedDays: null,
+          agentMode: null,
+          disabledTools: [],
+        },
         warnings: [],
       });
       writeFileSync(join(dir, "settings.json"), '{ "mode": "auto" }');
       assert.deepEqual(loadSettings(dir), {
-        settings: { harness: null, mode: "auto", retainClosedDays: null, agentMode: null },
+        settings: {
+          harness: null,
+          mode: "auto",
+          retainClosedDays: null,
+          agentMode: null,
+          disabledTools: [],
+        },
         warnings: [],
       });
       writeFileSync(join(dir, "settings.json"), '{ "retainClosedDays": 30 }');

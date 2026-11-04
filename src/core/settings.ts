@@ -18,6 +18,11 @@ export interface Settings {
    * `/mcp`, may start a thread in or act on; `DEFAULT_AGENT_MODE` when unset.
    */
   agentMode: RuntimeMode | null;
+  /**
+   * The tools 1harness does not offer the agents in its threads, by name, or
+   * `*` for all of them, so nothing of its own goes in their context.
+   */
+  disabledTools: string[];
 }
 
 /** What agents outside 1harness may start and act on unless settings say otherwise. */
@@ -41,6 +46,7 @@ export function loadSettings(configDir: string): { settings: Settings; warnings:
       mode: "supervised" as const,
       retainClosedDays: null,
       agentMode: "supervised" as const,
+      disabledTools: [],
     },
     warnings: [`${file}: ${problem}; threads start in supervised until it is fixed`],
   });
@@ -50,7 +56,13 @@ export function loadSettings(configDir: string): { settings: Settings; warnings:
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT")
       return {
-        settings: { harness: null, mode: null, retainClosedDays: null, agentMode: null },
+        settings: {
+          harness: null,
+          mode: null,
+          retainClosedDays: null,
+          agentMode: null,
+          disabledTools: [],
+        },
         warnings: [],
       };
     return broken((error as Error).message);
@@ -82,12 +94,19 @@ export function loadSettings(configDir: string): { settings: Settings; warnings:
     retainClosedDays = retain;
   else if (retain !== undefined && retain !== null)
     warnings.push(`${file}: retainClosedDays must be a number of days; closed threads are kept`);
+  const disabled = values["disabledTools"];
+  let disabledTools: string[] = [];
+  if (Array.isArray(disabled) && disabled.every((name) => typeof name === "string"))
+    disabledTools = disabled as string[];
+  else if (disabled !== undefined && disabled !== null)
+    warnings.push(`${file}: disabledTools must be a list of tool names; every tool is offered`);
   return {
     settings: {
       harness,
       mode: isRuntimeMode(mode) ? mode : null,
       retainClosedDays,
       agentMode: isRuntimeMode(agentMode) ? agentMode : null,
+      disabledTools,
     },
     warnings,
   };
@@ -135,6 +154,11 @@ export function saveSettings(configDir: string, changes: Partial<Settings>): voi
   const temporary = `${file}.${process.pid}.tmp`;
   writeFileSync(temporary, `${JSON.stringify({ ...values, ...changes }, null, 2)}\n`);
   renameSync(temporary, file);
+}
+
+/** Whether the settings keep a tool from the agents in 1harness's threads. */
+export function toolDisabled(settings: Pick<Settings, "disabledTools">, name: string): boolean {
+  return settings.disabledTools.includes("*") || settings.disabledTools.includes(name);
 }
 
 /** The harness 1harness starts when none is named: the user's default, else the one used last. */
