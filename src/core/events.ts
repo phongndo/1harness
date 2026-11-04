@@ -228,7 +228,7 @@ export interface Capabilities {
   runtimeModes: readonly RuntimeMode[];
   /** Messages can carry images. */
   images: boolean;
-  /** `SessionOptions.toolPolicy` sees every tool call, even in full access. */
+  /** `SessionOptions.toolPolicy` sees every tool call but 1harness's own, even in full access. */
   toolChecks: boolean;
   /** Unknown slash commands are sent to the harness, which runs its own. */
   nativeSlashCommands: boolean;
@@ -339,7 +339,10 @@ export interface SessionOptions {
   resume: string | null;
   /** Servers to add for this session only; the harness's config is left alone. */
   mcpServers?: Record<string, McpServerConfig>;
-  /** Runs before each tool call where `capabilities.toolChecks` says it can. */
+  /**
+   * Runs before each tool call where `capabilities.toolChecks` says it can,
+   * except 1harness's own tools, whose server checks them on every harness.
+   */
   toolPolicy?: ToolPolicy;
 }
 

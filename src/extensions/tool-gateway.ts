@@ -80,7 +80,8 @@ export function gatewayTools(hidden: ReadonlyMap<string, ToolDefinition>): ToolD
     context: ToolContext,
     readOnly: boolean,
   ): ToolResult | Promise<ToolResult> => {
-    const name = String(input["name"] ?? "");
+    // Only a string: a policy sees the tool `gatewayCall` finds, which is nothing for `["x"]`.
+    const name = typeof input["name"] === "string" ? input["name"] : "";
     const tool = hidden.get(name);
     if (!tool) throw new Error(`No tool ${name}; ${GATEWAY_SEARCH} finds them`);
     // What keeps a change from running under a read's lighter approval.
