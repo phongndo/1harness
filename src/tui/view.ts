@@ -102,10 +102,13 @@ function messageBlock(echo: string, message: Message | undefined): Block {
  * Why a session ended and how to go on, with a command the harness names on a
  * line of its own, where it can be read and copied whole.
  */
-export function sessionEnded(error: string): string {
+export function sessionEnded(error: string, resend: boolean): string {
   const named = /^(.*?)[;:,.]?\s*\brun\s+`([^`]+)`\.?\s*$/is.exec(error);
   const [, why, command] = named ?? [];
-  const next = "press enter to send your message again; the thread keeps what it did.";
+  // Enter only has something to send after a failed message; otherwise the next one starts it.
+  const next = resend
+    ? "press enter to send your message again; the thread keeps what it did."
+    : "send a message; the thread keeps what it did.";
   return why && command
     ? `Session ended: ${why}\nIn a shell, run:\n$ ${command}\nThen ${next}`
     : `Session ended: ${error}\nTo start it again, ${next}`;
@@ -198,7 +201,7 @@ export class ThreadView {
         if (entry.error && this.turn) this.#offerRetry(null);
         this.endTurn(null, null);
         this.settle();
-        if (entry.error) this.notice("error", sessionEnded(entry.error));
+        if (entry.error) this.notice("error", sessionEnded(entry.error, this.retry !== null));
         break;
       case "decision":
         this.transcript.add({

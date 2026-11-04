@@ -265,13 +265,18 @@ describe("after a failure", () => {
 
   it("puts a command a dead session names on its own line", () => {
     assert.equal(
-      sessionEnded("demo exited (code 1): login expired; run `demo auth login`"),
+      sessionEnded("demo exited (code 1): login expired; run `demo auth login`", true),
       "Session ended: demo exited (code 1): login expired\nIn a shell, run:\n$ demo auth login\n" +
         "Then press enter to send your message again; the thread keeps what it did.",
     );
     assert.match(
-      sessionEnded("demo exited (code 1)"),
+      sessionEnded("demo exited (code 1)", true),
       /^Session ended: demo exited \(code 1\)\nTo start/,
+    );
+    // With no failed message to send, enter would do nothing.
+    assert.equal(
+      sessionEnded("demo exited (code 1)", false),
+      "Session ended: demo exited (code 1)\nTo start it again, send a message; the thread keeps what it did.",
     );
   });
 });

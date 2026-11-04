@@ -417,7 +417,7 @@ describe("App", () => {
 
       error = "overloaded";
       await session.type("try this\r");
-      await session.sees("enter tries again");
+      await session.sees("enter resends your message");
       // Spaces in the composer hide the hint, so enter should not act on it.
       await session.type("  \r");
       await settle(100);
