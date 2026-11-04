@@ -13,7 +13,9 @@ describe("--help", () => {
     assert.match(help, /--mode\s+supervised/);
   });
 
-  it("shows how to begin", () => {
-    assert.match(help, /Examples:\n {2}1harness +start in this folder/);
+  it("shows how to begin, and what the agent may do, before everything else", () => {
+    assert.match(help, /Usage: [^\n]+\n[^\n]+\n\nExamples:\n {2}1harness +start in this folder/);
+    assert.ok(help.indexOf("without asking (--mode)") < help.indexOf("Commands:"));
+    assert.ok(help.indexOf("Commands:") < help.indexOf("Options:"));
   });
 });

@@ -49,19 +49,7 @@ const help = `1harness, or 1h for short
 One terminal UI for ${labels.length > 1 ? `${labels.slice(0, -1).join(", ")}, and ${labels.at(-1)}` : labels.join("")}.
 
 Usage: 1harness [options] [prompt]
-       1harness server <command>   run, start, stop, or check the server
-       1harness harnesses          say which harnesses are ready, need signing in, or are missing
-       1harness threads [words]    list this folder's threads, or search them; show <id> prints one
-       1harness watch              report every thread's status to the terminal (OSC 7501)
-       1harness op [name] [k=v…]   list what 1harness can do, or do it: open, steer, or move threads
-       1harness mcp                serve that to agents 1harness does not run, as an MCP server
-       1harness acp                be an Agent Client Protocol agent for editors, over every harness
-       1harness hosts <command>    name servers on other machines, for -S
-       1harness packages <command> install extensions and skills from npm, git, or a folder
-       1harness whoami             who the server takes you to be
-
-Threads run in the 1harness server, which keeps them working after the
-terminal quits; it starts in the background when none is running.
+       1harness <command>
 
 Examples:
   1harness                          start in this folder
@@ -83,12 +71,28 @@ supervised, or "mode" in ~/.config/1harness/settings.json, to be asked first.
 `
     : ""
 }
+Commands:
+  server <command>    run, start, stop, or check the server
+  harnesses           show which harnesses are ready, need signing in, or are missing
+  threads [words]     list this folder's threads, or search them; show <id> prints one
+  watch               report every thread's status to the terminal (OSC 7501)
+  op [name] [k=v…]    list 1harness's operations, or run one: open, steer, or move threads
+  mcp                 offer those to agents 1harness does not run, as an MCP server
+  acp                 act as an Agent Client Protocol agent for editors, over every harness
+  hosts <command>     name servers on other machines, for -S
+  packages <command>  install extensions and skills from npm, git, or a folder
+  whoami              show who the server takes you to be
+
+Threads run in the 1harness server, which keeps them working after the
+terminal quits; it starts in the background when none is running.
+
 Options:
   -H, --harness <name>   ${drivers()
     .map((driver) => driver.id)
-    .join(", ")} (default: "harness" in
-                         ~/.config/1harness/settings.json, which ctrl+s in a harness pick
-                         sets, else the one used last; the first run asks)
+    .join(", ")}
+                         (default: "harness" in ~/.config/1harness/settings.json,
+                         which ctrl+s in a harness list sets, else the one used
+                         last; the first run asks)
   -m, --model <id>       model to use (default: the harness's default)
   -e, --effort <level>   reasoning effort
       --mode <mode>      what the agent may do without asking; see above
