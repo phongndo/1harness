@@ -329,6 +329,35 @@ describe("OpenCode requests", () => {
     );
   });
 
+  it("offers no way to remember the gateway, which reaches every tool behind it", () => {
+    const permission = {
+      id: "p1",
+      sessionID: "s1",
+      action: "1harness_tool_act",
+      resources: [],
+      metadata: { input: { name: "thread_send", input: { threadId: "t" } } },
+    };
+    const reached = {
+      kind: "tool_call",
+      id: "c1",
+      tool: "thread_send",
+      server: "1harness",
+      category: "other",
+      summary: "",
+      output: "",
+      status: "running",
+    } as const;
+    const request = permissionRequest(permission, reached, "/work");
+    assert.deepEqual(
+      request.options.map((option) => option.id),
+      ["once", "reject"],
+    );
+    // What it asks about is the tool that really runs.
+    assert.ok(request.action.type === "tool");
+    assert.equal(request.action.tool, "thread_send");
+    assert.deepEqual(request.action.input, { threadId: "t" });
+  });
+
   it("asks for an edit by what it does to the file, with its diff", () => {
     const request = permissionRequest(
       {

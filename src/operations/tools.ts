@@ -8,6 +8,7 @@ export function agentTool(operation: Operation): ToolDefinition {
     description: operation.description,
     inputSchema: operation.inputSchema,
     ...(operation.effect === "read" ? { readOnly: true } : {}),
+    ...(operation.direct ? { direct: true } : {}),
     execute: async (input, context): Promise<ToolResult> => {
       const result = await runOperation(operation, operation.name, input, {
         kind: "agent",

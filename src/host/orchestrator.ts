@@ -195,6 +195,7 @@ export class Orchestrator {
       },
       {
         name: "delegate_task",
+        direct: true,
         description:
           "Hands a task to another agent in a new thread, on any available harness (see orchestrator_capabilities). The agent sees only the task text, not your conversation, so include the context it needs. By default this waits for the result; with wait set to false it returns a taskId at once, and the result is sent to you as a message when the task finishes. A task's ID is its thread's ID, which the thread tools take too.",
         inputSchema: {

@@ -13,7 +13,8 @@
 //   session   — events, messages, and approvals of every thread, through `on`,
 //               `onInput`, and `onRequest`
 //   agent     — tools the model can call, through `registerTool`, served to each
-//               harness as an MCP server
+//               harness as an MCP server; agents find them with `tool_search`
+//               unless they are `direct`
 //   operation — what people, programs, and agents inside and outside 1harness can
 //               all call, through `registerOperation`: a tool, `/op`, `1harness op`,
 //               `1harness mcp`, and the server's API at once; `runOperation` calls
@@ -120,6 +121,12 @@ export interface ToolDefinition {
   inputSchema: Record<string, unknown>;
   /** Marks a tool that only reads, which harnesses may run with fewer prompts. */
   readOnly?: boolean;
+  /**
+   * Offers it to agents by name, in every thread's context. Other tools are
+   * found with `tool_search` and cost nothing until then, so keep this for a
+   * tool agents should reach for without looking.
+   */
+  direct?: boolean;
   execute(input: Record<string, unknown>, context: ToolContext): ToolResult | Promise<ToolResult>;
 }
 

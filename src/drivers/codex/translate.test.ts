@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { INIT_PROMPT } from "./prompts.ts";
-import { codexResponse, decisionEffect } from "./requests.ts";
+import { codexRequest, codexResponse, decisionEffect } from "./requests.ts";
 import {
   CodexTranslator,
   codexMcpConfig,
@@ -81,6 +81,28 @@ describe("toItem", () => {
             { path: "c.ts", kind: "add", diff: "+y" },
           ],
           status: "running",
+        },
+      ],
+      [
+        {
+          type: "mcpToolCall",
+          id: "g1",
+          server: "1harness",
+          tool: "tool_act",
+          status: "completed",
+          arguments: { name: "thread_send", input: { threadId: "t1" } },
+          result: null,
+          error: null,
+        },
+        {
+          kind: "tool_call",
+          id: "g1",
+          tool: "thread_send",
+          server: "1harness",
+          category: "other",
+          summary: '{"threadId":"t1"}',
+          output: "",
+          status: "completed",
         },
       ],
       [
@@ -565,5 +587,79 @@ describe("codexResponse", () => {
       ),
       { action: "accept", content: {}, _meta: { persist: "session" } },
     );
+  });
+});
+
+const askElicitation = (serverName: string, message: string) => {
+  const decisions = new Map<string, unknown>();
+  const request = codexRequest(
+    "r1",
+    {
+      method: "mcpServer/elicitation/request",
+      params: {
+        serverName,
+        message,
+        mode: "form",
+        requestedSchema: {
+          properties: {
+            approval: {
+              type: "string",
+              enum: ["approve", "approve_session", "approve_always"],
+            },
+          },
+          required: ["approval"],
+        },
+      },
+      decisions,
+    } as unknown as Parameters<typeof codexRequest>[1],
+    { threadId: null, fileChanges: new Map() },
+  );
+  assert.ok(request?.kind === "approval");
+  return request.options.map((option) => option.effect);
+};
+
+describe("an MCP server's approval", () => {
+  it("offers no way to remember the gateway, which reaches every tool behind it", () => {
+    assert.deepEqual(askElicitation("1harness", "Allow tool_act?"), ["allow", "deny", "deny"]);
+  });
+
+  it("asks about the tool behind the gateway, from the call Codex sends with it", () => {
+    const request = codexRequest(
+      "r1",
+      {
+        method: "mcpServer/elicitation/request",
+        // As Codex 0.166.0 sends it.
+        params: {
+          serverName: "1harness",
+          mode: "form",
+          _meta: {
+            codex_approval_kind: "mcp_tool_call",
+            persist: ["session", "always"],
+            tool_params: { name: "save_note", input: { text: "hello" } },
+          },
+          message: 'Allow the 1harness MCP server to run tool "tool_act"?',
+          requestedSchema: { type: "object", properties: {} },
+        },
+        decisions: new Map<string, unknown>(),
+      } as unknown as Parameters<typeof codexRequest>[1],
+      { threadId: null, fileChanges: new Map() },
+    );
+    assert.ok(request?.kind === "approval");
+    assert.equal(request.title, '1harness: Allow the 1harness MCP server to run tool "save_note"?');
+    assert.deepEqual(request.action, {
+      type: "tool",
+      tool: "save_note",
+      server: "1harness",
+      input: { text: "hello" },
+    });
+    assert.equal(
+      request.options.some((option) => option.effect === "allow-always"),
+      false,
+    );
+  });
+
+  it("offers to remember anything else", () => {
+    assert.ok(askElicitation("docs", "Allow tool_act?").includes("allow-always"));
+    assert.ok(askElicitation("1harness", "Allow delegate_task?").includes("allow-always"));
   });
 });

@@ -606,8 +606,9 @@ const op: CommandDefinition = {
 
 /** What `thread_context` says of a thread, as `/context` shows it. */
 interface ThreadContext {
-  tools: { name: string; source: string; tokens: number; offered: boolean }[];
+  tools: { name: string; source: string; tokens: number; offered: boolean; onDemand: boolean }[];
   toolTokens: number;
+  onDemandTokens: number;
   servers: string[];
   handoffTokens: number;
   forkTokens: number;
@@ -656,16 +657,32 @@ const contextView: CommandDefinition = {
       threadId: thread.id,
     })) as ThreadContext;
     const width = Math.max(0, ...found.tools.map((entry) => entry.name.length));
-    const offered = found.tools.filter((entry) => entry.offered).length;
+    const named = found.tools.filter((entry) => entry.offered && !entry.onDemand);
+    const onDemand = found.tools.filter((entry) => entry.onDemand);
+    const off = found.tools.filter((entry) => !entry.offered);
+    const group = (entries: ThreadContext["tools"]) =>
+      entries.map((entry): ReportSpan[] => [
+        { text: `  ${entry.name.padEnd(width)}  `, tone: "soft" },
+        { text: `${entry.source}, ~${entry.tokens}`, tone: "muted" },
+      ]);
     const lines: ReportSpan[][] = [
-      row("Tools", `${offered} of ${found.tools.length}, ${tokens(found.toolTokens)}`),
-      ...found.tools.map((entry): ReportSpan[] => [
-        { text: `  ${entry.name.padEnd(width)}  `, tone: entry.offered ? "soft" : "muted" },
-        {
-          text: entry.offered ? `${entry.source}, ~${entry.tokens}` : `${entry.source}, off`,
-          tone: "muted",
-        },
-      ]),
+      row("Tools by name", `${named.length}, ${tokens(found.toolTokens)} in every turn`),
+      ...group(named),
+      ...(onDemand.length > 0
+        ? [
+            row(
+              "Through tool_search",
+              `${onDemand.length}, ${tokens(found.onDemandTokens)} only once used`,
+            ),
+            ...group(onDemand),
+          ]
+        : []),
+      ...(off.length > 0
+        ? [
+            row("Off", String(off.length)),
+            ...off.map((entry): ReportSpan[] => [{ text: `  ${entry.name}`, tone: "muted" }]),
+          ]
+        : []),
       row("MCP servers", found.servers.join(", ") || "none"),
       row(
         "Waiting handoff",
@@ -677,7 +694,7 @@ const contextView: CommandDefinition = {
       [],
       [
         {
-          text: "Estimates; the harness's own prompt and tools are not counted. /context off offers none of these.",
+          text: 'Estimates; the harness\'s own prompt and tools are not counted. /context off offers none of these; "toolGateway": false in settings.json offers them all by name.',
           tone: "muted",
         },
       ],

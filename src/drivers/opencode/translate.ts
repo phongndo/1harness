@@ -16,6 +16,7 @@ import type {
 import { unifiedDiff } from "../../core/diff.ts";
 import { ANSWER, askFor, askForChanges } from "../../core/wording.ts";
 import { noticeEvent } from "../session-events.ts";
+import { GATEWAY_ACT, gatewayCall, isGatewayName } from "../../core/tools.ts";
 import { record, text } from "../../core/values.ts";
 import { agentDescription, contentText, summarizeInput } from "../text.ts";
 
@@ -372,13 +373,14 @@ export function toolItem(
       if (HIDDEN_TOOLS.has(name)) return null;
       // MCP tools go by their server's name and theirs, joined by an underscore.
       const mcp = mcpTool(name, mcpServers);
+      const inner = mcp && gatewayCall(mcp.server, mcp.tool, input);
       return {
         kind: "tool_call",
         id,
-        tool: mcp?.tool ?? name,
+        tool: inner?.tool ?? mcp?.tool ?? name,
         server: mcp?.server ?? null,
         category: mcp ? "other" : (TOOL_CATEGORIES[name] ?? "other"),
-        summary: summarizeInput(input, SUMMARY_KEYS),
+        summary: summarizeInput(inner ? record(inner.input) : input, SUMMARY_KEYS),
         output: "",
         status: "running",
       };
@@ -436,8 +438,16 @@ function permissionAction(permission: OcPermission, call: Item | undefined): App
     };
   if (permission.action === "edit") return { type: "file_change", paths: permission.resources };
   const input = permission.metadata?.input ?? permission.resources;
-  if (call?.kind === "tool_call")
-    return { type: "tool", tool: call.tool, server: call.server, input };
+  if (call?.kind === "tool_call") {
+    // The call's name is the tool behind the gateway already; its input here is still the gateway's.
+    const inner = isGatewayName(permission.action) && gatewayCall(call.server, GATEWAY_ACT, input);
+    return {
+      type: "tool",
+      tool: call.tool,
+      server: call.server,
+      input: inner ? inner.input : input,
+    };
+  }
   return { type: "tool", tool: permission.action, server: null, input };
 }
 
@@ -466,11 +476,16 @@ export function permissionRequest(
   const changes = changesFrom(permission.metadata?.files, cwd);
   const options: ApprovalOption[] = [
     { id: "once", label: ANSWER.yes, effect: "allow" },
-    {
-      id: "always",
-      label: ANSWER.always(savedSubject(permission, action)),
-      effect: "allow-always",
-    },
+    // OpenCode would remember the gateway, which reaches every tool behind it.
+    ...(isGatewayName(permission.action)
+      ? []
+      : [
+          {
+            id: "always",
+            label: ANSWER.always(savedSubject(permission, action)),
+            effect: "allow-always" as const,
+          },
+        ]),
     { id: "reject", label: ANSWER.noAndExplain, effect: "deny" },
   ];
   const input = permission.metadata?.input;

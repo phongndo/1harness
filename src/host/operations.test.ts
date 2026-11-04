@@ -117,7 +117,8 @@ const listed = (operations: OperationInfo[]) => operations.map((operation) => op
 
 describe("operations", () => {
   it("are offered on every surface their callers use, and only there", async () => {
-    newHost();
+    // By name, to compare with the operations; tool_search has its own tests.
+    newHost({ toolGateway: false });
     const person = await connect("tui");
     const outsider = await connect("outside", true);
 

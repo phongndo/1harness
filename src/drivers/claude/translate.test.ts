@@ -391,6 +391,23 @@ describe("ClaudeTranslator", () => {
 
 describe("toolItem", () => {
   it("maps Claude's tools to shared items", () => {
+    assert.deepEqual(
+      toolItem("g", "mcp__1harness__tool_act", {
+        name: "thread_send",
+        input: { threadId: "t1", message: "go" },
+      }),
+      {
+        kind: "tool_call",
+        id: "g",
+        tool: "thread_send",
+        server: "1harness",
+        category: "other",
+        summary: JSON.stringify({ threadId: "t1", message: "go" }),
+        output: "",
+        status: "running",
+      },
+      "a call through the gateway shows as the tool it reaches",
+    );
     assert.deepEqual(toolItem("a", "mcp__docs__search", { query: "x" }), {
       kind: "tool_call",
       id: "a",

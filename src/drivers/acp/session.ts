@@ -28,6 +28,7 @@ import {
   toolItem,
   type AcpToolCall,
   type AcpUpdate,
+  throughGateway,
 } from "./translate.ts";
 
 /** An agent that speaks the Agent Client Protocol over stdio. */
@@ -472,7 +473,11 @@ export class AcpSession implements HarnessSession {
           : "";
     // Choices read as on every harness, unless the agent offers two of a kind.
     const kinds = params.options.map((option) => option.kind);
-    const options: ApprovalOption[] = params.options.map((option) => ({
+    // An agent would remember the gateway, which reaches every tool behind it.
+    const offered = params.options.filter(
+      (option) => !(option.kind === "allow_always" && throughGateway(params.toolCall)),
+    );
+    const options: ApprovalOption[] = offered.map((option) => ({
       id: option.optionId,
       label:
         kinds.indexOf(option.kind) === kinds.lastIndexOf(option.kind)

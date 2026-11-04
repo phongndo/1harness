@@ -41,6 +41,7 @@ describe("loadSettings", () => {
           retainClosedDays: null,
           agentMode: null,
           disabledTools: [],
+          toolGateway: true,
         },
         warnings: [],
       });
@@ -52,6 +53,7 @@ describe("loadSettings", () => {
           retainClosedDays: null,
           agentMode: null,
           disabledTools: [],
+          toolGateway: true,
         },
         warnings: [],
       });

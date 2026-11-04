@@ -86,8 +86,15 @@ describe("thread_context", () => {
     });
     const found = (await op(person, "thread_context", { threadId: thread.id })) as {
       harness: string;
-      tools: { name: string; source: string; tokens: number; offered: boolean }[];
+      tools: {
+        name: string;
+        source: string;
+        tokens: number;
+        offered: boolean;
+        onDemand: boolean;
+      }[];
       toolTokens: number;
+      onDemandTokens: number;
       servers: string[];
       handoffTokens: number;
     };
@@ -96,10 +103,21 @@ describe("thread_context", () => {
     assert.equal(delegate?.source, "1harness");
     assert.ok((delegate?.tokens ?? 0) > 50);
     assert.equal(delegate?.offered, true);
+    assert.equal(delegate?.onDemand, false);
+    // Only what is offered by name counts against every turn.
+    const named = found.tools.filter((tool) => !tool.onDemand);
+    assert.deepEqual(named.map((tool) => tool.name).toSorted(), [
+      "delegate_task",
+      "tool_act",
+      "tool_read",
+      "tool_search",
+    ]);
     assert.equal(
       found.toolTokens,
-      found.tools.reduce((sum, tool) => sum + tool.tokens, 0),
+      named.reduce((sum, tool) => sum + tool.tokens, 0),
     );
+    assert.equal(found.tools.find((tool) => tool.name === "thread_read")?.onDemand, true);
+    assert.ok(found.onDemandTokens > found.toolTokens);
     assert.deepEqual(found.servers, ["1harness"]);
     assert.equal(found.handoffTokens, 0);
   });
@@ -137,7 +155,7 @@ describe("turning tools off", () => {
     assert.ok(grant && grant.config.type === "http");
     let names = await toolNames(grant.config);
     assert.equal(names.includes("delegate_task"), false);
-    assert.ok(names.includes("thread_read"));
+    assert.ok(names.includes("tool_search"));
     grant.revoke();
 
     await op(person, "tools_set", { enabled: true, tool: "delegate_task" });
@@ -219,8 +237,10 @@ describe("/context", () => {
     const text = (reports[0]?.lines ?? [])
       .map((line) => line.map((span) => span.text).join(""))
       .join("\n");
-    assert.match(text, /^Tools {2}\d+ of \d+, ~[\d,]+ tokens/);
+    assert.match(text, /^Tools by name {2}4, ~[\d,]+ tokens in every turn/);
     assert.match(text, /delegate_task +1harness, ~\d+/);
+    assert.match(text, /Through tool_search {2}\d+, ~[\d,]+ tokens only once used/);
+    assert.match(text, /thread_read +1harness, ~\d+/);
     assert.match(text, /MCP servers {2}1harness/);
     assert.match(text, /Waiting handoff {2}none/);
     assert.match(text, /not counted/);
@@ -244,7 +264,7 @@ describe("/context", () => {
     const text = (reports[0]?.lines ?? [])
       .map((line) => line.map((span) => span.text).join(""))
       .join("\n");
-    assert.match(text, /delegate_task +1harness, off/);
+    assert.match(text, /Off {2}1\n {2}delegate_task/);
     await command.run(value, "on");
     assert.deepEqual(saved(), []);
     await assert.rejects(Promise.resolve(command.run(value, "sideways")), /Usage: \/context/);

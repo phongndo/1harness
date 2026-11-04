@@ -6,6 +6,7 @@ import type {
   HarnessRequest,
   RequestResponse,
 } from "../../core/events.ts";
+import { GATEWAY_ACT, GATEWAY_READ, gatewayCall, TOOL_SERVER } from "../../core/tools.ts";
 import { record, text } from "../../core/values.ts";
 import { ANSWER, ASK, askForChanges } from "../../core/wording.ts";
 import { unwrapShell } from "./translate.ts";
@@ -266,10 +267,19 @@ function elicitationRequest(
     return (schema.required ?? []).every((key) => key in result) ? result : null;
   };
 
+  // Codex names only the gateway, but sends the call with its approval.
+  const gateway =
+    server === TOOL_SERVER
+      ? [GATEWAY_READ, GATEWAY_ACT].find((tool) => message.includes(tool))
+      : null;
+  const inner = gateway
+    ? gatewayCall(server, gateway, record(params["_meta"])["tool_params"])
+    : null;
   const once = content(null);
   if (once) {
     const options = [option(ANSWER.yes, { action: "accept", content: once, _meta: null })];
-    for (const persist of ["session", "always"] as const) {
+    // Remembering the gateway would allow every tool behind it.
+    for (const persist of gateway ? [] : (["session", "always"] as const)) {
       const remembered = content(persist);
       const offered = fields.some(([key, field]) =>
         [key, field.title ?? "", ...fieldChoices(field).map((choice) => choice.value)].some(
@@ -290,7 +300,15 @@ function elicitationRequest(
       option(ANSWER.no, { action: "decline" }),
       option(ANSWER.cancel, { action: "cancel" }),
     );
-    return approval(id, `${server}: ${message}`, { type: "other" }, [], options);
+    return inner && gateway
+      ? approval(
+          id,
+          `${server}: ${message.replace(gateway, inner.tool)}`,
+          { type: "tool", tool: inner.tool, server, input: inner.input },
+          [],
+          options,
+        )
+      : approval(id, `${server}: ${message}`, { type: "other" }, [], options);
   }
   return {
     kind: "question",

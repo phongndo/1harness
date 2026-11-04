@@ -76,6 +76,24 @@ function approval(id: string, shell: string): HarnessEvent {
   };
 }
 
+function toolApproval(server: string, tool: string): HarnessEvent {
+  return {
+    type: "request.opened",
+    request: {
+      kind: "approval",
+      id: `${server}-${tool}`,
+      title: "",
+      detail: "",
+      action: { type: "tool", tool, server, input: {} },
+      options: [
+        { id: "once", label: "Yes", effect: "allow" },
+        { id: "always", label: "Always", effect: "allow-always" },
+      ],
+      defaultOptionId: "once",
+    },
+  };
+}
+
 /** Lets the thread consume the events pushed so far. */
 function settle(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
@@ -189,6 +207,33 @@ describe("Thread", () => {
       ["/init"],
     );
     assert.deepEqual(session.commands, ["ps "]);
+    await thread.close();
+  });
+
+  it("never asks about looking for a tool, and remembers nothing for it", async () => {
+    const { session, thread } = await setup();
+    const responses: [string, unknown][] = [];
+    (session as unknown as { respond: (id: string, response: unknown) => Promise<void> }).respond =
+      async (id, response) => {
+        responses.push([id, response]);
+      };
+    const opened: string[] = [];
+    thread.subscribe((event) => {
+      if (event.type === "request.opened") opened.push(event.request.id);
+    });
+    session.events.push(toolApproval("1harness", "tool_search"));
+    await settle();
+    // A plain yes: "always" can write a rule into the harness's own settings.
+    assert.deepEqual(responses, [["1harness-tool_search", { kind: "approval", optionId: "once" }]]);
+    assert.deepEqual(opened, []);
+    assert.equal(thread.allowances.size, 0);
+
+    // Another server's tool of that name, and 1harness's other tools, still ask.
+    session.events.push(toolApproval("docs", "tool_search"));
+    session.events.push(toolApproval("1harness", "thread_send"));
+    await settle();
+    assert.deepEqual(opened, ["docs-tool_search", "1harness-thread_send"]);
+    assert.equal(responses.length, 1);
     await thread.close();
   });
 

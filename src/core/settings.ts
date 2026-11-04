@@ -23,6 +23,11 @@ export interface Settings {
    * `*` for all of them, so nothing of its own goes in their context.
    */
   disabledTools: string[];
+  /**
+   * Whether agents reach most of 1harness's tools through `tool_search`, so
+   * they cost nothing until used; false offers every tool by name.
+   */
+  toolGateway: boolean;
 }
 
 /** What agents outside 1harness may start and act on unless settings say otherwise. */
@@ -47,6 +52,7 @@ export function loadSettings(configDir: string): { settings: Settings; warnings:
       retainClosedDays: null,
       agentMode: "supervised" as const,
       disabledTools: [],
+      toolGateway: true,
     },
     warnings: [`${file}: ${problem}; threads start in supervised until it is fixed`],
   });
@@ -62,6 +68,7 @@ export function loadSettings(configDir: string): { settings: Settings; warnings:
           retainClosedDays: null,
           agentMode: null,
           disabledTools: [],
+          toolGateway: true,
         },
         warnings: [],
       };
@@ -100,6 +107,9 @@ export function loadSettings(configDir: string): { settings: Settings; warnings:
     disabledTools = disabled as string[];
   else if (disabled !== undefined && disabled !== null)
     warnings.push(`${file}: disabledTools must be a list of tool names; every tool is offered`);
+  const gateway = values["toolGateway"];
+  if (gateway !== undefined && gateway !== null && typeof gateway !== "boolean")
+    warnings.push(`${file}: toolGateway must be true or false; tool_search stays on`);
   return {
     settings: {
       harness,
@@ -107,6 +117,7 @@ export function loadSettings(configDir: string): { settings: Settings; warnings:
       retainClosedDays,
       agentMode: isRuntimeMode(agentMode) ? agentMode : null,
       disabledTools,
+      toolGateway: gateway !== false,
     },
     warnings,
   };

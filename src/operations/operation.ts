@@ -41,6 +41,8 @@ export interface Operation {
   /** A read changes nothing, so harnesses may run it with fewer prompts. */
   effect: "read" | "act";
   callers: readonly CallerKind[];
+  /** For agents in threads, by name rather than through `tool_search`. */
+  direct?: boolean;
   run(input: Record<string, unknown>, context: OperationContext): unknown;
 }
 

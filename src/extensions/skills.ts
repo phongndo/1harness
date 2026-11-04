@@ -109,6 +109,8 @@ export function skillTool(skills: () => readonly Skill[]): ToolDefinition {
       required: ["name"],
     },
     readOnly: true,
+    // Its description is how agents learn which skills apply, so it stays in sight.
+    direct: true,
     execute: (input) => {
       const name = input["name"];
       const skill = skills().find((candidate) => candidate.name === name);
