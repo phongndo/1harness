@@ -24,7 +24,24 @@ describe("goodbye", () => {
       current: thread("t1"),
       working: [],
     });
-    assert.deepEqual(said, ["Resume with: 1harness -S box --resume t1"]);
+    assert.deepEqual(said, [
+      "Saved this thread; nothing is still running.",
+      "Resume with: 1harness -S box --resume t1",
+    ]);
+  });
+
+  it("names the thread it saved, and gives an ID short enough to type", () => {
+    const said = goodbye({
+      next: undefined,
+      server: LOCAL,
+      stored: true,
+      current: { ...thread("9e64f90d-2564-456a-987e-da4fa8a5097b"), title: "Fix the parser" },
+      working: [],
+    });
+    assert.deepEqual(said, [
+      'Saved "Fix the parser"; nothing is still running.',
+      "Resume with: 1harness --resume 9e64f90d",
+    ]);
   });
 
   it("resumes the harness's own thread where the host keeps none, and nothing without one", () => {

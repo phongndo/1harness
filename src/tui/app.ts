@@ -68,7 +68,7 @@ import {
   threadStatusInput,
   type ThreadStatusInput,
 } from "./program-status.ts";
-import { setLightTheme, style } from "./theme.ts";
+import { setLightTheme } from "./theme.ts";
 import { IMAGE_INDENT, type Hit, type RenderContext, type Target } from "./transcript.ts";
 import { Mouse, paintSelection } from "./pointer.ts";
 import { CELL_QUERY, GRAPHICS_QUERY, PLACEHOLDER_LIMIT, fit } from "./images.ts";
@@ -1565,7 +1565,8 @@ export class App {
       current,
       working,
     });
-    for (const line of said) process.stdout.write(style.muted(`${line}\n`));
+    // Plain: this is what the user copies to come back, in a shell's own colors.
+    for (const line of said) process.stdout.write(`${line}\n`);
     this.#exited();
   }
 
