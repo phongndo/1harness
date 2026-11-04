@@ -40,7 +40,7 @@ export class FileIndex {
     // fff reads a trailing slash as "folders only", so a folder is searched by its path.
     const folder = query.endsWith("/") ? query : null;
     const result = this.#finder?.mixedSearch(folder ? query.slice(0, -1) : query, {
-      pageSize: folder ? limit * 4 : limit + 1,
+      pageSize: limit * 4,
     });
     if (!result?.ok) return [];
     const matches: FileMatch[] = [];
@@ -51,9 +51,16 @@ export class FileIndex {
         continue;
       }
       matches.push({ path: item.relativePath, directory: type === "directory" });
-      if (matches.length === limit) break;
     }
-    return matches;
+    const typed = query.toLowerCase();
+    // Fuzzy matching is a fallback: once paths say what was typed, the rest is noise.
+    const literal =
+      typed && !folder ? matches.filter(({ path }) => path.toLowerCase().includes(typed)) : [];
+    if (literal.length === 0) return matches.slice(0, limit);
+    const starts = (path: string) => (path.toLowerCase().startsWith(typed) ? 0 : 1);
+    return literal
+      .toSorted((a, b) => starts(a.path) - starts(b.path) || a.path.length - b.path.length)
+      .slice(0, limit);
   }
 
   close(): void {
