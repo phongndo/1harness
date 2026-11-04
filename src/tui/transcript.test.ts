@@ -56,6 +56,7 @@ describe("Transcript", () => {
     assert.deepEqual(plain(all.rows), ["┃ one", "", "  two", "", "  three", "", "  1s (↑1 ↓2)"]);
     assert.equal(all.total, 7);
     assert.deepEqual(plain(transcript.view(context, 3, 0).rows), ["  three", "", "  1s (↑1 ↓2)"]);
+    assert.equal(transcript.askedAbove(context, 4), "one");
     assert.deepEqual(plain(transcript.view(context, 3, 2).rows), ["  two", "", "  three"]);
   });
 

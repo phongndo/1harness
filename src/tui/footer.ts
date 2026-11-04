@@ -102,6 +102,22 @@ function moreLines(count: number): string {
   return `${count} more ${count === 1 ? "line" : "lines"}`;
 }
 
+/**
+ * The row over a transcript cut off at the top: what was asked that the rows
+ * under it answer, since a reply can otherwise open mid-sentence with nothing to
+ * say what it is about, and how much more lies above.
+ */
+export function contextRow(asked: string | null, above: number, width: number): string {
+  const more = style.muted(`↑ ${moreLines(above)} · pgup`);
+  if (asked === null) return spread("", more, width);
+  const room = Math.max(0, width - visibleWidth(more) - 2);
+  return spread(
+    truncate(`${style.prompt("┃")} ${style.muted(oneLineText(asked))}`, room),
+    more,
+    width,
+  );
+}
+
 /** What the status line shows, as the terminal has it when it draws. */
 export interface StatusLineState {
   /** A ctrl+c that one more exits after. */
@@ -123,8 +139,6 @@ export interface StatusLineState {
   notes?: readonly string[];
   /** Rows the view is scrolled up. */
   scroll: number;
-  /** Rows of the transcript above the top of the view. */
-  above: number;
   /** Whether tool calls show whole. */
   details: boolean;
 }
@@ -159,13 +173,7 @@ export function statusLine(state: StatusLineState, width: number): string {
   for (const note of state.notes ?? [])
     left += `${left === "" ? "" : style.muted(" · ")}${style.text(oneLineText(note))}`;
   // The right edge stays whole as the left is cut, so modes the keys toggle go there too.
-  // At the bottom, a reply can open mid-sentence with nothing to say more lies above it.
-  let scrolled =
-    state.scroll > 0
-      ? `↓ ${moreLines(state.scroll)} · pgdn`
-      : state.above > 0
-        ? `↑ ${moreLines(state.above)} · pgup`
-        : null;
+  let scrolled = state.scroll > 0 ? `↓ ${moreLines(state.scroll)} · pgdn` : null;
   let details = state.details ? "details · ctrl+x" : null;
   const right = () =>
     [

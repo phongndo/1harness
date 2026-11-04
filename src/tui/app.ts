@@ -47,7 +47,7 @@ import { FetchCache } from "./cache.ts";
 import { FolderLabel } from "./folder.ts";
 import { Suggestions, inMenuOrder } from "./completion.ts";
 import { Editor, applyEditingKey } from "./editor.ts";
-import { footerRows, statusLine, type Footer } from "./footer.ts";
+import { contextRow, footerRows, statusLine, type Footer } from "./footer.ts";
 import { welcomeRows } from "./welcome.ts";
 import { InputDecoder, WHEEL_ROWS, type InputEvent, type Key } from "./input.ts";
 import { LivePages } from "./live.ts";
@@ -274,8 +274,6 @@ export class App {
   #revealWork = false;
   /** The view moved up to that work, and goes back down when details go off. */
   #revealedWork = false;
-  /** Rows of the transcript above the view, as the last frame had them. */
-  #above = 0;
   /**
    * ONEHARNESS_IMAGES and ONEHARNESS_PROGRAM_STATUS, read once: `1` or `0`
    * says whether the terminal shows pictures or takes status reports, over
@@ -2808,18 +2806,20 @@ export class App {
         footer = this.#footer(width, height);
       }
     }
-    if (view.top !== this.#above) {
-      this.#above = view.top;
-      footer = this.#footer(width, height);
-    }
     // What the mouse finds where: each row's target, and what it selected, shown so.
-    this.#targets = view.targets;
+    // The context row covers the top row, so that clicks and selection keep their places.
+    this.#targets = view.top > 0 ? [null, ...view.targets.slice(1)] : view.targets;
     this.#pointer.drawn(view.rows, view.top);
     this.#livePages.seen(view.pictures.map((one) => one.picture));
     const selection = this.#pointer.selection;
-    const transcript = selection
-      ? paintSelection(view.rows, selection, view.top, width)
-      : view.rows;
+    const painted = selection ? paintSelection(view.rows, selection, view.top, width) : view.rows;
+    const transcript =
+      view.top > 0
+        ? [
+            contextRow(shown.transcript.askedAbove(context, view.top), view.top, width),
+            ...painted.slice(1),
+          ]
+        : painted;
     // Nothing said yet: say what this thread will do, and how to begin.
     const current = this.#current;
     const opening =
@@ -2908,7 +2908,6 @@ export class App {
         runtimeMode: this.#settings.runtimeMode,
         server: this.#server.local ? null : this.#server.label,
         scroll: this.#view.scroll,
-        above: this.#above,
         details: this.#details,
         notes: [...this.#statusNotes.values()],
       },

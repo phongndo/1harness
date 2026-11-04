@@ -298,6 +298,21 @@ export class Transcript {
     return row;
   }
 
+  /** What the user last said at or above `row`, which rows under it answer. */
+  askedAbove(context: RenderContext, row: number): string | null {
+    let total = 0;
+    let asked: string | null = null;
+    for (const entry of this.#entries) {
+      const { rows } = this.#rows(entry, context);
+      if (rows.length === 0) continue;
+      if (total > 0) total += 1;
+      if (total > row) break;
+      if (entry.block.kind === "user") asked = entry.block.text;
+      total += rows.length;
+    }
+    return asked;
+  }
+
   /**
    * The rows in view, `height` of them ending `scroll` rows above the last,
    * with the pictures they show and what each does when clicked; `top` is
