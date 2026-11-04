@@ -375,6 +375,79 @@ describe("App", () => {
     }
   });
 
+  it("sends a failed message again once for each press, and not before a wait is over", async () => {
+    const flaky: ScriptedSession[] = [];
+    let error = "overloaded";
+    const unregisterFlaky = registerDriver({
+      id: "flaky",
+      label: "Flaky",
+      unavailable: () => null,
+      create: (options) => {
+        const made = new ScriptedSession(options);
+        const play = made.startTurn.bind(made);
+        made.startTurn = async (input) => {
+          if (made.prompts.length > 0 && error === "") return play(input);
+          made.prompts.push(input.text);
+          const turnId = `failing-${made.prompts.length}`;
+          made.events.push({ type: "turn.started", turnId });
+          made.events.push({
+            type: "item.completed",
+            item: {
+              kind: "user_message",
+              id: `asked-${turnId}`,
+              text: input.text,
+              inputId: input.id!,
+            },
+          });
+          made.events.push({ type: "turn.ended", turnId, status: "failed", error });
+        };
+        flaky.push(made);
+        return made;
+      },
+    });
+    try {
+      const session = await start({ harness: "flaky" });
+      await session.sees("Ask anything");
+      error = "Rate limited, try again in 60s";
+      await session.type("wait for it\r");
+      await session.sees(/wait \d+s, then enter/);
+      await session.type("\r");
+      await settle(100);
+      assert.deepEqual(flaky[0]?.prompts, ["wait for it"]);
+
+      error = "overloaded";
+      await session.type("try this\r");
+      await session.sees("enter tries again");
+      // Spaces in the composer hide the hint, so enter should not act on it.
+      await session.type("  \r");
+      await settle(100);
+      assert.deepEqual(flaky[0]?.prompts, ["wait for it", "try this"]);
+      await session.type("\x7f\x7f");
+
+      error = "";
+      await session.type("\r\r");
+      await session.sees("Done with try this");
+      await settle(100);
+      assert.deepEqual(flaky[0]?.prompts, ["wait for it", "try this", "try this"]);
+    } finally {
+      unregisterFlaky();
+    }
+  });
+
+  it("keeps the frame to the screen when there is no room for the transcript", async () => {
+    const session = await start({ prompt: "alpha" });
+    await session.sees("Done with alpha");
+    for (const rows of [4, 5, 6]) {
+      session.terminal.raw = "";
+      session.terminal.rows = rows;
+      session.terminal.emit("resize");
+      await settle(50);
+      // oxlint-disable-next-line no-control-regex
+      const moves = [...session.terminal.raw.matchAll(/\x1b\[(\d+);\d+H/g)];
+      assert.ok(Math.max(...moves.map((move) => Number(move[1]))) <= rows, `${rows} rows`);
+    }
+  });
+
   it("sends a message typed while the first thread is still starting once it opens", async () => {
     let open!: () => void;
     const opened = new Promise<void>((resolve) => (open = resolve));

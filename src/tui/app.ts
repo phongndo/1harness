@@ -2264,7 +2264,12 @@ export class App {
     if (text === "") {
       // The composer says so while there is a failed turn to send again.
       const retry = this.#view.retry;
-      if (retry && this.#live && !this.#live.busy) this.#send(retry.text);
+      // Spaces in the composer hide the hint, and a wait the failure named is not over yet.
+      if (raw !== "" || !retry || (retry.at ?? 0) > Date.now()) return;
+      if (!this.#live || this.#live.busy) return;
+      // One press, one send: a thread restarting is not busy yet, and keys can come together.
+      this.#view.retry = null;
+      this.#send(retry.text);
       return;
     }
     const message = this.#messageText(text);
@@ -2813,18 +2818,19 @@ export class App {
     }
     // What the mouse finds where: each row's target, and what it selected, shown so.
     // The context row covers the top row, so that clicks and selection keep their places.
-    this.#targets = view.top > 0 ? [null, ...view.targets.slice(1)] : view.targets;
+    // No room at all leaves no row to cover, and one more would make the frame too tall.
+    const pinned = view.top > 0 && view.rows.length > 0;
+    this.#targets = pinned ? [null, ...view.targets.slice(1)] : view.targets;
     this.#pointer.drawn(view.rows, view.top);
     this.#livePages.seen(view.pictures.map((one) => one.picture));
     const selection = this.#pointer.selection;
     const painted = selection ? paintSelection(view.rows, selection, view.top, width) : view.rows;
-    const transcript =
-      view.top > 0
-        ? [
-            contextRow(shown.transcript.askedAbove(context, view.top), view.top, width),
-            ...painted.slice(1),
-          ]
-        : painted;
+    const transcript = pinned
+      ? [
+          contextRow(shown.transcript.askedAbove(context, view.top), view.top, width),
+          ...painted.slice(1),
+        ]
+      : painted;
     // Nothing said yet: say what this thread will do, and how to begin.
     const current = this.#current;
     const opening =

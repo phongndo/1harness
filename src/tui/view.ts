@@ -410,6 +410,11 @@ export class ThreadView {
     const said = this.transcript
       .since(this.#turnStart)
       .some((block) => block.kind === "notice" && block.level === "error");
+    // Before this turn's own summary, which would end the search for what it was asked.
+    if (status === "failed") {
+      const wait = /try again in (\d+)\s*s/i.exec(error ?? "")?.[1];
+      this.#offerRetry(wait ? (ended?.at ?? Date.now()) + Number(wait) * 1000 : null);
+    }
     this.outcome = `${status === "failed" ? "✗" : status === "interrupted" ? "■" : "✓"} ${label}`;
     this.transcript.add({
       kind: "summary",
@@ -417,14 +422,14 @@ export class ThreadView {
       text: `${label} · ${seconds}s · ${tokens}${work ? " · ctrl+x shows the work" : ""}`,
     });
     if (status === "failed" && error && !said) this.notice("error", error);
-    if (status === "failed") {
-      const wait = /try again in (\d+)\s*s/i.exec(error ?? "")?.[1];
-      this.#offerRetry(wait ? (ended?.at ?? Date.now()) + Number(wait) * 1000 : null);
-    }
   }
 
   #offerRetry(at: number | null): void {
-    const asked = this.transcript.last((block) => block.kind !== "user");
+    // Only what started this turn: one with no message of its own, as a compaction or
+    // an agent's report sets off, would otherwise repeat work already done.
+    const asked = this.transcript.last(
+      (block) => block.kind !== "user" && block.kind !== "result" && block.kind !== "summary",
+    );
     // A picture left the composer with the message, so sending the words alone would differ.
     this.retry =
       asked?.kind === "user" && !asked.label && !asked.images?.length

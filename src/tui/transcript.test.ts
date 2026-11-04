@@ -248,6 +248,21 @@ describe("after a failure", () => {
     assert.equal(view.retry, null);
   });
 
+  it("does not offer a message from a turn already over, or set off by a report", () => {
+    const view = new ThreadView("t1");
+    view.startTurn(1000);
+    view.transcript.add({ kind: "user", text: "delete the build dir" });
+    view.endTurn("completed", null, { at: 2000, up: 1, down: 1 });
+    view.startTurn(3000);
+    view.endTurn("failed", "compaction failed", { at: 4000, up: 0, down: 0 });
+    assert.equal(view.retry, null);
+    view.transcript.add({ kind: "user", text: "go on" });
+    view.transcript.add({ kind: "result", from: "agent", status: "failed", text: "no" });
+    view.startTurn(5000);
+    view.endTurn("failed", "boom", { at: 6000, up: 0, down: 0 });
+    assert.equal(view.retry, null);
+  });
+
   it("puts a command a dead session names on its own line", () => {
     assert.equal(
       sessionEnded("demo exited (code 1): login expired; run `demo auth login`"),
