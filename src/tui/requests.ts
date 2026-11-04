@@ -146,13 +146,19 @@ export class Requests {
         title: request.title,
         ...(warning ? { warning } : {}),
         detail: request.detail ? [request.detail] : [],
-        options: request.options.map((option) => ({ label: option.label, description: "" })),
+        options: request.options.map((option) => ({
+          label: option.label,
+          // Refusing bare stops most harnesses' turns; with a reason the agent goes on.
+          description: "",
+          ...(option.effect === "deny" ? { unselected: "tab to say why; the agent goes on" } : {}),
+        })),
         multiSelect: false,
         allowOther: false,
         secret: false,
         initial,
         // A refusal can say why, which the agent hears and goes on with.
         commentable: (index) => request.options[index]?.effect === "deny",
+        escape: "refuse",
       };
       this.#show(
         next,
@@ -181,6 +187,8 @@ export class Requests {
       options: question.options,
       multiSelect: question.multiSelect,
       allowOther: question.allowOther,
+      // The agent is told the question went unanswered, and carries on.
+      escape: "skip",
       secret: question.secret,
       initial: 0,
       commentable: () => true,

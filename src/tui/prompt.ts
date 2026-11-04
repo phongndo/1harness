@@ -8,6 +8,8 @@ import { diffBody, oneLineText, plainText, spread, truncate, visibleWidth, wrap 
 export interface ChoiceOption {
   label: string;
   description: string;
+  /** Said beside it only while it is not selected; once it is, the hint line says the same. */
+  unselected?: string;
 }
 
 export interface ChoiceConfig {
@@ -28,6 +30,8 @@ export interface ChoiceConfig {
   initial: number;
   /** Which options take a comment, written with tab; none when absent. */
   commentable?: (index: number) => boolean;
+  /** What esc does here, for the hint line; `cancel` when absent. */
+  escape?: string;
 }
 
 /** A comment the user wrote on an option, to go with it. */
@@ -230,9 +234,13 @@ export class ChoicePrompt {
       const head = lines.length - diffBody(lines).length;
       return lines.flatMap((line, index) => detailRows(line, width, index >= head));
     });
-    const entries: ChoiceOption[] = config.options.map((option) => ({
+    const entries: ChoiceOption[] = config.options.map((option, index) => ({
       label: oneLineText(option.label),
-      description: oneLineText(option.description),
+      description: oneLineText(
+        index === this.#index
+          ? option.description
+          : option.description || (option.unselected ?? ""),
+      ),
     }));
     if (config.allowOther) entries.push({ label: "Other…", description: "type your own answer" });
     const choices = this.#choiceRows(entries, width);
@@ -300,8 +308,8 @@ export class ChoicePrompt {
     // The numbers on the choices say they pick, so no hint does.
     const keys = ["↑↓ move"];
     if (config.multiSelect) keys.push("space toggle");
-    if (this.#commentable) keys.push("tab comment");
-    keys.push(...(frame.keys ?? []), "enter confirm", "esc cancel");
+    if (this.#commentable) keys.push("tab say why");
+    keys.push(...(frame.keys ?? []), "enter confirm", `esc ${config.escape ?? "cancel"}`);
     rows.push(rule(width), hints(keys, width));
     return { rows, cursor: null };
   }
@@ -338,7 +346,9 @@ export class ChoicePrompt {
             ? "☑ "
             : "☐ "
           : "";
-      const head = `  ${current ? paint(number) : style.faint(number)}  ${paint(box)}`;
+      // Bold alone is lost on a terminal that shows it faintly, as a menu's marker knows.
+      const gutter = current ? style.strong("› ") : "  ";
+      const head = `${gutter}${current ? paint(number) : style.faint(number)}  ${paint(box)}`;
       const gap = " ".repeat(
         Math.max(0, column - visibleWidth(option.label) - visibleWidth(box)) + 2,
       );

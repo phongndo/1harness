@@ -46,7 +46,17 @@ describe("an approval", () => {
   it("warns of a command that can lose work, and starts on refusing it", async () => {
     const { shown, answer } = await answerAtOnce("rm -rf dist");
     assert.match(shown, /⚠ Deletes files/);
+    // Selected, the hint line says what the row would.
+    assert.doesNotMatch(shown, /No +tab to say why/);
+    assert.match(shown, /tab say why/);
     assert.deepEqual(answer, { kind: "approval", optionId: "no" });
+  });
+
+  it("marks the selected choice, and says what refusing does and how to say why", async () => {
+    const { shown } = await answerAtOnce("pnpm test");
+    assert.match(shown, /› 1 {2}Yes/);
+    assert.match(shown, /No +tab to say why; the agent goes on/);
+    assert.match(shown, /esc refuse/);
   });
 
   it("starts where the harness says for any other command", async () => {
