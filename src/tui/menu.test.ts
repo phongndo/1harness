@@ -87,7 +87,7 @@ describe("Menu layout", () => {
       tabs: true,
     });
     const title = () => stripVTControlCharacters(list.render(50, 4)[1] ?? "");
-    assert.match(title(), /^Commands 7 {2}\[All\].*›$/);
+    assert.match(title(), /^Commands · 7 {2}\[All\].*›$/);
     for (let step = 0; step < names.length; step++) list.key(key("tab"));
     assert.match(title(), /‹ .*\[Claude Code\]$/, "the last tab, with more before it");
     assert.ok(title().length <= 50);

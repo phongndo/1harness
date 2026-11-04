@@ -267,7 +267,7 @@ describe("after a failure", () => {
     assert.equal(
       sessionEnded("demo exited (code 1): login expired; run `demo auth login`"),
       "Session ended: demo exited (code 1): login expired\nIn a shell, run:\n$ demo auth login\n" +
-        "Then press enter to try again; the thread picks up where it left off.",
+        "Then press enter to send your message again; the thread keeps what it did.",
     );
     assert.match(
       sessionEnded("demo exited (code 1)"),

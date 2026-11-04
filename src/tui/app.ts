@@ -2528,7 +2528,7 @@ export class App {
       );
       const hint = this.#skill(name)
         ? `$${name} runs the skill.`
-        : `${near ? `Did you mean /${near}? ` : ""}↑ edits it · /help lists all`;
+        : `${near ? `Did you mean /${near}? ` : ""}↑ brings it back · /help lists all`;
       this.#notice("warning", `Unknown command /${name}. ${hint}`);
     } catch (error) {
       this.#notice("error", errorMessage(error));

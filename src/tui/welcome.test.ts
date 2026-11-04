@@ -37,7 +37,7 @@ describe("the name closest to a mistyped one", () => {
   it("finds a near miss, and suggests nothing for what is far from all of them", () => {
     assert.equal(nearestName("modle", names), "model");
     assert.equal(nearestName("stauts", names), "status");
-    assert.equal(nearestName("nope", names), "new");
+    assert.equal(nearestName("nope", names), null);
     assert.equal(nearestName("zzzzzz", names), null);
   });
 });

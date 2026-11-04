@@ -105,7 +105,7 @@ function messageBlock(echo: string, message: Message | undefined): Block {
 export function sessionEnded(error: string): string {
   const named = /^(.*?)[;:,.]?\s*\brun\s+`([^`]+)`\.?\s*$/is.exec(error);
   const [, why, command] = named ?? [];
-  const next = "press enter to try again; the thread picks up where it left off.";
+  const next = "press enter to send your message again; the thread keeps what it did.";
   return why && command
     ? `Session ended: ${why}\nIn a shell, run:\n$ ${command}\nThen ${next}`
     : `Session ended: ${error}\nTo start it again, ${next}`;

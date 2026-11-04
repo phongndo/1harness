@@ -28,16 +28,15 @@ function editDistance(a: string, b: string): number {
 }
 
 /**
- * The name closest to a mistyped one: within two edits, or three when it starts
- * the same, since first letters are rarely what a typo gets wrong.
+ * The name closest to a mistyped one, where fewer than half of its letters
+ * differ: a loose match could steer a typo into a command nobody meant.
  */
 export function nearestName(typed: string, names: readonly string[]): string | null {
   let best: string | null = null;
   let distance = Number.POSITIVE_INFINITY;
   for (const name of names) {
     const edits = editDistance(typed.toLowerCase(), name);
-    const limit = name[0] === typed[0]?.toLowerCase() ? 3 : 2;
-    if (edits <= limit && edits < distance) {
+    if (edits * 2 < typed.length && edits < distance) {
       best = name;
       distance = edits;
     }

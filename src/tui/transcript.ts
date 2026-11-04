@@ -1002,8 +1002,8 @@ export function groupSummary(items: readonly ToolItem[]): string {
     } else counts.set(category(item), (counts.get(category(item)) ?? 0) + 1);
   }
   const present = (Object.keys(PHRASES) as Category[]).filter((name) => counts.has(name));
-  const phrases = present.slice(0, 3).map((name) => PHRASES[name](counts.get(name) ?? 0));
-  const rest = present.slice(3).reduce((sum, name) => sum + (counts.get(name) ?? 0), 0);
+  const phrases = present.slice(0, 4).map((name) => PHRASES[name](counts.get(name) ?? 0));
+  const rest = present.slice(4).reduce((sum, name) => sum + (counts.get(name) ?? 0), 0);
   if (rest > 0) phrases.push(`performed ${plural(rest, "other action")}`);
   const sentence =
     phrases.length <= 2

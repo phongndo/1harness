@@ -366,7 +366,7 @@ describe("App", () => {
       // With nothing failed, enter in the empty composer does nothing.
       await session.type("\r");
       await session.type("try this\r");
-      await session.sees("enter tries again");
+      await session.sees("enter resends your message");
       await session.type("\r");
       await session.sees("Done with try this");
       assert.deepEqual(flaky[0]?.prompts, ["try this", "try this"]);
@@ -688,11 +688,11 @@ describe("App commands", () => {
     const session = await start();
     await session.sees("Ask anything");
     await session.type("/");
-    const all = await session.sees(/Commands \d+/);
+    const all = await session.sees(/Commands · \d+/);
     assert.match(all, /\/new\s+start a new thread/);
     assert.match(all, /\/quit\s+exit/);
     await session.type("he");
-    const narrowed = await session.sees("Commands 1");
+    const narrowed = await session.sees("Commands · 1");
     assert.match(narrowed, /\/help\s+show commands and keys/);
     assert.doesNotMatch(narrowed, /\/new/);
   });
@@ -736,9 +736,9 @@ describe("App commands", () => {
       const session = await start({ harness: "skilled" });
       await session.sees("supervised · skilled · big");
       await session.type("/");
-      assert.doesNotMatch(await session.sees(/Commands \d+/), /tidy/);
+      assert.doesNotMatch(await session.sees(/Commands · \d+/), /tidy/);
       await session.type("\x15$");
-      assert.match(await session.sees("Skills 1"), /\$tidy\s+tidy the docs/);
+      assert.match(await session.sees("Skills · 1"), /\$tidy\s+tidy the docs/);
       await session.type("\x15/tidy\r");
       await session.sees("Unknown command /tidy. $tidy runs the skill.");
       await session.type("$tidy the docs\r");
@@ -789,7 +789,7 @@ describe("App commands", () => {
     assert.ok(status.indexOf("Server") < status.indexOf("Session"));
     await session.type("\x1b");
     await session.type("/mode\r");
-    const modes = await session.sees("Permission modes 2");
+    const modes = await session.sees("Permission modes · 2");
     assert.match(modes, /supervised\s+read freely; ask before edits and commands\s+current/);
     await session.type("\x1b[B");
     await session.type("\r");

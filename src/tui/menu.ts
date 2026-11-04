@@ -307,7 +307,7 @@ export class Menu {
     // Informational rows are not counted, unless they are all there is.
     const count = visible.filter(({ entry: item }) => !item.inert).length || visible.length;
     let title = style.bold(
-      style.strong(this.config.count ? `${this.config.title} ${count}` : this.config.title),
+      style.strong(this.config.count ? `${this.config.title} · ${count}` : this.config.title),
     );
     const filter = this.#query ? `  ${style.muted("filter")} ${this.#query}` : "";
     if (this.#tabs.length > 0)

@@ -211,9 +211,9 @@ export function retryHint(at: number | null, width: number): string {
   const wait = left > 0 ? `wait ${left}s, then ` : "";
   return (
     [
-      `${wait}enter tries again · or type a message · / commands`,
-      `${wait}enter tries again · or type a message`,
-    ].find((text) => visibleWidth(text) <= width) ?? `${wait}enter tries again`
+      `${wait}enter resends your message · or type another · / commands`,
+      `${wait}enter resends your message · or type another`,
+    ].find((text) => visibleWidth(text) <= width) ?? `${wait}enter resends it`
   );
 }
 
