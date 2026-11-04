@@ -1644,6 +1644,7 @@ export class Host {
     | "commands.list"
     | "commands.run"
     | "commands.complete"
+    | "skills.list"
     | "files.search"
     | "files.branch"
   > {
@@ -1668,6 +1669,11 @@ export class Host {
         const command = (await this.#commandSet(client, threadId)).commands.find(name);
         return command?.complete?.(this.#commandContext(client, threadId), args) ?? null;
       },
+      "skills.list": async (client, { threadId }) =>
+        (await this.#commandSet(client, threadId)).host.skills.map(({ name, description }) => ({
+          name,
+          description,
+        })),
       "files.search": async (_client, { cwd, query, limit }) =>
         this.#files.search(resolvePath(expandHome(cwd)), query, limit),
       "files.branch": async (_client, { cwd }) => gitBranch(expandHome(cwd)),

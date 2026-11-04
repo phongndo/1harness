@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { registerHooks } from "node:module";
 import { pathToFileURL } from "node:url";
 import {
+  completion,
   parseShortcut,
+  type CommandDefinition,
   type CommandRegistry,
   type CommandUI,
   type ReportSpan,
@@ -39,12 +41,16 @@ import {
 } from "../operations/operation.ts";
 import { agentTool, toolOperation } from "../operations/tools.ts";
 import { acpDriver, registerDriver } from "../drivers/index.ts";
+import { findExtensions, installedPackages } from "./packages.ts";
+import { findSkills, SKILL_TOOL, skillMessage, skillTool, type Skill } from "./skills.ts";
 
-export type ExtensionScope = "user" | "project" | "flag";
+export type ExtensionScope = "user" | "package" | "project" | "flag";
 
 export interface ExtensionSource {
   path: string;
   scope: ExtensionScope;
+  /** The name it goes by, where its file's name would say nothing. */
+  name?: string;
 }
 
 export interface LoadedExtension {
@@ -81,32 +87,6 @@ function mapApiImports(): void {
 }
 
 type AnyEventHandler = (event: ThreadEvent, context: ExtensionContext) => void | Promise<void>;
-
-const MODULE_EXTENSIONS = new Set([".ts", ".mts", ".js", ".mjs"]);
-/** Extension modules in a folder: module files, and folders with an `index` module. */
-function findExtensions(folder: string): string[] {
-  let names: string[];
-  try {
-    names = readdirSync(folder).toSorted();
-  } catch {
-    return [];
-  }
-  const found: string[] = [];
-  for (const name of names) {
-    if (name.startsWith(".")) continue;
-    const path = join(folder, name);
-    if (MODULE_EXTENSIONS.has(extname(name)) && !name.endsWith(".d.ts")) {
-      found.push(path);
-      continue;
-    }
-    if (!statSync(path, { throwIfNoEntry: false })?.isDirectory()) continue;
-    const index = [...MODULE_EXTENSIONS]
-      .map((extension) => join(path, `index${extension}`))
-      .find((candidate) => existsSync(candidate));
-    if (index) found.push(index);
-  }
-  return found;
-}
 
 /** The name an extension goes by: its file name, or its folder's for an `index` module. */
 function extensionName(path: string): string {
@@ -213,6 +193,8 @@ export class ExtensionHost {
   #requests: { extension: string; handler: RequestHandler }[] = [];
   #toolChecks: { extension: string; handler: ToolCallHandler }[] = [];
   #toolRenderers: { extension: string; render: ToolRenderer }[] = [];
+  /** The skills offered here. */
+  #skills: Skill[] = [];
   /** The IDs of the threads attached, for their handlers' context. */
   #threadIds = new WeakMap<Thread, string>();
   /** A load is under way, which an operation would have to wait for. */
@@ -244,6 +226,75 @@ export class ExtensionHost {
         else context.ui.report(this.report());
       },
     });
+    options.commands?.register(this.#skillCommand());
+  }
+
+  /** The skills offered here: the user's own, then packages', then a trusted folder's. */
+  get skills(): readonly Skill[] {
+    return this.#skills;
+  }
+
+  #skillCommand(): CommandDefinition {
+    return {
+      name: "skill",
+      usage: "[name] [request]",
+      description: "list the skills 1harness offers on every harness, or send one (also $name)",
+      group: "Tools",
+      complete: (_context, args) =>
+        args.includes(" ")
+          ? null
+          : {
+              start: 0,
+              items: this.#skills.map((skill) => completion(skill.name, skill.description, true)),
+            },
+      run: async (context, args) => {
+        const [, name = "", request = ""] = /^(\S*)\s*([\s\S]*)$/.exec(args) ?? [];
+        if (name === "") {
+          context.ui.report({
+            title: "Skills",
+            lines:
+              this.#skills.length === 0
+                ? [
+                    [
+                      {
+                        text: "No skills. A package or ~/.config/1harness/skills adds them.",
+                        tone: "muted",
+                      },
+                    ],
+                  ]
+                : this.#skills.map((skill) => [
+                    { text: `${skill.name}  `, tone: "strong" },
+                    { text: skill.description, tone: "soft" },
+                  ]),
+          });
+          return;
+        }
+        const skill = this.#skills.find((candidate) => candidate.name === name);
+        if (!skill) throw new Error(`No skill ${name}`);
+        if (!context.thread) throw new Error("No thread to send it to");
+        await context.thread.send(skillMessage(skill, request));
+      },
+    };
+  }
+
+  /** Finds the skills again, and offers agents the tool that reads them if there are any. */
+  #loadSkills(packageFolders: readonly string[]): void {
+    const { configDir } = this.#options;
+    const found = findSkills([
+      join(configDir, "skills"),
+      ...packageFolders,
+      ...(this.trusted ? [join(this.#options.cwd, ".1harness", "skills")] : []),
+    ]);
+    this.#skills = found.skills;
+    for (const warning of found.warnings) this.#notify("warning", warning);
+    const owner = this.tools.get(SKILL_TOOL);
+    if (owner && owner.extension !== "1harness") return;
+    if (this.#skills.length > 0)
+      this.tools.set(SKILL_TOOL, {
+        extension: "1harness",
+        tool: skillTool(() => this.#skills),
+      });
+    else this.tools.delete(SKILL_TOOL);
   }
 
   get #projectFolder(): string {
@@ -298,11 +349,17 @@ export class ExtensionHost {
   /** Loads the user's extensions, the trusted project's, and any named on the command line. */
   async loadAll(extra: readonly string[] = this.#extra): Promise<void> {
     this.#extra = extra;
+    const installed = installedPackages(this.#options.configDir, this.#options.stateDir);
+    for (const warning of installed.warnings) this.#notify("warning", warning);
+    const contents = installed.packages.flatMap((entry) => entry.contents ?? []);
     const sources: ExtensionSource[] = [
       ...findExtensions(join(this.#options.configDir, "extensions")).map((path) => ({
         path,
         scope: "user" as const,
       })),
+      ...contents.flatMap((offered) =>
+        offered.extensions.map((module) => ({ ...module, scope: "package" as const })),
+      ),
       ...(this.#trust.has(this.#options.cwd) ? findExtensions(this.#projectFolder) : []).map(
         (path) => ({ path, scope: "project" as const }),
       ),
@@ -314,6 +371,7 @@ export class ExtensionHost {
     } finally {
       this.#loading = false;
     }
+    this.#loadSkills(contents.flatMap((offered) => offered.skills));
   }
 
   async trustProject(): Promise<void> {
@@ -321,6 +379,8 @@ export class ExtensionHost {
     const loaded = new Set(this.extensions.map((extension) => extension.path));
     const paths = findExtensions(this.#projectFolder).filter((path) => !loaded.has(path));
     for (const path of paths) await this.load({ path, scope: "project" });
+    const { packages } = installedPackages(this.#options.configDir, this.#options.stateDir);
+    this.#loadSkills(packages.flatMap((entry) => entry.contents?.skills ?? []));
     this.#notify("info", `Trusted ${this.#options.cwd}; loaded ${paths.length} project extensions`);
   }
 
@@ -347,9 +407,10 @@ export class ExtensionHost {
   }
 
   async load(source: ExtensionSource): Promise<LoadedExtension> {
-    const name = extensionName(source.path);
+    const name = source.name ?? extensionName(source.path);
     const record: LoadedExtension = {
-      ...source,
+      path: source.path,
+      scope: source.scope,
       name,
       error: null,
       commands: [],

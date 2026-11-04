@@ -90,6 +90,11 @@ const tool = (name: string) =>
     },
   }) as HarnessEvent;
 
+const skill = (folder: string, name: string, description: string) => {
+  mkdirSync(join(folder, name), { recursive: true });
+  writeFileSync(join(folder, name, "SKILL.md"), `---\ndescription: ${description}\n---\nBody.`);
+};
+
 describe("what extensions reach", () => {
   it("refuses a shortcut it cannot have, and the extension says so", async () => {
     const { root, notices, host, commands } = setup();
@@ -177,6 +182,36 @@ describe("what extensions reach", () => {
       assert.equal(stored.from, "thread-1");
       detach();
       await thread.close();
+    } finally {
+      await host.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a user's own skill over a package's, and skills from an untrusted folder out", async () => {
+    const { root, host } = setup();
+    try {
+      skill(join(root, "config", "skills"), "tidy", "Mine");
+      skill(join(root, "tools", "skills"), "tidy", "The package's");
+      skill(join(root, "tools", "skills"), "sweep", "Sweeps");
+      skill(join(root, "project", ".1harness", "skills"), "local", "The folder's");
+      writeFileSync(
+        join(root, "config", "packages.json"),
+        JSON.stringify({ packages: [join(root, "tools")] }),
+      );
+      await host.loadAll();
+      const offered = () => host.skills.map(({ name, description }) => [name, description]);
+      assert.deepEqual(offered(), [
+        ["tidy", "Mine"],
+        ["sweep", "Sweeps"],
+      ]);
+      await host.trustProject();
+      assert.deepEqual(offered(), [
+        ["tidy", "Mine"],
+        ["sweep", "Sweeps"],
+        ["local", "The folder's"],
+      ]);
+      assert.equal(host.tools.get("skill_read")?.extension, "1harness");
     } finally {
       await host.close();
       rmSync(root, { recursive: true, force: true });

@@ -422,6 +422,11 @@ export interface Methods {
     params: { threadId: string | null; name: string; args: string };
     result: Completions | null;
   };
+  /** The skills 1harness offers for the thread or its folder, which `/skill` sends. */
+  "skills.list": {
+    params: { threadId: string | null };
+    result: { name: string; description: string }[];
+  };
   "files.search": {
     params: { cwd: string; query: string; limit: number };
     result: { matches: FileMatch[]; loading: boolean };

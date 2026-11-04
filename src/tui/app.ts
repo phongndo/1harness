@@ -142,7 +142,7 @@ const KEYS: [string, string][] = [
   ["ctrl+x", "show tool calls whole: commands, output, diffs; in a prompt, all of it"],
   ["alt+↑", "go to the thread that started this one"],
   ["/", "run a 1harness command"],
-  ["$", "run one of the harness's skills"],
+  ["$", "run a skill"],
   ["@", "mention a file or folder"],
   ["ctrl+v", "paste the clipboard's image, copied files, or text; dropped image paths attach too"],
   ["backspace", "delete a pasted image or long text whole; paste the text again to show it all"],
@@ -246,6 +246,8 @@ export class App {
   #notes: string[];
   /** The harness's skills, which `$name` runs. */
   #skills: NativeCommand[] = [];
+  /** The skills 1harness offers on every harness, which `$name` sends unless a harness's has the name. */
+  #ownSkills: NativeCommand[] = [];
   /** Commands by the key that runs them, such as `alt+r`. */
   #shortcuts = new Map<string, string>();
   /** What extensions show on the status line, by the key each chose. */
@@ -436,7 +438,7 @@ export class App {
       context: this.#context,
       available: () => this.#available(),
       isAvailable: (command) => this.#isAvailable(command),
-      skills: () => this.#skills,
+      skills: () => this.#allSkills(),
       cwd: () => this.#cwd(),
       submit: (text) => this.#submit(text),
       notice: (level, text) => this.#notice(level, text),
@@ -1436,6 +1438,17 @@ export class App {
       const commands = await this.#client.call("commands.list", { threadId });
       if (this.#currentId !== threadId) return;
       this.#registerHostCommands(commands);
+      // A server too old to say has no skills of its own.
+      const skills = await this.#client.call("skills.list", { threadId }).catch(() => []);
+      if (this.#currentId !== threadId) return;
+      this.#ownSkills = skills.map(({ name, description }) => ({
+        name,
+        description,
+        aliases: [],
+        argumentHint: "",
+        kind: "skill",
+        startsTurn: true,
+      }));
       this.#suggestions.sync();
       this.#schedule();
     } catch {
@@ -2425,9 +2438,15 @@ export class App {
     return call && this.#skill(call.name) ? null : text;
   }
 
-  /** The harness's skill by name or alias. */
+  /** The harness's skill by name or alias, else one 1harness offers. */
   #skill(name: string): NativeCommand | undefined {
-    return this.#skills.find((skill) => skill.name === name || skill.aliases.includes(name));
+    return this.#allSkills().find((skill) => skill.name === name || skill.aliases.includes(name));
+  }
+
+  /** The harness's skills, which behave as they do in its own UI, then 1harness's by other names. */
+  #allSkills(): NativeCommand[] {
+    const native = new Set(this.#skills.flatMap((skill) => [skill.name, ...skill.aliases]));
+    return [...this.#skills, ...this.#ownSkills.filter((skill) => !native.has(skill.name))];
   }
 
   /** Runs `/command args` from 1harness, or `$skill args` in the harness. */
@@ -2435,6 +2454,10 @@ export class App {
     try {
       const call = skillCall(text);
       const skill = call && this.#skill(call.name);
+      if (call && skill && this.#ownSkills.includes(skill)) {
+        await this.#commands.find("skill")?.run(this.#context, `${skill.name} ${call.args}`);
+        return;
+      }
       if (call && skill) {
         const thread = this.#live;
         if (!thread) throw new Error("No session is running.");
@@ -2474,8 +2497,8 @@ export class App {
         { group: command.group },
       ),
     );
-    // The harness's skills under their own tab, by the `$` that runs them.
-    const native = [...this.#skills];
+    // Skills under their own tab, by the `$` that runs them.
+    const native = this.#allSkills();
     for (const command of native) {
       // A hint that is a sentence, as skills' often are, reads as part of the description.
       const hint = command.argumentHint ?? "";

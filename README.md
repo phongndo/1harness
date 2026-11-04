@@ -27,10 +27,12 @@ Inside the UI, `/help` lists every command.
 | `~/.config/1harness/mcp.json`         | MCP servers added to every harness (`mcpServers`) |
 | `~/.config/1harness/agents.json`      | extra ACP agents                                  |
 | `~/.config/1harness/extensions/`      | extensions; a trusted project adds `.1harness/`   |
+| `~/.config/1harness/skills/`          | skills for every harness, used with `$name`       |
+| `~/.config/1harness/packages.json`    | what `1harness packages` installed                |
 | `~/.local/state/1harness/1harness.db` | threads, kept across restarts                     |
 
 Extensions program against [`src/extensions/api.ts`](src/extensions/api.ts);
-[`examples/extensions`](examples/extensions) has two to start from.
+[`examples/extensions`](examples/extensions) has some to start from.
 
 With Nix, `nix run github:phongndo/1harness`, or run the server as a service
 through the flake's `nixosModules`, `darwinModules`, or `homeManagerModules`
