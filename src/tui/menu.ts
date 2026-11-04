@@ -482,7 +482,7 @@ export function infoPanel(
       .flatMap((line) => wrap(line, Math.max(10, width - labelWidth)));
     wrapped.forEach((line, index) => {
       const head = index === 0 ? style.bold(style.text(pad(`  ${label}`, labelWidth))) : indent;
-      lines.push(truncate(head + style.muted(line), width));
+      lines.push(truncate(head + style.text(line), width));
     });
   }
   lines.push(rule(width), hints(["esc close"], width));

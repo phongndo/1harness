@@ -656,7 +656,10 @@ describe("App commands", () => {
     assert.match(status, /Harness\s+Scripted/);
     assert.match(status, /Session\s+native-\d+/);
     assert.match(status, /Model\s+big \(default\)/);
-    assert.match(status, /Server\s+in this process, keeping nothing/);
+    // The risk is read before the IDs, and says what to do about it.
+    assert.match(status, /Server\s+⚠ threads end when 1harness exits/);
+    assert.match(status, /1harness server start/);
+    assert.ok(status.indexOf("Server") < status.indexOf("Session"));
     await session.type("\x1b");
     await session.type("/mode\r");
     const modes = await session.sees("Permission modes 2");

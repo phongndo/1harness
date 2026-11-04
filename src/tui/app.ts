@@ -29,6 +29,7 @@ import {
   formatCost,
   formatTokens,
   plural,
+  MODE_DESCRIPTIONS,
 } from "../core/wording.ts";
 import type { ClientEvent, HostClient } from "../client/client.ts";
 import {
@@ -2642,17 +2643,20 @@ export class App {
     if (!info || !current) return;
     const usage = current.usage;
     const model = info.model ?? this.#defaultModel();
+    // What can be changed and what can go wrong first; IDs are for looking up, last.
     const rows: [string, string][] = [
-      ["Thread", `${current.id}${current.title ? ` · ${current.title}` : ""} · ${current.status}`],
-      ["Harness", this.#harnessStatus(info.harness, info.version)],
-      ["Session", info.threadId ?? "starts with your first message"],
+      ["Thread", `${current.title ? `${current.title} · ` : ""}${current.status}`],
       ["Folder", info.cwd],
+      ["Harness", `${this.#harnessStatus(info.harness, info.version)} · /harness changes it`],
       [
         "Model",
-        `${model ?? "the harness's default"}${info.model === null && model ? " (default)" : ""}${info.effort ? ` · ${info.effort}` : ""}`,
+        `${model ?? "the harness's default"}${info.model === null && model ? " (default)" : ""}${info.effort ? ` · ${info.effort}` : ""} · /model changes it`,
       ],
-      ["Mode", `${info.runtimeMode}${info.interactionMode === "plan" ? " · plan" : ""}`],
-      ["1harness", `v${this.#version}`],
+      [
+        "Mode",
+        `${info.runtimeMode}${info.interactionMode === "plan" ? " · plan" : ""}: ${MODE_DESCRIPTIONS[info.runtimeMode]} · /mode changes it`,
+      ],
+      ["Server", this.#serverLine()],
     ];
     const context = usage ? contextUsed(usage) : null;
     if (context)
@@ -2664,7 +2668,11 @@ export class App {
         `${cached}% of input read from cache (${formatTokens(usage.cachedTokens ?? 0)} of ${formatTokens(usage.inputTokens)})`,
       ]);
     if (usage?.costUsd) rows.push(["Cost", formatCost(usage.costUsd)]);
-    rows.push(["Server", this.#serverLine()]);
+    rows.push(
+      ["Thread ID", current.id],
+      ["Session", info.threadId ?? "starts with your first message"],
+      ["1harness", `v${this.#version}`],
+    );
     this.#panel = { kind: "info", title: "Status", rows };
   }
 
@@ -2673,8 +2681,8 @@ export class App {
     const server = this.#server;
     if (server.inProcess)
       return this.#stored
-        ? "in this process: threads stop working when 1harness exits"
-        : "in this process, keeping nothing: threads end when 1harness exits";
+        ? "⚠ threads stop when 1harness exits · 1harness server start keeps them going"
+        : "⚠ threads end when 1harness exits · 1harness server start keeps them";
     const pid = server.pid ? ` · pid ${server.pid}` : "";
     if (server.local) return `this machine${pid} · ${server.address}`;
     return `${server.label}${pid} · ${server.address}${server.identity ? ` · as ${server.identity}` : ""}`;
