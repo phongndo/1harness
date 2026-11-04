@@ -269,6 +269,10 @@ export class App {
   #next: string | undefined = undefined;
   /** Whether tool calls show whole, with their output and diffs. */
   #details = false;
+  /** Details just came on at the bottom: the next frame brings up the work they expand. */
+  #revealWork = false;
+  /** The view moved up to that work, and goes back down when details go off. */
+  #revealedWork = false;
   /**
    * ONEHARNESS_IMAGES and ONEHARNESS_PROGRAM_STATUS, read once: `1` or `0`
    * says whether the terminal shows pictures or takes status reports, over
@@ -1941,7 +1945,7 @@ export class App {
     // A prompt shows its own request whole; elsewhere, tool calls show whole.
     const prompt = this.#requests.prompt;
     if (key.ctrl && key.name === "x" && !prompt && !this.#panel) {
-      this.#details = !this.#details;
+      this.#toggleDetails();
       return;
     }
     // A command's key waits for a prompt or a list to close, like the command would.
@@ -2187,12 +2191,20 @@ export class App {
       }
     }
     if (target.kind === "details") {
-      this.#details = !this.#details;
+      this.#toggleDetails();
       this.#schedule();
     } else if (target.kind === "code") {
       const lines = plural(target.code.split("\n").length, "line");
       this.#copy(target.code, `Copied the ${target.lang ? `${target.lang} ` : ""}code, ${lines}`);
     } else this.#openViewer(target);
+  }
+
+  #toggleDetails(): void {
+    this.#details = !this.#details;
+    // At the bottom, the reply under a turn's work would hold what just expanded off screen.
+    this.#revealWork = this.#details && this.#view.scroll === 0;
+    if (!this.#details && this.#revealedWork) this.#view.scroll = 0;
+    this.#revealedWork = false;
   }
 
   /** Puts text on the clipboard where the user sits, through the terminal, and says so for a moment. */
@@ -2781,6 +2793,16 @@ export class App {
     if (reflowed && shown.scroll > Math.max(0, view.total - room)) {
       shown.scroll = Math.max(0, view.total - room);
       view = shown.transcript.view(context, room, shown.scroll);
+    }
+    if (this.#revealWork) {
+      this.#revealWork = false;
+      const scroll = Math.max(0, view.total - shown.transcript.lastTurnRow(context) - room);
+      if (scroll > 0) {
+        shown.scroll = scroll;
+        this.#revealedWork = true;
+        view = shown.transcript.view(context, room, scroll);
+        footer = this.#footer(width, height);
+      }
     }
     // What the mouse finds where: each row's target, and what it selected, shown so.
     this.#targets = view.targets;

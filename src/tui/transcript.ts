@@ -278,6 +278,20 @@ export class Transcript {
     return this.#entries.slice(count).map((entry) => entry.block);
   }
 
+  /** Where the last message the user sent starts among all rows, or the top when there is none. */
+  lastTurnRow(context: RenderContext): number {
+    let total = 0;
+    let row = 0;
+    for (const entry of this.#entries) {
+      const { rows } = this.#rows(entry, context);
+      if (rows.length === 0) continue;
+      if (total > 0) total += 1;
+      if (entry.block.kind === "user") row = total;
+      total += rows.length;
+    }
+    return row;
+  }
+
   /**
    * The rows in view, `height` of them ending `scroll` rows above the last,
    * with the pictures they show and what each does when clicked; `top` is

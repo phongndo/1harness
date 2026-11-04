@@ -118,22 +118,20 @@ export function statusLine(state: StatusLineState, width: number): string {
   if (state.toast) return truncate(`${style.added("✓")} ${style.text(state.toast)}`, width);
   const { current } = state;
   const info = current?.info ?? null;
-  // A closed thread on screen says so first, since it takes no messages.
+  // Kept longest first, so a narrow pane still says what the agent may do and who it is.
+  const closed = current?.status === "closed" ? "closed" : null;
   const mode = info?.runtimeMode ?? state.runtimeMode;
-  const parts: string[] = current?.status === "closed" ? ["closed", mode] : [mode];
   // Empty while the first run asks which harness to start.
-  if (state.harness) parts.push(state.harness);
-  if (info) {
-    if (state.model) parts.push(state.model);
-    if (info.effort) parts.push(info.effort);
-  }
+  let harness: string | null = state.harness || null;
+  let model = info ? state.model : null;
+  let effort = info ? info.effort : null;
   const usage = current?.usage;
-  const context = usage ? contextUsed(usage) : null;
-  if (context) parts.push(`ctx ${context.percent}%`);
+  const contextShare = usage ? contextUsed(usage) : null;
+  let context = contextShare ? `ctx ${contextShare.percent}%` : null;
   const cached = usage ? cacheHit(usage) : null;
-  if (cached !== null) parts.push(`cache ${cached}%`);
+  let cache = cached !== null ? `cache ${cached}%` : null;
   // Nothing spent yet, or a subscription that does not count it, shows no cost.
-  if (usage?.costUsd) parts.push(formatCost(usage.costUsd));
+  let cost = usage?.costUsd ? formatCost(usage.costUsd) : null;
   const where = [state.folder, state.server ? `on ${state.server}` : null].filter(Boolean);
   let left = style.text(where.join(" · "));
   if (info?.interactionMode === "plan")
@@ -141,14 +139,31 @@ export function statusLine(state: StatusLineState, width: number): string {
   for (const note of state.notes ?? [])
     left += `${left === "" ? "" : style.muted(" · ")}${style.text(oneLineText(note))}`;
   // The right edge stays whole as the left is cut, so modes the keys toggle go there too.
-  const hint =
-    state.scroll > 0
-      ? `↓ ${state.scroll} more lines · pgdn`
-      : state.details
-        ? "details · ctrl+x"
-        : null;
-  const right = [hint, parts.join(" · ")].filter(Boolean).join("   ");
-  return spread(left, style.muted(right), width);
+  const scrolled = state.scroll > 0 ? `↓ ${state.scroll} more lines · pgdn` : null;
+  let details = state.details ? "details · ctrl+x" : null;
+  const right = () =>
+    [
+      scrolled,
+      details,
+      [closed, mode, harness, model, effort, context, cache, cost].filter(Boolean).join(" · "),
+    ]
+      .filter(Boolean)
+      .join("   ");
+  const shed = [
+    () => (cache = null),
+    () => (effort = null),
+    () => (cost = null),
+    () => (context = null),
+    () => (model = null),
+    () => (details = null),
+    () => (harness = null),
+  ];
+  const leftWidth = visibleWidth(left);
+  for (const drop of shed) {
+    if (leftWidth + 2 + visibleWidth(right()) <= width) break;
+    drop();
+  }
+  return spread(left, style.muted(right()), width);
 }
 
 /** A panel over the composer, as the footer shows it. */
