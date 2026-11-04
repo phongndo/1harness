@@ -178,7 +178,10 @@ export class ThreadView {
         this.endTurn(null, null);
         this.settle();
         if (entry.error)
-          this.notice("error", `Session ended: ${entry.error}\nYour next message starts it again.`);
+          this.notice(
+            "error",
+            `Session ended: ${entry.error}\nRun any command it names in a shell first; your next message starts it again.`,
+          );
         break;
       case "decision":
         this.transcript.add({

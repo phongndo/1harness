@@ -1,9 +1,15 @@
 import type { ThreadState } from "../protocol.ts";
 
 /** A thread as quitting names it, to come back to. */
-type Leaving = Pick<ThreadState, "id" | "harness" | "runCount"> & {
-  info: Pick<ThreadState["info"], "threadId">;
-};
+type Leaving = Pick<ThreadState, "id" | "harness" | "runCount"> &
+  Partial<Pick<ThreadState, "title">> & {
+    info: Pick<ThreadState["info"], "threadId">;
+  };
+
+/** How much of a 1harness thread ID to type: enough to tell it apart, as `--resume` matches a prefix. */
+const SHORT_ID = 8;
+/** The most of a thread's title quitting repeats. */
+const TITLE_LENGTH = 50;
 
 /**
  * What quitting says under the screen it gives back: the server /connect
@@ -27,7 +33,7 @@ export function goodbye(state: {
   const hint = !target
     ? null
     : state.stored
-      ? `1harness${on} --resume ${target.id}`
+      ? `1harness${on} --resume ${target.id.slice(0, SHORT_ID)}`
       : target.info.threadId
         ? `1harness${on} --harness ${target.harness} --resume ${target.info.threadId}`
         : null;
@@ -42,6 +48,13 @@ export function goodbye(state: {
         ? `${ids} stopped working: without a server, ${they} ran in this 1harness.`
         : `${ids} ${one ? "is" : "are"} still working; ${they} ${one ? "carries" : "carry"} on in 1harness's server${server.local ? "" : ` on ${server.label}`}.`,
     );
+  // Otherwise nothing says whether what was on screen survives quitting.
+  if (hint && state.stored && working.length === 0) {
+    const title = target?.title?.trim();
+    const named =
+      title && title.length > TITLE_LENGTH ? `${title.slice(0, TITLE_LENGTH - 1)}…` : title;
+    lines.push(`${named ? `Saved "${named}"` : "Saved this thread"}; nothing is still running.`);
+  }
   if (hint)
     lines.push(`${working.length > 0 && !server.inProcess ? "Come back" : "Resume"} with: ${hint}`);
   return lines;

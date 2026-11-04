@@ -983,7 +983,10 @@ function toolRows(block: Extract<Block, { kind: "tools" }>, context: RenderConte
   const tail = (item: ToolItem, hang: string): string[] => {
     if (item.kind !== "command" || item.status !== "running" || settled(item)) return [];
     const last = plainText(item.output).trimEnd().split("\n").at(-1)?.trim();
-    return last ? [truncate(`${hang}${style.muted(last)}`, context.width)] : [];
+    if (!last) return [];
+    // A failure scrolling by is the one line here worth stopping the eye.
+    const paint = /✖|✗|\b(?:fail(?:ed|ure)?|error)\b/i.test(last) ? style.removed : style.muted;
+    return [truncate(`${hang}${paint(last)}`, context.width)];
   };
   if (only && items.length === 1) {
     if (context.details) return detailedItem(only, `${marker} `, "  ", context, line(only));
