@@ -97,7 +97,10 @@ describe("the line that says another thread needs the user", () => {
       options: [],
       defaultOptionId: "",
     });
-    assert.match(banner ?? "", /◆ Rebuild the site {2}wants to run rm -rf dist +ctrl\+o open$/);
+    assert.match(
+      banner ?? "",
+      /◆ Another thread: Rebuild the site {2}wants to run rm -rf dist +ctrl\+o open$/,
+    );
   });
 
   it("says only that it needs approval where there is no command to name", () => {

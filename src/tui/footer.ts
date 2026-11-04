@@ -61,8 +61,11 @@ function attentionLine(
   const more = others > 0 ? style.muted(` · ${others} more`) : "";
   // The title gives way first: it is what is being asked that needs reading here.
   const room = width - visibleWidth(what) - visibleWidth(more) - 4 - 14;
-  const title = truncate(thread.title || "New thread", Math.max(8, room));
-  const left = `${style.attention("◆")} ${style.strong(title)}  ${what}${more}`;
+  // Which thread, after whose it is; a narrow pane keeps what is asked in view.
+  const who = "Another thread: ";
+  const whose = room - who.length >= 12 ? style.muted(who) : "";
+  const title = truncate(thread.title || "New thread", Math.max(8, room - visibleWidth(whose)));
+  const left = `${style.attention("◆")} ${whose}${style.strong(title)}  ${what}${more}`;
   return spread(truncate(left, Math.max(0, width - 14)), style.muted("ctrl+o open"), width);
 }
 
