@@ -5,7 +5,14 @@ import { stripHandoff } from "../host/handoff.ts";
 import type { LogEntry, TurnTokens } from "../protocol.ts";
 import { formatTokens } from "../core/wording.ts";
 import { reportStatus, type AgentRow } from "./agents.ts";
-import { Transcript, changeCounts, groupSummary, isToolItem, type Block } from "./transcript.ts";
+import {
+  Transcript,
+  changeCounts,
+  failureText,
+  groupSummary,
+  isToolItem,
+  type Block,
+} from "./transcript.ts";
 
 /** A turn's tokens up and down, as its activity line and summary say them: `(↑1.2k ↓350)`. */
 export function tokenCounts(up: number, down: number): string {
@@ -374,8 +381,13 @@ export class ThreadView {
     const tokens = tokenCounts(up, down);
     const label =
       status === "interrupted" ? "Interrupted · " : status === "failed" ? "Failed · " : "";
-    this.transcript.add({ kind: "summary", text: `${label}${seconds}s ${tokens}` });
-    if (status === "failed" && error) this.notice("error", error);
+    const next = status === "failed" ? " · send a message to try again" : "";
+    // A harness that reported the failure as it happened already said why.
+    const said = this.transcript
+      .since(this.#turnStart)
+      .some((block) => block.kind === "notice" && block.level === "error");
+    this.transcript.add({ kind: "summary", text: `${label}${seconds}s ${tokens}${next}` });
+    if (status === "failed" && error && !said) this.notice("error", error);
   }
 
   /**
@@ -416,7 +428,12 @@ export class ThreadView {
     const [first] = work;
     if (!first) return;
     this.transcript.insertBefore<Extract<Block, { kind: "worked" }>>(
-      { kind: "worked", text: groupSummary(items), files: [...files.values()] },
+      {
+        kind: "worked",
+        text: groupSummary(items),
+        files: [...files.values()],
+        failures: items.filter((item) => item.status === "failed").map(failureText),
+      },
       first,
     );
     for (const block of work) {

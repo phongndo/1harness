@@ -6,7 +6,7 @@ import type { LogEntry } from "../protocol.ts";
 import { plainLine, type AgentRow } from "./agents.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { visibleWidth, wrap } from "./text.ts";
-import { Transcript, renderBlock, type Block, type ToolItem } from "./transcript.ts";
+import { Transcript, failureText, renderBlock, type Block, type ToolItem } from "./transcript.ts";
 import { ThreadView } from "./view.ts";
 
 const plain = (rows: string[]) => rows.map((row) => stripVTControlCharacters(row));
@@ -836,5 +836,31 @@ describe("what a click on the transcript does", () => {
       regions.map(({ kind, code }) => [kind, code]),
       [["code", "print(1)"]],
     );
+  });
+});
+
+describe("a failed turn", () => {
+  const failing = {
+    kind: "command",
+    id: "failing",
+    command: "pnpm test",
+    output: "1 of 3 failed\n",
+    exitCode: 1,
+    status: "failed",
+  } as const;
+
+  it("names what failed under the line its work folds into", () => {
+    const rows = plain(
+      renderBlock(
+        {
+          kind: "worked",
+          text: "Ran 1 command · 1 failed",
+          files: [],
+          failures: [failureText(failing)],
+        },
+        context,
+      ),
+    );
+    assert.deepEqual(rows, ["● Ran 1 command · 1 failed", "└ ✗ pnpm test · exit 1: 1 of 3 failed"]);
   });
 });

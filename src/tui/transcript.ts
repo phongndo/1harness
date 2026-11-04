@@ -62,7 +62,13 @@ export type Block =
    * What a finished turn did, in place of its work: a sentence, and the files
    * it changed with their lines added and removed.
    */
-  | { kind: "worked"; text: string; files: { path: string; added: number; removed: number }[] }
+  | {
+      kind: "worked";
+      text: string;
+      files: { path: string; added: number; removed: number }[];
+      /** What failed among the folded work, which should not take ctrl+x to find. */
+      failures?: string[];
+    }
   | { kind: "notice"; level: NoticeLevel; text: string }
   /** A 1harness command's output, such as /mcp: a heading over aligned lines. */
   | { kind: "report"; title: string; lines: ReportSpan[][] }
@@ -558,6 +564,13 @@ function workedRows(block: Extract<Block, { kind: "worked" }>, context: RenderCo
   const rows = [truncate(`${style.strong("●")} ${style.muted(block.text)}`, context.width)];
   const files = block.files.slice(0, WORKED_FILES);
   const more = block.files.length - files.length;
+  const failures = block.failures ?? [];
+  failures.forEach((failure, index) => {
+    const last = index === failures.length - 1 && files.length === 0 && more === 0;
+    rows.push(
+      truncate(`${style.muted(last ? "└ " : "├ ")}${style.removed(`✗ ${failure}`)}`, context.width),
+    );
+  });
   files.forEach((file, index) => {
     const last = index === files.length - 1 && more === 0;
     const counts = [
@@ -798,14 +811,32 @@ function resultRows(block: Extract<Block, { kind: "result" }>, context: RenderCo
   return rows;
 }
 
+/** A failed tool call in one line: what ran, and how it ended where the output says. */
+export function failureText(item: ToolItem): string {
+  const lines = "output" in item ? plainText(item.output).trim().split("\n") : [];
+  const last = oneLineText(lines.at(-1) ?? "");
+  const what =
+    item.kind === "command"
+      ? `${oneLineText(item.command)}${item.exitCode ? ` · exit ${item.exitCode}` : ""}`
+      : item.kind === "tool_call"
+        ? toolName(item)
+        : item.kind === "file_change"
+          ? "File change"
+          : item.kind === "web_search"
+            ? "Web search"
+            : "Tool call";
+  return last ? `${what}: ${last}` : what;
+}
+
 function noticeRows(block: Extract<Block, { kind: "notice" }>, width: number): string[] {
+  const paint = block.level === "error" ? style.removed : style.attention;
   const label = block.level === "error" ? "Error " : block.level === "warning" ? "Warning " : "";
   return plainText(block.text)
     .replace(/\s+$/, "")
     .split("\n")
     .flatMap((line, index) =>
       wrap(
-        `  ${index === 0 && label ? style.bold(style.text(label)) : ""}${style.soft(line)}`,
+        `  ${index === 0 && label ? style.bold(paint(label)) : ""}${style.soft(line)}`,
         width,
         "  ",
       ),
