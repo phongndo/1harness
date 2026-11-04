@@ -1,10 +1,11 @@
-import type { RuntimeMode } from "../core/events.ts";
+import type { HarnessRequest, RuntimeMode } from "../core/events.ts";
 import type { Message } from "../core/thread.ts";
 import { cacheHit, contextUsed, formatCost } from "../core/wording.ts";
 import type { ThreadState } from "../protocol.ts";
 import type { Editor } from "./editor.ts";
 import { infoPanel, type Menu } from "./menu.ts";
 import type { ResumeView } from "./resume.ts";
+import { commandRisk } from "./risk.ts";
 import type { CursorPosition } from "./screen.ts";
 import { style } from "./theme.ts";
 import { oneLineText, spread, truncate, visibleWidth, wrap } from "./text.ts";
@@ -37,17 +38,31 @@ function queueRows(queue: readonly Message[], held: boolean, width: number): str
  * approval: the oldest one, with how many more are waiting.
  */
 function attentionLine(
-  waiting: readonly { threadId: string; request: { kind: "approval" | "question" } }[],
+  waiting: readonly { threadId: string; request: HarnessRequest }[],
   threads: ReadonlyMap<string, ThreadState>,
   width: number,
 ): string | null {
   const [first] = waiting;
   const thread = first ? threads.get(first.threadId) : undefined;
   if (!first || !thread) return null;
-  const what = first.request.kind === "question" ? "has a question" : "needs approval";
+  const { request } = first;
+  // What it asks, so a risky command need not be opened to be seen for what it is.
+  const command =
+    request.kind === "approval" && request.action.type === "command"
+      ? request.action.command
+      : null;
+  const what =
+    request.kind === "question"
+      ? style.attention("has a question")
+      : command
+        ? `${style.attention("wants to run")} ${(commandRisk(command) ? style.removed : style.text)(oneLineText(command))}`
+        : style.attention("needs approval");
   const others = new Set(waiting.map((open) => open.threadId)).size - 1;
   const more = others > 0 ? style.muted(` · ${others} more`) : "";
-  const left = `${style.attention("◆")} ${style.strong(thread.title || "New thread")}  ${style.attention(what)}${more}`;
+  // The title gives way first: it is what is being asked that needs reading here.
+  const room = width - visibleWidth(what) - visibleWidth(more) - 4 - 14;
+  const title = truncate(thread.title || "New thread", Math.max(8, room));
+  const left = `${style.attention("◆")} ${style.strong(title)}  ${what}${more}`;
   return spread(truncate(left, Math.max(0, width - 14)), style.muted("ctrl+o open"), width);
 }
 

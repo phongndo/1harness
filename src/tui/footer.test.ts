@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ThreadState } from "../protocol.ts";
-import { statusLine, type StatusLineState } from "./footer.ts";
+import { footerRows, statusLine, type FooterState, type StatusLineState } from "./footer.ts";
 import { plainText } from "./text.ts";
 
 const current = {
@@ -58,5 +58,74 @@ describe("the status line", () => {
     const shown = line(100, { scroll: 12, details: true });
     assert.match(shown, /↓ 12 more lines · pgdn {3}details · ctrl\+x {3}supervised/);
     assert.match(shown, /^parser-app · main/);
+  });
+});
+
+describe("the line that says another thread needs the user", () => {
+  const editor = { layout: () => ({ rows: [""], cursor: { row: 0, column: 0 } }), empty: false };
+  const shown = (request: FooterState["waiting"][number]["request"], width = 100) =>
+    footerRows(
+      {
+        turn: null,
+        running: false,
+        blink: false,
+        steer: false,
+        queue: [],
+        held: false,
+        waiting: [{ threadId: "other", request }],
+        threads: new Map([["other", { title: "Rebuild the site" } as unknown as ThreadState]]),
+        prompt: null,
+        panel: null,
+        editor: editor as unknown as FooterState["editor"],
+        busy: false,
+        suggestions: null,
+        status: "",
+      },
+      width,
+      30,
+    )
+      .rows.map((row) => plainText(row))
+      .find((row) => row.includes("◆"));
+
+  it("says what command it wants to run", () => {
+    const banner = shown({
+      kind: "approval",
+      id: "ask",
+      title: "Run?",
+      detail: "",
+      action: { type: "command", command: "rm -rf dist", cwd: null },
+      options: [],
+      defaultOptionId: "",
+    });
+    assert.match(banner ?? "", /◆ Rebuild the site {2}wants to run rm -rf dist +ctrl\+o open$/);
+  });
+
+  it("says only that it needs approval where there is no command to name", () => {
+    const banner = shown({
+      kind: "approval",
+      id: "ask",
+      title: "Edit?",
+      detail: "",
+      action: { type: "file_change", paths: ["a.ts"] },
+      options: [],
+      defaultOptionId: "",
+    });
+    assert.match(banner ?? "", /needs approval/);
+  });
+
+  it("keeps the command in view beside a long title", () => {
+    const banner = shown(
+      {
+        kind: "approval",
+        id: "ask",
+        title: "Run?",
+        detail: "",
+        action: { type: "command", command: "rm -rf dist", cwd: null },
+        options: [],
+        defaultOptionId: "",
+      },
+      50,
+    );
+    assert.match(banner ?? "", /rm -rf dist/);
   });
 });
