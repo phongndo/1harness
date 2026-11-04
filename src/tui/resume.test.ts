@@ -108,7 +108,7 @@ describe("ResumeView", () => {
       "  › 1h ago      Check the tests                     claude · opus · high",
       "    now       Review it again                       claude · opus · high",
       "──────────────────────────────────────────────────────────────── 2 / 3 ─",
-      "↑↓ navigate   enter go in   ← back out   esc close",
+      "↑↓ move   enter go in   ← back out   esc close",
     ]);
     assert.deepEqual(shown.key(key("return")), { kind: "choose", id: "t5" });
     // An agent come in above the one selected leaves the selection on it.

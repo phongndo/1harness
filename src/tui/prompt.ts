@@ -3,11 +3,13 @@ import type { Key } from "./input.ts";
 import { hints, lineStep, rule, tabRow } from "./menu.ts";
 import type { CursorPosition } from "./screen.ts";
 import { diffLine, style } from "./theme.ts";
-import { diffBody, oneLineText, plainText, spread, truncate, visibleWidth, wrap } from "./text.ts";
+import { oneLineText, plainText, spread, truncate, visibleWidth, wrap } from "./text.ts";
 
 export interface ChoiceOption {
   label: string;
   description: string;
+  /** Said beside it only while it is not selected; once it is, the hint line says the same. */
+  unselected?: string;
 }
 
 export interface ChoiceConfig {
@@ -16,7 +18,15 @@ export interface ChoiceConfig {
   /** Shown at the right edge, such as `Command`. */
   tag: string;
   title: string;
+  /** What tab adds to a choice, for its hint. */
+  comment?: string;
+  /** Where what the warning warns of would happen, said beside it where it fits. */
+  where?: string;
+  /** What could go wrong in choosing yes, which should not read as ordinary detail. */
+  warning?: string;
   detail: string[];
+  /** Whether the detail is a diff, drawn so that its changes stand out. */
+  diff?: boolean;
   options: ChoiceOption[];
   multiSelect: boolean;
   /** Adds an "Other" entry that switches to free-text input. */
@@ -26,6 +36,8 @@ export interface ChoiceConfig {
   initial: number;
   /** Which options take a comment, written with tab; none when absent. */
   commentable?: (index: number) => boolean;
+  /** What esc does here, for the hint line; `cancel` when absent. */
+  escape?: string;
 }
 
 /** A comment the user wrote on an option, to go with it. */
@@ -55,24 +67,19 @@ const DETAIL_LINES = 12;
 /** Rows kept free of a prompt shown whole, for a row of the transcript. */
 const FOOTER_ROWS = 1;
 
-/** Detail text that is not a diff's change: bold, to read as what is asked about. */
+/** Detail text that is not a diff's: bold, to read as what is asked about. */
 function asked(text: string): string {
   return style.bold(style.strong(text));
-}
-
-/** A detail line's look: a diff's changes in its colors, its header and other text bold. */
-function detailLine(line: string, change: boolean): string {
-  return change ? diffLine(line, asked) : asked(line);
 }
 
 /**
  * A detail line as rows: commands and diffs break anywhere, keeping every
  * character where it was, since what is approved must read exactly; prose
- * breaks at spaces.
+ * breaks at spaces. `other` paints what is not a diff's change.
  */
-function detailRows(line: string, width: number, change: boolean): string[] {
+function detailRows(line: string, width: number, other: (text: string) => string): string[] {
   const exact = /^(\$ |[+-]|@@)/.test(line) || /^\s/.test(line);
-  return wrap(`  ${detailLine(line, change)}`, width, "    ", exact);
+  return wrap(`  ${diffLine(line, other)}`, width, "    ", exact);
 }
 
 /**
@@ -210,6 +217,11 @@ export class ChoicePrompt {
     frame: PromptFrame = {},
   ): { rows: string[]; cursor: CursorPosition | null } {
     const { config } = this;
+    // A warning keeps to its line; where the folder will not fit beside it, it goes under.
+    const warned = `⚠ ${config.warning}`;
+    const beside = config.where && visibleWidth(`${warned} · ${config.where}`) + 2 <= width;
+    const warning = beside ? `${warned} · ${config.where}` : warned;
+    const under = config.warning && config.where && !beside ? config.where : null;
     const rows = [
       rule(width),
       spread(
@@ -220,16 +232,34 @@ export class ChoicePrompt {
       "",
       // A harness's text can hold line breaks, which would throw the rows off.
       ...wrap(`  ${style.bold(oneLineText(config.title))}`, width, "  "),
+      ...(config.warning ? wrap(`  ${style.removed(warning)}`, width, "    ") : []),
+      ...(under ? [truncate(`  ${style.removed(under)}`, width)] : []),
     ];
     const detail = config.detail.flatMap((text) => {
       const lines = plainText(text).replace(/\s+$/, "").split("\n");
-      // A diff's header, at its top, is not a change, though it starts with --- and +++.
-      const head = lines.length - diffBody(lines).length;
-      return lines.flatMap((line, index) => detailRows(line, width, index >= head));
+      // Only a diff: the same marks in a command can name what it would touch.
+      const hunks = config.diff ? lines.findIndex((line) => line.startsWith("@@")) : -1;
+      // A diff's header says again the file named above it, in the same marks as its changes.
+      const head =
+        hunks === -1
+          ? lines
+          : lines.slice(0, hunks).filter((line) => !/^(?:---|\+\+\+) /.test(line));
+      // Quiet context lets the changes stand out.
+      const body = hunks === -1 ? [] : lines.slice(hunks);
+      return [
+        ...head.flatMap((line) => detailRows(line, width, asked)),
+        ...body.flatMap((line) =>
+          detailRows(line, width, line.startsWith("@@") ? style.muted : style.text),
+        ),
+      ];
     });
-    const entries: ChoiceOption[] = config.options.map((option) => ({
+    const entries: ChoiceOption[] = config.options.map((option, index) => ({
       label: oneLineText(option.label),
-      description: oneLineText(option.description),
+      description: oneLineText(
+        index === this.#index
+          ? option.description
+          : option.description || (option.unselected ?? ""),
+      ),
     }));
     if (config.allowOther) entries.push({ label: "Other…", description: "type your own answer" });
     const choices = this.#choiceRows(entries, width);
@@ -294,11 +324,11 @@ export class ChoicePrompt {
         cursor: { row: offset + layout.cursor.row, column: layout.cursor.column },
       };
     }
-    // The numbers on the choices say they pick, so no hint does.
-    const keys = ["↑↓ navigate"];
+    const keys = [width >= 60 ? "↑↓ move or press a number" : "↑↓ move"];
     if (config.multiSelect) keys.push("space toggle");
-    if (this.#commentable) keys.push("tab comment");
-    keys.push(...(frame.keys ?? []), "enter confirm", "esc cancel");
+    if (this.#commentable)
+      keys.push(`tab ${width >= 60 ? "add a " : ""}${config.comment ?? "comment"}`);
+    keys.push(...(frame.keys ?? []), "enter confirm", `esc ${config.escape ?? "cancel"}`);
     rows.push(rule(width), hints(keys, width));
     return { rows, cursor: null };
   }
@@ -327,7 +357,8 @@ export class ChoicePrompt {
     for (const [index, option] of entries.entries()) {
       const current = index === this.#index;
       const paint = (text: string) =>
-        current ? style.bold(style.strong(text)) : style.muted(text);
+        // Faint would read as disabled, when these are the alternatives to compare.
+        current ? style.bold(style.strong(text)) : style.text(text);
       const number = String(index + 1).padStart(digits);
       const box =
         config.multiSelect && index !== this.#otherIndex
@@ -335,7 +366,9 @@ export class ChoicePrompt {
             ? "☑ "
             : "☐ "
           : "";
-      const head = `  ${current ? paint(number) : style.faint(number)}  ${paint(box)}`;
+      // Bold alone is lost on a terminal that shows it faintly, as a menu's marker knows.
+      const gutter = current ? style.strong("› ") : "  ";
+      const head = `${gutter}${current ? paint(number) : style.faint(number)}  ${paint(box)}`;
       const gap = " ".repeat(
         Math.max(0, column - visibleWidth(option.label) - visibleWidth(box)) + 2,
       );

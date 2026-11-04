@@ -373,9 +373,9 @@ export class ResumeView {
     const keys = this.#renaming
       ? ["enter rename", "esc back"]
       : this.#lineage
-        ? ["↑↓ navigate", "enter go in", "← back out", "esc close"]
+        ? ["↑↓ move", "enter go in", "← back out", "esc close"]
         : [
-            "↑↓ navigate",
+            "↑↓ move",
             "tab scope",
             "ctrl+r rename",
             this.#scope === "archived" ? "ctrl+a unarchive" : "ctrl+a archive",
