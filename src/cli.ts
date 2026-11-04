@@ -40,6 +40,7 @@ import { MCP_HELP, mcpBridge } from "./client/mcp-bridge.ts";
 import { opCommand } from "./client/ops-cli.ts";
 import { packagesCommand } from "./client/packages-cli.ts";
 import { watch } from "./client/watch.ts";
+import { MODE_DESCRIPTIONS } from "./core/wording.ts";
 import { Store, StoreLocked } from "./store/store.ts";
 import { App, type ServerInfo } from "./tui/app.ts";
 
@@ -48,16 +49,39 @@ const help = `1harness, or 1h for short
 One terminal UI for ${labels.length > 1 ? `${labels.slice(0, -1).join(", ")}, and ${labels.at(-1)}` : labels.join("")}.
 
 Usage: 1harness [options] [prompt]
-       1harness server <command>   run, start, stop, or check the server
-       1harness harnesses          say which harnesses are ready, need signing in, or are missing
-       1harness threads [words]    list this folder's threads, or search them; show <id> prints one
-       1harness watch              report every thread's status to the terminal (OSC 7501)
-       1harness op [name] [k=v…]   list what 1harness can do, or do it: open, steer, or move threads
-       1harness mcp                serve that to agents 1harness does not run, as an MCP server
-       1harness acp                be an Agent Client Protocol agent for editors, over every harness
-       1harness hosts <command>    name servers on other machines, for -S
-       1harness packages <command> install extensions and skills from npm, git, or a folder
-       1harness whoami             who the server takes you to be
+       1harness <command>
+
+Examples:
+  1harness                          start in this folder
+  1harness "fix the failing test"   start on a task
+  1harness --mode supervised        ask before edits and commands
+  1harness -p "summarize this repo" answer once, with no UI, and exit
+  1harness -r 3f9c2a1b              come back to a thread
+
+What the agent may do without asking (--mode):
+${RUNTIME_MODES.map(
+  (mode) =>
+    `  ${mode.padEnd(13)}${MODE_DESCRIPTIONS[mode]}${mode === DEFAULT_RUNTIME_MODE ? " (default, unless settings.json says otherwise)" : ""}`,
+).join("\n")}
+${
+  DEFAULT_RUNTIME_MODE === "full-access"
+    ? `
+By default agents run commands and change files without asking. Use --mode
+supervised, or "mode" in ~/.config/1harness/settings.json, to be asked first.
+`
+    : ""
+}
+Commands:
+  server <command>    run, start, stop, or check the server
+  harnesses           show which harnesses are ready, need signing in, or are missing
+  threads [words]     list this folder's threads, or search them; show <id> prints one
+  watch               report every thread's status to the terminal (OSC 7501)
+  op [name] [k=v…]    list 1harness's operations, or run one: open, steer, or move threads
+  mcp                 offer those to agents 1harness does not run, as an MCP server
+  acp                 act as an Agent Client Protocol agent for editors, over every harness
+  hosts <command>     name servers on other machines, for -S
+  packages <command>  install extensions and skills from npm, git, or a folder
+  whoami              show who the server takes you to be
 
 Threads run in the 1harness server, which keeps them working after the
 terminal quits; it starts in the background when none is running.
@@ -65,13 +89,13 @@ terminal quits; it starts in the background when none is running.
 Options:
   -H, --harness <name>   ${drivers()
     .map((driver) => driver.id)
-    .join(", ")} (default: "harness" in
-                         ~/.config/1harness/settings.json, which ctrl+s in a harness pick
-                         sets, else the one used last; the first run asks)
+    .join(", ")}
+                         (default: "harness" in ~/.config/1harness/settings.json,
+                         which ctrl+s in a harness list sets, else the one used
+                         last; the first run asks)
   -m, --model <id>       model to use (default: the harness's default)
   -e, --effort <level>   reasoning effort
-      --mode <mode>      supervised, auto-edit, auto, or full-access (default: "mode"
-                         in ~/.config/1harness/settings.json, else ${DEFAULT_RUNTIME_MODE})
+      --mode <mode>      what the agent may do without asking; see above
       --plan             start in plan mode
   -C, --cwd <dir>        working folder (default: current folder; on another
                          machine's server, its home)
