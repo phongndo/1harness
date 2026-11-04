@@ -342,6 +342,8 @@ export class App {
   #held: string[] = [];
   /** Takes back the line saying they wait, which reads as stale once they have gone. */
   #heldNote: (() => void) | null = null;
+  /** The thread on screen when they were typed, which they were meant for; null for none yet. */
+  #heldFor: string | null = null;
   /** Images pasted into the composer, by the `[Image #N]` that stands for each until it is sent. */
   #images = new Map<string, PastedImage>();
   #imageCount = 0;
@@ -1043,7 +1045,10 @@ export class App {
     const held = this.#held.splice(0);
     this.#heldNote?.();
     this.#heldNote = null;
-    if (this.#live) {
+    // Gone elsewhere, or the thread never opened: they were not meant for what is there now.
+    const meant = this.#heldFor === null || this.#heldFor === this.#live?.id;
+    this.#heldFor = null;
+    if (this.#live && meant) {
       // Queued rather than steered, so each is its own turn, as typed.
       for (const text of held) this.#send(text, false);
     } else
@@ -2256,6 +2261,7 @@ export class App {
         const view = this.#view;
         const said = view.say("info", "Sent once the thread opens.");
         this.#heldNote = () => view.unsay(said);
+        this.#heldFor = this.#live?.id ?? null;
         this.#schedule();
       }
       this.#held.push(message);

@@ -395,6 +395,37 @@ describe("App", () => {
     }
   });
 
+  it("does not send what was held for a thread that failed to open to the one before it", async () => {
+    let fail!: (error: Error) => void;
+    const failing = new Promise<void>((_, reject) => (fail = reject));
+    const made: ScriptedSession[] = [];
+    const unregisterTwice = registerDriver({
+      id: "twice",
+      label: "Twice",
+      unavailable: () => null,
+      create: (options) => {
+        const one = new ScriptedSession(options);
+        if (made.length > 0) one.start = () => failing;
+        made.push(one);
+        return one;
+      },
+    });
+    try {
+      const session = await start({ harness: "twice", prompt: "first" });
+      await session.sees("Done with first");
+      await session.type("/new\r");
+      while (made.length < 2) await settle();
+      await settle(50);
+      await session.type("for the new one\r");
+      await session.sees("Sent once the thread opens");
+      fail(new Error("no way in"));
+      await session.sees(/^for the new one/m);
+      assert.deepEqual(made[0]?.prompts, ["first"]);
+    } finally {
+      unregisterTwice();
+    }
+  });
+
   it("hands what it held back to the composer, with the draft, when no thread opens", async () => {
     let fail!: (error: Error) => void;
     const failed = new Promise<void>((_, reject) => (fail = reject));
