@@ -12,6 +12,10 @@
     "./extension": {
       "types": "./src/extensions/api.ts",
       "default": "./dist/extensions/api.js"
+    },
+    "./client": {
+      "types": "./src/client/api.ts",
+      "default": "./dist/client/api.js"
     }
   },
   "scripts": {

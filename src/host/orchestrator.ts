@@ -289,7 +289,7 @@ export class Orchestrator {
               type: "string",
               enum: ISOLATIONS,
               description:
-                "shared is your folder. Default: worktree for role implementation in a git repository, else shared.",
+                "shared, the default, is your folder. worktree is a git worktree and branch of its own, without uncommitted changes.",
             },
             wait: {
               type: "boolean",
@@ -712,7 +712,7 @@ export class Orchestrator {
     const role = text(input, "role");
     if (role && !ROLES.includes(role))
       throw new OperationError("invalid_request", `no role ${role}`);
-    const repo = await this.#worktreeRepository(info.cwd, role, text(input, "isolation"));
+    const repo = await this.#worktreeRepository(info.cwd, text(input, "isolation"));
     const sameHarness = harness === caller.harness;
 
     const counts = this.#counts(caller);
@@ -781,17 +781,12 @@ export class Orchestrator {
   }
 
   /** The repository a task gets a worktree of, or null for one that works in the caller's folder. */
-  async #worktreeRepository(
-    cwd: string,
-    role: string | undefined,
-    isolation: string | undefined,
-  ): Promise<string | null> {
+  async #worktreeRepository(cwd: string, isolation: string | undefined): Promise<string | null> {
     if (isolation && !ISOLATIONS.includes(isolation))
       throw new OperationError("invalid_request", `no isolation ${isolation}`);
-    if ((isolation ?? (role === "implementation" ? "worktree" : "shared")) === "shared")
-      return null;
+    if (isolation !== "worktree") return null;
     const repo = await gitRepository(cwd);
-    if (!repo && isolation)
+    if (!repo)
       throw new OperationError(
         "invalid_request",
         `${cwd} is not in a git repository, so a task there cannot have a worktree`,
