@@ -98,18 +98,42 @@ interface Session {
   type(text: string): Promise<void>;
   /** Waits until the screen shows something. */
   sees(pattern: RegExp | string, timeoutMs?: number): Promise<string>;
+  /**
+   * Waits until a message's turn has ended with its scripted reply. The reply
+   * streams in before the turn ends, so showing it does not mean the turn is over.
+   */
+  replied(message: string): Promise<string>;
   quit(): Promise<string | undefined>;
 }
 
 const sessions: Session[] = [];
 
-afterEach(async () => {
-  for (const session of sessions.splice(0)) {
+/** Leaves an App the way a user does, however the test left it. */
+async function close(session: Session): Promise<void> {
+  let returned = false;
+  const markReturned = () => (returned = true);
+  session.done.then(markReturned, markReturned);
+  // A harness start that never settles keeps run() from returning after the App has left.
+  const closed = () => returned || session.terminal.raw.includes("\x1b[?1049l");
+  // A ctrl+c may clear the composer or stop a turn instead of counting toward
+  // leaving, and a prompt takes keys that come quickly for stray typing, so
+  // press on, further and further apart. An App still animating a turn would
+  // keep the test process from ever exiting.
+  const deadline = Date.now() + 5000;
+  for (let wait = 10; !closed() && Date.now() < deadline; wait *= 2) {
     session.keyboard.write("\x03\x03");
-    await Promise.race([session.done, settle(500)]);
+    await settle(wait);
   }
-  Object.defineProperty(process, "stdout", realStdout);
-  Object.defineProperty(process, "stdin", realStdin);
+  assert.ok(closed(), `The App never closed:\n${session.terminal.text()}`);
+}
+
+afterEach(async () => {
+  try {
+    for (const session of sessions.splice(0)) await close(session);
+  } finally {
+    Object.defineProperty(process, "stdout", realStdout);
+    Object.defineProperty(process, "stdin", realStdin);
+  }
 });
 
 async function start(
@@ -180,6 +204,10 @@ async function start(
           throw new Error(`The screen never showed ${String(pattern)}:\n${text}`);
         await settle(10);
       }
+    },
+    replied(message) {
+      const reply = `Done with ${message}`.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+      return session.sees(new RegExp(`${reply}[\\s\\S]*✓ Done`));
     },
     async quit() {
       keyboard.write("/quit\r");
@@ -272,7 +300,7 @@ describe("extensions on screen", () => {
         );
       }`);
     const session = await start({ extensions: [path], prompt: "go TOOL" });
-    await session.sees("Done with go TOOL");
+    await session.replied("go TOOL");
     await session.type("\x18");
     await session.sees("Looked through the docs for parsers");
   });
@@ -293,16 +321,16 @@ describe("skills on screen", () => {
     await session.sees("Tidies a file");
     await session.type("\x15$tidy the parser\r");
     await session.sees("Tidy it well");
-    await session.sees(/Done with <skill name="tidy"/);
+    await session.replied(`<skill name="tidy"`);
     await session.type("$5 a month\r");
-    await session.sees("Done with $5 a month");
+    await session.replied("$5 a month");
   });
 });
 
 describe("App", () => {
   it("runs a prompt given on start, then says how to resume its thread on quitting", async () => {
     const session = await start({ prompt: "fix the parser" });
-    const screen = await session.sees("Done with fix the parser");
+    const screen = await session.replied("fix the parser");
     // The user's message, then what the turn did, then the reply.
     assert.match(
       rowsFrom(screen, "┃ fix the parser"),
@@ -324,9 +352,9 @@ describe("App", () => {
     await session.type("first message");
     assert.match(await session.sees("first message"), /^first message/m);
     await session.type("\r");
-    await session.sees("Done with first message");
+    await session.replied("first message");
     await session.type("second\r");
-    const screen = await session.sees("Done with second");
+    const screen = await session.replied("second");
     assert.ok(screen.indexOf("Done with first message") < screen.indexOf("┃ second"));
     // The composer empties once a message is sent.
     assert.match(screen, /^Ask anything/m);
@@ -368,7 +396,7 @@ describe("App", () => {
       await session.type("try this\r");
       await session.sees("enter resends your message");
       await session.type("\r");
-      await session.sees("Done with try this");
+      await session.replied("try this");
       assert.deepEqual(flaky[0]?.prompts, ["try this", "try this"]);
     } finally {
       unregisterFlaky();
@@ -426,7 +454,7 @@ describe("App", () => {
 
       error = "";
       await session.type("\r\r");
-      await session.sees("Done with try this");
+      await session.replied("try this");
       await settle(100);
       assert.deepEqual(flaky[0]?.prompts, ["wait for it", "try this", "try this"]);
     } finally {
@@ -436,7 +464,7 @@ describe("App", () => {
 
   it("keeps the frame to the screen when there is no room for the transcript", async () => {
     const session = await start({ prompt: "alpha" });
-    await session.sees("Done with alpha");
+    await session.replied("alpha");
     for (const rows of [4, 5, 6]) {
       session.terminal.raw = "";
       session.terminal.rows = rows;
@@ -466,7 +494,7 @@ describe("App", () => {
       await session.type("later\r");
       assert.doesNotMatch(session.terminal.text(), /No thread is open/);
       open();
-      const screen = await session.sees(/Done with early[\s\S]*Done with later/);
+      const screen = await session.sees(/Done with early[\s\S]*Done with later[\s\S]*✓ Done/);
       assert.ok(screen.indexOf("Done with early") < screen.indexOf("┃ later"));
       // Neither message is left behind in the composer.
       assert.match(screen, /^Ask anything/m);
@@ -504,7 +532,7 @@ describe("App", () => {
       await session.type("eager\r");
       await session.sees("Sent once the thread opens");
       open();
-      const screen = await session.sees("Done with eager");
+      const screen = await session.replied("eager");
       assert.doesNotMatch(screen, /has not started|Sent once/);
     } finally {
       unregisterSlow();
@@ -528,7 +556,7 @@ describe("App", () => {
     });
     try {
       const session = await start({ harness: "twice", prompt: "first" });
-      await session.sees("Done with first");
+      await session.replied("first");
       await session.type("/new\r");
       while (made.length < 2) await settle();
       await settle(50);
@@ -742,13 +770,13 @@ describe("App commands", () => {
       await session.type("\x15/tidy\r");
       await session.sees("Unknown command /tidy. $tidy runs the skill.");
       await session.type("$tidy the docs\r");
-      await session.sees("Done with /tidy the docs");
+      await session.replied("/tidy the docs");
       // A `$` that names no skill is a message.
       await session.type("$5 a month\r");
-      await session.sees("Done with $5 a month");
+      await session.replied("$5 a month");
       // So is a path, as an image that is not there leaves.
       await session.type("/tmp/gone.png\r");
-      await session.sees("Done with /tmp/gone.png");
+      await session.replied("/tmp/gone.png");
       // A queued skill comes back as typed.
       await session.type("hold\r");
       await session.sees("enter queues for after this turn");
@@ -777,7 +805,7 @@ describe("App commands", () => {
 
   it("shows the session in /status and switches modes from /mode", async () => {
     const session = await start({ prompt: "hello" });
-    await session.sees("Done with hello");
+    await session.replied("hello");
     await session.type("/status\r");
     const status = await session.sees(/Status\n/);
     assert.match(status, /Harness\s+Scripted/);
@@ -825,7 +853,7 @@ describe("App threads and keys", () => {
       await session.type(`what is \x1b[200~${shot.replaceAll(" ", "\\ ")}\x1b[201~`);
       await session.sees(/^what is \[Image #1\]/m);
       await session.type("\r");
-      await session.sees("Done with what is [Image #1]");
+      await session.replied("what is [Image #1]");
       const [image] = received.at(-1)?.images ?? [];
       assert.ok(image);
       assert.equal(readFileSync(image, "utf8"), "png bytes");
@@ -874,7 +902,7 @@ describe("App threads and keys", () => {
       await session.type(`\x1b[200~${log}\x1b[201~`);
       await session.sees(/^line 11 \[Pasted text #3 \+12 lines\]/m);
       await session.type("\r");
-      await session.sees("Done with why line 1");
+      await session.replied("why line 1");
       assert.equal(received.at(-1)?.text, `why ${log.split("\n").slice(0, 11).join("\n")} ${log}`);
     } finally {
       unregisterReading();
@@ -883,11 +911,11 @@ describe("App threads and keys", () => {
 
   it("opens another thread with /new, and switches back to the first from ctrl+t", async () => {
     const session = await start({ prompt: "alpha" });
-    await session.sees("Done with alpha");
+    await session.replied("alpha");
     await session.type("/new\r");
     await session.sees("New scripted thread");
     await session.type("beta\r");
-    const second = await session.sees("Done with beta");
+    const second = await session.replied("beta");
     // A new thread starts with an empty transcript.
     assert.doesNotMatch(second, /Done with alpha/);
     await session.type("\x14");
@@ -902,7 +930,7 @@ describe("App threads and keys", () => {
 
   it("starts /new on the harness, model, and effort it names", async () => {
     const session = await start({ prompt: "alpha" });
-    await session.sees("Done with alpha");
+    await session.replied("alpha");
     await session.type("/new scripted small high\r");
     await session.sees("New scripted thread");
     await session.type("/status\r");
@@ -916,7 +944,7 @@ describe("App threads and keys", () => {
 
   it("says why the thread list could not load, rather than that there are no threads", async () => {
     const session = await start({ prompt: "alpha" });
-    await session.sees("Done with alpha");
+    await session.replied("alpha");
     const call = session.client.call.bind(session.client);
     session.client.call = ((method: string, params: unknown) =>
       method === "threads.list"
@@ -939,7 +967,7 @@ describe("App threads and keys", () => {
     });
     try {
       const session = await start({ prompt: "alpha" });
-      await session.sees("Done with alpha");
+      await session.replied("alpha");
       // A server sends back every error as an RpcError.
       const call = session.client.call.bind(session.client);
       session.client.call = ((method: string, params: unknown) =>
@@ -964,7 +992,7 @@ describe("App threads and keys", () => {
     // Keys typed as the prompt came were meant for what it covered; after a pause they count.
     await settle(450);
     await session.type("\r");
-    const screen = await session.sees("Done with look ASK");
+    const screen = await session.replied("look ASK");
     assert.doesNotMatch(screen, /Permission needed/);
   });
 
@@ -994,7 +1022,7 @@ describe("App threads and keys", () => {
     });
     try {
       const session = await start({ harness: "counted", prompt: "alpha" });
-      await session.sees("Done with alpha");
+      await session.replied("alpha");
       mcp("after");
       await session.type("/reload\r");
       await session.sees("Reloaded the harness's session.");
@@ -1007,7 +1035,7 @@ describe("App threads and keys", () => {
         ["before", "after"],
       );
       await session.type("beta\r");
-      await session.sees("Done with beta");
+      await session.replied("beta");
       // A second /reload while the first starts the session is refused, and
       // leaves the first's 1harness MCP server working.
       const hold = Promise.withResolvers<void>();
@@ -1036,7 +1064,7 @@ describe("App threads and keys", () => {
 
   it("renames the thread with /rename", async () => {
     const session = await start({ prompt: "alpha" });
-    await session.sees("Done with alpha");
+    await session.replied("alpha");
     await session.type("/rename Parser work\r");
     await session.sees(/Renamed \w+: Parser work/);
     const id = [...session.client.threads.keys()][0]!;
@@ -1045,7 +1073,7 @@ describe("App threads and keys", () => {
 
   it("brings the work ctrl+x expands into view, and goes back down after", async () => {
     const session = await start({ prompt: "go" });
-    await session.sees("Done with go");
+    await session.replied("go");
     session.terminal.rows = 12;
     session.terminal.emit("resize");
     await settle(30);
@@ -1061,7 +1089,7 @@ describe("App threads and keys", () => {
 
   it("shows tool output whole with ctrl+x, and in brief again", async () => {
     const session = await start({ prompt: "alpha" });
-    const brief = await session.sees("Done with alpha");
+    const brief = await session.replied("alpha");
     assert.match(brief, /Ran 1 command/);
     assert.doesNotMatch(brief, /ok 1/);
     await session.type("\x18");

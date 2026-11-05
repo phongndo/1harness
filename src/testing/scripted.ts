@@ -153,7 +153,9 @@ export class ScriptedSession {
       });
       return;
     }
-    setTimeout(finish, 2);
+    // Longer than a frame and a test's look at the screen, so a test that takes
+    // the streamed reply for the turn's end fails every time, not once in a while.
+    setTimeout(finish, 30);
   }
 
   async steer(): Promise<void> {}
