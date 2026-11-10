@@ -56,6 +56,9 @@ describe("ToolServer", () => {
         (await post({ jsonrpc: "2.0", method: "notifications/initialized" })).status,
         202,
       );
+      const malformed = await post(null);
+      assert.equal((malformed.body as { error: { code: number } }).error.code, -32600);
+      assert.equal((await post([])).status, 400);
       const list = await post({ jsonrpc: "2.0", id: 2, method: "tools/list" });
       assert.deepEqual((list.body as { result: { tools: unknown[] } }).result.tools, [
         {
@@ -122,6 +125,47 @@ describe("ToolServer", () => {
 
   it("offers nothing when no extension has a tool", async () => {
     assert.equal(await new ToolServer(() => new Map(), "1").grant(), null);
+  });
+
+  it("closes while a streaming tool call is still pending", async () => {
+    const started = Promise.withResolvers<void>();
+    const result = Promise.withResolvers<string>();
+    const tool: ToolDefinition = {
+      name: "wait",
+      description: "",
+      inputSchema: {},
+      execute: () => {
+        started.resolve();
+        return result.promise;
+      },
+    };
+    const server = new ToolServer(() => new Map([[tool.name, { tool }]]), "test");
+    const grant = await server.grant();
+    assert.ok(grant && grant.config.type === "http");
+    grant.bind({ callId: () => null } as unknown as Thread);
+    const response = await fetch(grant.config.url, {
+      method: "POST",
+      headers: { ...grant.config.headers, Accept: "text/event-stream" },
+      body: JSON.stringify({ id: 1, method: "tools/call", params: { name: tool.name } }),
+    });
+    const body = response.text().catch(() => "");
+    await started.promise;
+    const closed = server.close();
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const outcome = await Promise.race([
+        closed.then(() => "closed"),
+        new Promise<string>((resolve) => {
+          timer = setTimeout(resolve, 500, "still open");
+        }),
+      ]);
+      assert.equal(outcome, "closed");
+    } finally {
+      clearTimeout(timer);
+      result.resolve("done");
+      await closed;
+      await body;
+    }
   });
 
   it("keeps disabled tools out of sessions' lists and calls, as settings stand each time", async () => {

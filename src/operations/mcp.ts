@@ -50,12 +50,43 @@ export function mcpTool(operation: OperationInfo) {
   };
 }
 
+function object(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /** The reply to one MCP message, or null for a notification. */
-export async function mcpReply(message: JsonRpcMessage, endpoint: McpEndpoint): Promise<unknown> {
-  if (message.id === undefined || message.id === null) return null;
-  const id = message.id;
-  const params = message.params ?? {};
-  switch (message.method) {
+export async function mcpReply(message: unknown, endpoint: McpEndpoint): Promise<unknown> {
+  if (
+    !object(message) ||
+    typeof message["method"] !== "string" ||
+    (message["jsonrpc"] !== undefined && message["jsonrpc"] !== "2.0")
+  )
+    return rpcError(null, -32600, "Invalid request");
+  const id = message["id"];
+  if (
+    id !== undefined &&
+    id !== null &&
+    typeof id !== "string" &&
+    !(typeof id === "number" && Number.isFinite(id))
+  )
+    return rpcError(null, -32600, "Invalid request ID");
+  if (id === undefined || id === null) return null;
+  const params = message["params"] === undefined ? {} : message["params"];
+  if (!object(params)) return rpcError(id, -32602, "params must be a JSON object");
+  try {
+    return await reply(message["method"], id, params, endpoint);
+  } catch (error) {
+    return rpcError(id, -32603, errorMessage(error));
+  }
+}
+
+async function reply(
+  method: string,
+  id: string | number,
+  params: Record<string, unknown>,
+  endpoint: McpEndpoint,
+): Promise<unknown> {
+  switch (method) {
     case "initialize": {
       const asked = String(params["protocolVersion"] ?? "");
       return {
@@ -74,12 +105,15 @@ export async function mcpReply(message: JsonRpcMessage, endpoint: McpEndpoint): 
     case "tools/list":
       return { jsonrpc: "2.0", id, result: { tools: (await endpoint.tools()).map(mcpTool) } };
     case "tools/call": {
-      const name = String(params["name"] ?? "");
+      const name = params["name"];
+      if (typeof name !== "string") return rpcError(id, -32602, "name must be a string");
+      const input = params["arguments"] === undefined ? {} : params["arguments"];
+      const meta = params["_meta"] === undefined ? {} : params["_meta"];
+      if (!object(input) || !object(meta))
+        return rpcError(id, -32602, "arguments and _meta must be JSON objects");
       if (!(await endpoint.tools()).some((tool) => tool.name === name))
         return rpcError(id, -32602, `No tool named ${name}`);
       try {
-        const input = (params["arguments"] ?? {}) as Record<string, unknown>;
-        const meta = (params["_meta"] ?? {}) as Record<string, unknown>;
         return { jsonrpc: "2.0", id, result: mcpContent(await endpoint.call(name, input, meta)) };
       } catch (error) {
         return {
@@ -90,7 +124,7 @@ export async function mcpReply(message: JsonRpcMessage, endpoint: McpEndpoint): 
       }
     }
     default:
-      return rpcError(id, -32601, `Method not found: ${message.method}`);
+      return rpcError(id, -32601, `Method not found: ${method}`);
   }
 }
 

@@ -26,6 +26,10 @@ export async function serveMcp(
     sendJson(response, 400, rpcError(null, -32700, errorMessage(error)));
     return;
   }
+  if (Array.isArray(body) && body.length === 0) {
+    sendJson(response, 400, rpcError(null, -32600, "An empty batch is not a request"));
+    return;
+  }
   const messages = (Array.isArray(body) ? body : [body]) as JsonRpcMessage[];
   // A tool call can wait on other work, so it streams where the client takes a stream.
   const single = Array.isArray(body) ? undefined : messages[0];
@@ -56,9 +60,10 @@ async function stream(response: ServerResponse, reply: Promise<unknown>): Promis
   response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
   response.flushHeaders();
   const timer = setInterval(() => response.write(": keepalive\n\n"), KEEPALIVE_MS);
+  response.once("close", () => clearInterval(timer));
   try {
     const message = await reply;
-    response.end(`event: message\ndata: ${JSON.stringify(message)}\n\n`);
+    if (!response.destroyed) response.end(`event: message\ndata: ${JSON.stringify(message)}\n\n`);
   } finally {
     clearInterval(timer);
   }

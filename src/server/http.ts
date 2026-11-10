@@ -250,14 +250,24 @@ export class HostServer {
   async #rpc(client: string, request: IncomingMessage, response: ServerResponse): Promise<void> {
     let body: { method?: unknown; params?: unknown };
     try {
-      body = JSON.parse(await readBody(request, MAX_BODY_BYTES)) as typeof body;
+      const parsed: unknown = JSON.parse(await readBody(request, MAX_BODY_BYTES));
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+        throw new Error("the request must be a JSON object");
+      body = parsed;
+      if (typeof body.method !== "string" || body.method === "")
+        throw new Error("method must be a nonempty string");
+      if (
+        body.params !== undefined &&
+        (typeof body.params !== "object" || body.params === null || Array.isArray(body.params))
+      )
+        throw new Error("params must be a JSON object");
     } catch (error) {
       sendJson(response, 400, {
         error: { code: "invalid_request", message: errorBody(error).message },
       });
       return;
     }
-    const method = String(body.method);
+    const method = body.method as string;
     const requestId = READS.has(method) ? null : header(request, REQUEST_HEADER);
     const remembered = requestId ? this.#remembered(client) : null;
     let answer = requestId ? remembered?.answers.get(requestId) : undefined;

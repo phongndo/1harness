@@ -288,7 +288,7 @@ export function acpDriver(
  */
 export function registerConfiguredAgents(configDir: string): string[] {
   const file = join(configDir, "agents.json");
-  let parsed: { agents?: Record<string, Partial<AcpAgentSpec>> };
+  let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(file, "utf8")) as typeof parsed;
   } catch (error) {
@@ -296,10 +296,38 @@ export function registerConfiguredAgents(configDir: string): string[] {
       ? []
       : [`${file}: ${errorMessage(error)}`];
   }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+    return [`${file}: agents.json must be a JSON object`];
+  const agents = (parsed as { agents?: unknown }).agents;
+  if (agents === undefined) return [];
+  if (typeof agents !== "object" || agents === null || Array.isArray(agents))
+    return [`${file}: agents must be a map of agent definitions`];
   const warnings: string[] = [];
-  for (const [id, agent] of Object.entries(parsed.agents ?? {})) {
-    if (typeof agent.command !== "string") {
+  for (const [id, value] of Object.entries(agents)) {
+    const agent = value as Partial<AcpAgentSpec> | null;
+    if (typeof agent?.command !== "string" || !agent.command.trim()) {
       warnings.push(`${file}: ${id}: needs a command`);
+      continue;
+    }
+    if (agent.label !== undefined && typeof agent.label !== "string") {
+      warnings.push(`${file}: ${id}: label must be a string`);
+      continue;
+    }
+    if (
+      agent.args !== undefined &&
+      (!Array.isArray(agent.args) || agent.args.some((arg) => typeof arg !== "string"))
+    ) {
+      warnings.push(`${file}: ${id}: args must be a list of strings`);
+      continue;
+    }
+    if (
+      agent.env !== undefined &&
+      (typeof agent.env !== "object" ||
+        agent.env === null ||
+        Array.isArray(agent.env) ||
+        Object.values(agent.env).some((entry) => typeof entry !== "string"))
+    ) {
+      warnings.push(`${file}: ${id}: env must map names to strings`);
       continue;
     }
     registerDriver(

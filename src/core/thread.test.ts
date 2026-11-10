@@ -124,6 +124,40 @@ async function setup() {
 }
 
 describe("Thread", () => {
+  it("does not reopen a request resolved while its handler was waiting", async () => {
+    const { thread, session } = await setup();
+    const { promise, resolve } = Promise.withResolvers<undefined>();
+    thread.addRequestHandler(() => promise);
+    session.events.push(approval("slow", "ls"));
+    await settle();
+    session.events.push({ type: "request.resolved", requestId: "slow" });
+    await settle();
+    resolve(undefined);
+    await settle();
+    assert.deepEqual(thread.requests, []);
+    await thread.close();
+  });
+
+  it("does not send a delayed handler's answer to a replacement session", async () => {
+    const { thread, session } = await setup();
+    const { promise, resolve } = Promise.withResolvers<{ kind: "cancel" }>();
+    thread.addRequestHandler(() => promise);
+    session.events.push(approval("slow", "ls"));
+    await settle();
+    session.events.end();
+    await settle();
+    const next = new FakeSession();
+    let answered = false;
+    next.respond = async () => {
+      answered = true;
+    };
+    await thread.replaceSession([attempt(next)]);
+    resolve({ kind: "cancel" });
+    await settle();
+    assert.equal(answered, false);
+    await thread.close();
+  });
+
   it("queues sends while busy and starts the next turn when one ends", async () => {
     const { session, thread } = await setup();
     thread.send({ text: "first" });

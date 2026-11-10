@@ -64,6 +64,16 @@ function row(id: string, overrides: Partial<ThreadRow> = {}): ThreadRow {
 const message = (id: string) => ({ id, input: { text: id }, origin: { type: "user" as const } });
 
 describe("Store", () => {
+  it("releases its lock when migration refuses a newer store", () => {
+    const path = join(root, "newer.db");
+    Store.open(path).close();
+    const db = new DatabaseSync(path);
+    db.exec("UPDATE meta SET value = '999' WHERE key = 'schema'");
+    db.close();
+    for (let attempt = 0; attempt < 2; attempt++)
+      assert.throws(() => Store.open(path), /newer 1harness/);
+  });
+
   it("finds threads by the start of their IDs", () => {
     const store = Store.memory();
     store.saveThread(row("3f9c2a1b-0000-4000-8000-000000000001", { updatedAt: 1 }));

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -19,6 +19,41 @@ const env = (name: string): NodeJS.ProcessEnv => ({
 });
 
 describe("runServer", () => {
+  it("leaves an ordinary file at its socket path alone and releases the store", async () => {
+    const socket = join(root, "occupied.sock");
+    writeFileSync(socket, "keep me");
+    const options = {
+      version: "test",
+      socket,
+      autostarted: false,
+      env: env("occupied"),
+      log: () => {},
+    };
+    const running = await runServer(options).then(
+      (server) => server,
+      (error: unknown) => error,
+    );
+    if (running && typeof running === "object" && "stop" in running)
+      await (running as { stop(): Promise<void> }).stop();
+    assert.ok(running instanceof Error);
+    assert.equal(readFileSync(socket, "utf8"), "keep me");
+    Store.open(storeFile(options.env)).close();
+  });
+
+  it("releases its store if the local listener cannot start", async () => {
+    const blocker = join(root, "parent-file");
+    writeFileSync(blocker, "not a folder");
+    const options = {
+      version: "test",
+      socket: join(blocker, "server.sock"),
+      autostarted: false,
+      env: env("bind-failed"),
+      log: () => {},
+    };
+    await assert.rejects(runServer(options));
+    Store.open(storeFile(options.env)).close();
+  });
+
   it("stops cleanly when a listener it was asked for cannot start", async () => {
     const socket = join(root, "a.sock");
     await assert.rejects(

@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
 import { isIP } from "node:net";
 import { dirname } from "node:path";
@@ -60,6 +60,15 @@ function namesListener(request: IncomingMessage, names: readonly string[]): bool
 
 const WRONG_HOST = { refused: "this 1harness answers only to its own addresses and name" };
 
+/** Makes room for a socket without deleting a file or following a symlink. */
+export function prepareSocket(path: string): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const found = lstatSync(path, { throwIfNoEntry: false });
+  if (!found) return;
+  if (!found.isSocket()) throw new Error(`Refusing to replace ${path}: it is not a socket`);
+  unlinkSync(path);
+}
+
 /** Splits `scheme://host:port` or `scheme://:port`. */
 function hostPort(rest: string, scheme: string): { host: string; port: number } {
   const match = /^(\[[^\]]+\]|[^:]*):(\d+)$/.exec(rest);
@@ -118,8 +127,7 @@ async function open(
           "tailnet-serve:// takes a socket path, as tailnet-serve:///run/1harness.sock",
         );
       const self = await tailnetSelf(tailscale);
-      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-      if (existsSync(path)) unlinkSync(path);
+      prepareSocket(path);
       // Tailscale Serve names the caller; only it can open this socket.
       const authorize: Authorizer = async (request) => {
         const login = request.headers["tailscale-user-login"];

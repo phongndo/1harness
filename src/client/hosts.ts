@@ -22,8 +22,19 @@ export function loadHosts(env: NodeJS.ProcessEnv = process.env): Hosts {
     throw new Error(`Could not read ${path}: ${errorMessage(error)}`, { cause: error });
   }
   try {
-    const parsed = JSON.parse(text) as { hosts?: Hosts };
-    return parsed.hosts ?? {};
+    const parsed: unknown = JSON.parse(text);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+      throw new Error("expected an object with a hosts map");
+    const hosts = (parsed as { hosts?: unknown }).hosts;
+    if (hosts === undefined) return {};
+    if (
+      typeof hosts !== "object" ||
+      hosts === null ||
+      Array.isArray(hosts) ||
+      Object.values(hosts).some((address) => typeof address !== "string" || !address.trim())
+    )
+      throw new Error("hosts must map names to nonempty addresses");
+    return hosts as Hosts;
   } catch (error) {
     throw new Error(`${path} is not valid JSON (${errorMessage(error)}); fix or delete it`, {
       cause: error,
@@ -45,22 +56,30 @@ export function resolveServer(
   spec: string | undefined,
   env: NodeJS.ProcessEnv = process.env,
 ): { target: ServerTarget; label: string; local: boolean } {
-  const value = spec?.trim();
-  if (!value) return { target: { socket: socketFile(env) }, label: "local", local: true };
-  if (value.startsWith("unix:") || value.startsWith("/"))
-    return {
-      target: { socket: value.replace(/^unix:/, "") },
-      label: value,
-      local: true,
-    };
-  if (/^https?:\/\//.test(value)) return { target: { url: value }, label: value, local: false };
-  if (/^[^/\s]+:\d+$/.test(value))
-    return { target: { url: `http://${value}` }, label: value, local: false };
-  const known = loadHosts(env)[value];
-  if (known === undefined)
-    throw new Error(
-      `No server named ${value}; add one with \`1harness hosts add ${value} <address>\``,
-    );
-  if (known === value) throw new Error(`${value} names itself in hosts.json`);
-  return { ...resolveServer(known, env), label: value };
+  let value = spec?.trim();
+  const label = value ?? "local";
+  const aliases = new Set<string>();
+  let hosts: Hosts | undefined;
+  for (;;) {
+    if (!value) return { target: { socket: socketFile(env) }, label: "local", local: true };
+    if (value.startsWith("unix:") || value.startsWith("/"))
+      return {
+        target: { socket: value.replace(/^unix:/, "") },
+        label,
+        local: true,
+      };
+    if (/^https?:\/\//.test(value)) return { target: { url: value }, label, local: false };
+    if (/^[^/\s]+:\d+$/.test(value))
+      return { target: { url: `http://${value}` }, label, local: false };
+    hosts ??= loadHosts(env);
+    const known = Object.hasOwn(hosts, value) ? hosts[value] : undefined;
+    if (known === undefined)
+      throw new Error(
+        `No server named ${value}; add one with \`1harness hosts add ${value} <address>\``,
+      );
+    if (known === value) throw new Error(`${value} names itself in hosts.json`);
+    if (aliases.has(value)) throw new Error(`Host alias cycle: ${[...aliases, value].join(" → ")}`);
+    aliases.add(value);
+    value = known.trim();
+  }
 }
