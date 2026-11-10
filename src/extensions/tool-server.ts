@@ -3,7 +3,9 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { McpServerConfig, ToolPolicy } from "../core/events.ts";
 import type { Thread } from "../core/thread.ts";
 import { ownToolCheck } from "../core/tools.ts";
-import { serveMcp } from "../operations/mcp-http.ts";
+import { sendJson, serveMcp } from "../operations/mcp-http.ts";
+import { rpcError } from "../operations/mcp.ts";
+import { errorMessage } from "../core/errors.ts";
 import type { OperationInfo } from "../operations/operation.ts";
 import type { ToolDefinition } from "./api.ts";
 import { gatewayTools } from "./tool-gateway.ts";
@@ -106,13 +108,22 @@ export class ToolServer {
     const server = this.#server;
     this.#server = null;
     this.#url = null;
-    if (server) await new Promise<void>((done) => server.close(() => done()));
+    this.#grants.clear();
+    if (server)
+      await new Promise<void>((done) => {
+        server.close(() => done());
+        server.closeAllConnections();
+      });
   }
 
   #listen(): Promise<string> {
     this.#url ??= new Promise((resolve, reject) => {
       const server = createServer((request, response) => {
-        void this.#handle(request, response);
+        void this.#handle(request, response).catch((error: unknown) => {
+          if (!response.headersSent)
+            sendJson(response, 500, rpcError(null, -32603, errorMessage(error)));
+          else response.destroy();
+        });
       });
       server.once("error", reject);
       server.listen(0, "127.0.0.1", () => {

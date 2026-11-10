@@ -23,7 +23,7 @@ import { Host } from "../host/host.ts";
 import type { ServerHello } from "../protocol.ts";
 import { Store, StoreLocked } from "../store/store.ts";
 import { HostServer } from "./http.ts";
-import { listen, type ListenerOptions } from "./listeners.ts";
+import { listen, prepareSocket, type ListenerOptions } from "./listeners.ts";
 
 /** How long an autostarted server stays once nobody is connected and nothing is working. */
 const IDLE_EXIT_MS = 10_000;
@@ -78,7 +78,7 @@ export async function runServer(options: RunOptions): Promise<RunningServer | nu
   const env = options.env ?? process.env;
   const socket = options.socket ?? socketFile(env);
   const log = options.log ?? ((line: string) => process.stderr.write(`${line}\n`));
-  // The kernel takes socket paths of at most 107 bytes.
+  // macOS has the smaller Unix socket path limit.
   if (Buffer.byteLength(socket) > MAX_SOCKET_BYTES)
     throw new Error(
       `${socket} is too long for a socket (${Buffer.byteLength(socket)} bytes; at most ${MAX_SOCKET_BYTES}); set ONEHARNESS_SOCKET to a shorter path`,
@@ -117,8 +117,6 @@ export async function runServer(options: RunOptions): Promise<RunningServer | nu
     env,
     retainClosedDays: settings.retainClosedDays,
   });
-  await host.start();
-
   let idleSince: number | null = null;
   const server = new HostServer(host, {
     version: options.version,
@@ -128,17 +126,23 @@ export async function runServer(options: RunOptions): Promise<RunningServer | nu
     },
   });
   let ownSocket = false;
-  if (inherited) await server.listen({ fd: 3 });
-  else {
-    mkdirSync(dirname(socket), { recursive: true, mode: 0o700 });
-    // A socket left by a server that died: nothing answers on it.
-    if (existsSync(socket)) unlinkSync(socket);
-    await server.listen({ path: socket });
-    chmodSync(socket, 0o600);
-    ownSocket = true;
+  try {
+    await host.start();
+    if (inherited) await server.listen({ fd: 3 });
+    else {
+      prepareSocket(socket);
+      await server.listen({ path: socket });
+      ownSocket = true;
+      chmodSync(socket, 0o600);
+    }
+    // Running again, it is no longer stopped on purpose.
+    rmSync(stoppedMark(socket), { force: true });
+  } catch (error) {
+    await server.close();
+    await host.shutdown();
+    if (ownSocket && existsSync(socket)) unlinkSync(socket);
+    throw error;
   }
-  // Running again, it is no longer stopped on purpose.
-  rmSync(stoppedMark(socket), { force: true });
   let stopping: Promise<void> | null = null;
   let finished!: () => void;
   const stopped = new Promise<void>((resolve) => {

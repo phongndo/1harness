@@ -127,10 +127,19 @@ export class JsonRpcPeer {
       error?: { code: number; message: string };
     };
     try {
-      message = JSON.parse(line);
+      const parsed: unknown = JSON.parse(line);
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return;
+      message = parsed;
     } catch {
       return;
     }
+    if (message.method !== undefined && typeof message.method !== "string") return;
+    if (
+      message.id !== undefined &&
+      typeof message.id !== "string" &&
+      !(typeof message.id === "number" && Number.isFinite(message.id))
+    )
+      return;
     if (message.method !== undefined && message.id !== undefined) {
       const id = message.id;
       let answer: Promise<unknown>;

@@ -211,15 +211,15 @@ export class Store {
       db.exec("PRAGMA journal_mode=WAL; PRAGMA locking_mode=EXCLUSIVE; PRAGMA synchronous=NORMAL;");
       // The lock is taken on first use; this takes it now and keeps it.
       db.exec("BEGIN EXCLUSIVE; COMMIT;");
+      const store = new Store(db, path);
+      store.#migrate();
+      return store;
     } catch (error) {
       db.close();
       if (/locked|busy/i.test(error instanceof Error ? error.message : ""))
         throw new StoreLocked(`${path} is in use by another 1harness`, { cause: error });
       throw error;
     }
-    const store = new Store(db, path);
-    store.#migrate();
-    return store;
   }
 
   /** A store that lasts as long as the process, for tests and runs that keep nothing. */

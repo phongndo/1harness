@@ -172,6 +172,8 @@ describe("installing", () => {
     assert.ok(module);
     assert.ok(module.path.startsWith(join(dirs.stateDir, "packages")));
     assert.equal(module.path.includes("node_modules"), false);
+    assert.equal(existsSync(module.path), true);
+    assert.ok(contents.skills.every((path) => existsSync(path)));
 
     const commands = new CommandRegistry();
     const host = new ExtensionHost({
@@ -219,6 +221,8 @@ describe("installing", () => {
     const [updated] = await updatePackages("@you/tools", dirs);
     assert.equal(updated?.error, null);
     assert.equal(updated?.contents?.extensions.length, 1);
+    assert.ok(updated?.contents?.extensions.every(({ path }) => existsSync(path)));
+    assert.ok(updated?.contents?.skills.every((path) => existsSync(path)));
 
     // Without a pin, update moves on.
     const unpinned = await installPackage(`git:file://${repository}`, dirs);

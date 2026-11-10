@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { UserInput } from "../core/events.ts";
@@ -19,15 +19,22 @@ const PASTED_EXTENSIONS: Record<ImageType, string> = {
  * system clears temporary files in time; returns their paths.
  */
 export function savePastedImages(images: readonly { type: ImageType; data: string }[]): string[] {
-  const folder = join(tmpdir(), "1harness-images");
-  mkdirSync(folder, { recursive: true });
-  return images.map((image) => {
-    const extension = PASTED_EXTENSIONS[image.type];
-    if (!extension) throw new Error(`Images of type ${String(image.type)} cannot be sent`);
-    const path = join(folder, `${randomUUID()}${extension}`);
-    writeFileSync(path, Buffer.from(image.data, "base64"));
-    return path;
-  });
+  if (images.length === 0) return [];
+  // Screenshots may contain private data; a shared temporary directory exposes them to other users.
+  const folder = mkdtempSync(join(tmpdir(), "1harness-images-"));
+  try {
+    return images.map((image) => {
+      const extension = PASTED_EXTENSIONS[image.type];
+      if (!Object.hasOwn(PASTED_EXTENSIONS, image.type))
+        throw new Error(`Images of type ${String(image.type)} cannot be sent`);
+      const path = join(folder, `${randomUUID()}${extension}`);
+      writeFileSync(path, Buffer.from(image.data, "base64"), { mode: 0o600 });
+      return path;
+    });
+  } catch (error) {
+    rmSync(folder, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 export interface SendOptions {

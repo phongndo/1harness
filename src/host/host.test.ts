@@ -94,6 +94,39 @@ function crash(store: Store): void {
 }
 
 describe("Host", () => {
+  it("honors archive and pin flags when no store is open", async () => {
+    newHost();
+    const client = await connect("flags");
+    const pinned = await client.call("thread.open", {
+      harness: "scripted",
+      settings,
+      title: "pinned",
+    });
+    const recent = await client.call("thread.open", {
+      harness: "scripted",
+      settings,
+      title: "recent",
+    });
+    const archived = await client.call("thread.open", {
+      harness: "scripted",
+      settings,
+      title: "archived",
+    });
+    await client.call("thread.flag", { threadId: pinned.id, pinned: true });
+    await client.call("thread.flag", { threadId: archived.id, archived: true });
+    for (const scope of ["recent", "open"] as const) {
+      const listed = await client.call("threads.list", { scope });
+      assert.deepEqual(
+        listed.map(({ id }) => id),
+        [pinned.id, recent.id],
+      );
+    }
+    assert.deepEqual(
+      (await client.call("threads.list", { scope: "archived" })).map(({ id }) => id),
+      [archived.id],
+    );
+  });
+
   it("replays a thread's log to show what showing it live did", async () => {
     newHost();
     const client = await connect("tui");

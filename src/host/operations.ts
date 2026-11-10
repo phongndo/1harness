@@ -73,7 +73,7 @@ export function hostOperations(host: HostAccess): Operation[] {
     {
       name: "thread_search",
       description:
-        "Finds threads whose transcripts mention the words, kept ones included, newest first, with where.",
+        "Finds threads whose transcripts mention the words, kept ones included, best matches first, with where.",
       inputSchema: {
         type: "object",
         properties: { query: { type: "string" }, limit: { type: "number" } },

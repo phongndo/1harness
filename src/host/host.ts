@@ -1601,7 +1601,9 @@ export class Host {
           return rows.map((row) => this.#rowListing(row));
         }
         const all = this.manager.list().filter((managed) => {
-          if (scope === "archived") return false;
+          const archived = this.#marksOf(managed.id).flags.archived;
+          if (scope === "archived") return archived;
+          if (archived) return false;
           if (scope === "open") return managed.status !== "closed";
           return true;
         });
@@ -1609,7 +1611,7 @@ export class Host {
         return all
           .filter((managed) => !needle || managed.title.toLowerCase().includes(needle))
           .map((managed) => this.#listing(managed))
-          .toSorted((a, b) => b.updatedAt - a.updatedAt)
+          .toSorted((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt)
           .slice(0, limit ?? 200);
       },
       "threads.search": async (_client, { query, limit }) => {

@@ -8,6 +8,7 @@ import {
   checkHarness,
   findDriver,
   harnessInfo,
+  registerConfiguredAgents,
   type DriverDefinition,
   type SignIn,
 } from "./index.ts";
@@ -177,5 +178,24 @@ describe("checkHarness", () => {
     assert.equal(info.state, "unchecked");
     assert.equal(info.unavailable, null);
     assert.equal(info.detail, "could not ask Counted whether it is signed in: spawn EACCES");
+  });
+});
+
+describe("configured agents", () => {
+  it("warns about malformed maps and entries instead of throwing during startup", () => {
+    const folder = join(root, "agents");
+    mkdirSync(folder);
+    for (const value of [
+      null,
+      [],
+      { agents: [] },
+      { agents: { invalid: null } },
+      { agents: { invalid: { command: "agent", args: "--acp" } } },
+      { agents: { invalid: { command: "agent", env: { KEY: 7 } } } },
+    ]) {
+      writeFileSync(join(folder, "agents.json"), JSON.stringify(value));
+      assert.equal(registerConfiguredAgents(folder).length, 1);
+      assert.equal(findDriver("invalid"), undefined);
+    }
   });
 });

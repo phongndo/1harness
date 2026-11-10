@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { after, before, describe, it } from "node:test";
-import { JsonRpcProcess } from "./jsonrpc.ts";
+import { JsonRpcPeer, JsonRpcProcess } from "./jsonrpc.ts";
 
 let root: string;
 
@@ -24,6 +25,25 @@ function peer(name: string, source: string): JsonRpcProcess {
     name,
   });
 }
+
+describe("JsonRpcPeer", () => {
+  it("ignores malformed messages and keeps reading the next notification", () => {
+    const input = new PassThrough();
+    const rpc = new JsonRpcPeer(input, () => {}, { name: "test", jsonrpc: true });
+    const heard: string[] = [];
+    rpc.onNotification((method) => heard.push(method));
+    try {
+      assert.doesNotThrow(() => {
+        for (const value of [null, [], 42, "text", { method: 7 }, { id: {}, method: "bad" }])
+          input.write(`${JSON.stringify(value)}\n`);
+        input.write('{"method":"good"}\n');
+      });
+      assert.deepEqual(heard, ["good"]);
+    } finally {
+      input.end();
+    }
+  });
+});
 
 describe("JsonRpcProcess", () => {
   it("survives handlers that throw, and answers a request whose handler threw", async () => {

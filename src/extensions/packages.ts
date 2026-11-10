@@ -337,10 +337,10 @@ async function refresh(
   try {
     await fetchSource(source, fresh, runner);
     await installDependencies(fresh, runner);
-    const contents = checked(fresh, sourceText(source));
+    checked(fresh, sourceText(source));
     rmSync(folder, { recursive: true, force: true });
     renameSync(fresh, folder);
-    return contents;
+    return readPackage(folder);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

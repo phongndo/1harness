@@ -122,6 +122,16 @@ function lines(path: string, ms: number): Promise<string[]> {
 }
 
 describe("HostServer", () => {
+  it("rejects malformed RPC envelopes with an invalid_request error", async () => {
+    await start();
+    for (const body of [null, [], {}, { method: 7 }, { method: "threads.list", params: [] }]) {
+      const answer = (await post(body, { [CLIENT_HEADER]: "malformed" })) as {
+        error: { code: string };
+      };
+      assert.equal(answer.error.code, "invalid_request");
+    }
+  });
+
   it("serves the host over its socket: hello, requests, and the event feed", async () => {
     await start();
     const hello = await serverHello({ socket });

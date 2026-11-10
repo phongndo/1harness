@@ -163,6 +163,7 @@ export class Thread {
   #messages = new Map<string, Message>();
   #items = new Map<string, Item>();
   #requests = new Map<string, HarnessRequest>();
+  #intercepting = new Map<string, HarnessRequest>();
   #busy = false;
   #turnId: string | null = null;
   #usage: Usage | null = null;
@@ -340,6 +341,7 @@ export class Thread {
       this.#incoming === null &&
       (this.#queue.length === 0 || this.#held) &&
       this.#pending.size === 0 &&
+      this.#intercepting.size === 0 &&
       this.#requests.size === 0
     );
   }
@@ -409,7 +411,7 @@ export class Thread {
   ): Promise<{ attempt: number; failures: unknown[] }> {
     if (this.#closed || this.#ending) throw new Error("The thread has ended");
     if (this.#incoming) throw new Error("The thread is already moving to another session");
-    if (this.#busy || this.#requests.size > 0)
+    if (this.#busy || this.#requests.size > 0 || this.#intercepting.size > 0)
       throw new Error("The thread is working; wait for the turn to end or stop it first");
     const failures: unknown[] = [];
     for (const [index, attempt] of attempts.entries()) {
@@ -440,7 +442,7 @@ export class Thread {
         // Closed meanwhile, such as by the user or because the old session died.
         if (this.#closed || this.#ending) throw new SwitchAborted("The thread has ended");
         // The old session started work of its own, such as a scheduled wakeup.
-        if (this.#busy || this.#requests.size > 0)
+        if (this.#busy || this.#requests.size > 0 || this.#intercepting.size > 0)
           throw new SwitchAborted(
             "The thread started working during the switch; try again once it is done",
           );
@@ -519,10 +521,6 @@ export class Thread {
     };
   }
 
-  /**
-   * Lets code answer approvals and questions before clients see them, such as a
-   * permission policy. Handlers run in order; the first response wins.
-   */
   /** Adds what chooses the line a tool call shows as; the first to choose one wins. */
   addToolRenderer(renderer: ToolRenderer): () => void {
     this.#toolRenderers.push(renderer);
@@ -549,6 +547,7 @@ export class Thread {
     return event;
   }
 
+  /** Lets code answer requests before clients see them; the first response wins. */
   addRequestHandler(handler: RequestHandler): () => void {
     this.#requestHandlers.push(handler);
     return () => {
@@ -790,21 +789,41 @@ export class Thread {
 
   /** Offers a request to the handlers; one nobody answers goes to clients. */
   async #intercept(request: HarnessRequest): Promise<void> {
-    for (const handler of this.#requestHandlers) {
-      let response: RequestResponse | undefined;
-      try {
-        response = await withTimeout(Promise.resolve(handler(request)), REQUEST_HANDLER_TIMEOUT_MS);
-      } catch (error) {
-        this.#emit({ type: "error", message: `A request handler failed: ${errorMessage(error)}` });
+    const session = this.#session;
+    const active = () =>
+      !this.#ending && this.#session === session && this.#intercepting.get(request.id) === request;
+    try {
+      for (const handler of this.#requestHandlers) {
+        if (!active()) return;
+        let response: RequestResponse | undefined;
+        try {
+          response = await withTimeout(
+            Promise.resolve(handler(request)),
+            REQUEST_HANDLER_TIMEOUT_MS,
+          );
+        } catch (error) {
+          if (!active()) return;
+          this.#emit({
+            type: "error",
+            message: `A request handler failed: ${errorMessage(error)}`,
+          });
+        }
+        // A handler may finish after the harness withdrew the request or its session ended.
+        if (!active()) return;
+        if (response) {
+          await this.#answer(request, response, "a request handler's answer");
+          return;
+        }
       }
-      if (response) {
-        await this.#answer(request, response, "a request handler's answer");
-        return;
+      if (!active()) return;
+      this.#requests.set(request.id, request);
+      this.#emit({ type: "request.opened", request });
+    } finally {
+      if (this.#intercepting.get(request.id) === request) {
+        this.#intercepting.delete(request.id);
+        this.#emitQueue();
       }
     }
-    if (this.#closed) return;
-    this.#requests.set(request.id, request);
-    this.#emit({ type: "request.opened", request });
   }
 
   /**
@@ -892,6 +911,7 @@ export class Thread {
     this.#busy = false;
     this.#turnId = null;
     this.#requests.clear();
+    this.#intercepting.clear();
     this.#items.clear();
     if (this.#ending) this.#closed = true;
   }
@@ -927,6 +947,7 @@ export class Thread {
           return;
         }
         if (this.#requestHandlers.length > 0) {
+          this.#intercepting.set(event.request.id, event.request);
           void this.#intercept(event.request);
           return;
         }
@@ -934,6 +955,7 @@ export class Thread {
         break;
       }
       case "request.resolved":
+        this.#intercepting.delete(event.requestId);
         this.#requests.delete(event.requestId);
         break;
       case "usage.updated":
