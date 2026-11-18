@@ -279,6 +279,13 @@ export interface ModelOption {
   isDefault: boolean;
 }
 
+/** Whether `model` names this option, by its ID or an alias. */
+export function matchesModel(option: ModelOption, model: string | null | undefined): boolean {
+  return (
+    model !== null && model !== undefined && (option.id === model || option.aliases.includes(model))
+  );
+}
+
 /**
  * A command or skill the harness runs itself, sent to it as `/name args`;
  * the composer runs skills as `$name args`. Drivers list what works inside a

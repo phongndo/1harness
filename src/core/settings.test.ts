@@ -42,6 +42,7 @@ describe("loadSettings", () => {
           agentMode: null,
           disabledTools: [],
           toolGateway: true,
+          advisor: null,
         },
         warnings: [],
       });
@@ -54,6 +55,7 @@ describe("loadSettings", () => {
           agentMode: null,
           disabledTools: [],
           toolGateway: true,
+          advisor: null,
         },
         warnings: [],
       });
@@ -103,6 +105,38 @@ describe("the harness setting", () => {
       assert.equal(loaded.settings.harness, null);
       assert.equal(loaded.settings.mode, "auto");
       assert.match(loaded.warnings[0] ?? "", /harness must be a harness's name/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the advisor setting", () => {
+  it("names a harness, and a model and effort or its defaults, and warns when it cannot", () => {
+    const dir = mkdtempSync(join(tmpdir(), "1harness-settings-"));
+    const file = join(dir, "settings.json");
+    try {
+      writeFileSync(
+        file,
+        '{ "advisor": { "harness": "codex", "model": "gpt-5", "effort": "high" } }',
+      );
+      assert.deepEqual(loadSettings(dir).settings.advisor, {
+        harness: "codex",
+        model: "gpt-5",
+        effort: "high",
+      });
+      writeFileSync(file, '{ "advisor": { "harness": "claude" } }');
+      assert.deepEqual(loadSettings(dir).settings.advisor, {
+        harness: "claude",
+        model: null,
+        effort: null,
+      });
+      for (const text of ['{ "advisor": "codex" }', '{ "advisor": { "model": "x" } }']) {
+        writeFileSync(file, text);
+        const loaded = loadSettings(dir);
+        assert.equal(loaded.settings.advisor, null, text);
+        assert.match(loaded.warnings[0] ?? "", /advisor must be/, text);
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

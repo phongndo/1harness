@@ -61,6 +61,7 @@ export class StoreWriter {
 
   /** A thread's row changed; it is written with the next flush. */
   mark(id: string): void {
+    if (this.#source.thread(id)?.ephemeral) return;
     this.#dirty.add(id);
   }
 
@@ -106,7 +107,7 @@ export class StoreWriter {
    */
   admit(managed: ManagedThread, event: ThreadEvent): void {
     // Only messages are written at once; the rest waits for the next flush.
-    if (!event.type.startsWith("message.")) return;
+    if (!event.type.startsWith("message.") || managed.ephemeral) return;
     if (this.#unadmitted.length === 0)
       try {
         this.#record(managed, event);
@@ -172,7 +173,8 @@ export class StoreWriter {
       for (const [id, log] of source.logs()) {
         const changed = log.unwritten();
         if (changed.length === 0) continue;
-        if (source.thread(id) || store.thread(id)) store.writeLog(id, changed);
+        const live = source.thread(id);
+        if (live ? !live.ephemeral : store.thread(id)) store.writeLog(id, changed);
         logs.push([log, changed]);
       }
       // Tasks change seldom; they are written when they do.

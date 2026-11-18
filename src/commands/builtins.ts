@@ -1,4 +1,5 @@
-import type { McpAction, McpServer, ModelOption } from "../core/events.ts";
+import { matchesModel, type McpAction, type McpServer, type ModelOption } from "../core/events.ts";
+import { advisorLabel, type AdvisorChoice } from "../core/settings.ts";
 import type { HarnessInfo, ThreadListing } from "../protocol.ts";
 import { looksLikeThreadId, shortThreadId } from "../core/thread-id.ts";
 import { errorMessage } from "../core/errors.ts";
@@ -29,12 +30,6 @@ function isMcpAction(action: string): action is McpAction {
 
 function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
-}
-
-function matchesModel(option: ModelOption, model: string | null | undefined): boolean {
-  return (
-    model !== null && model !== undefined && (option.id === model || option.aliases.includes(model))
-  );
 }
 
 function models(context: CommandContext): Promise<ModelOption[]> {
@@ -279,6 +274,168 @@ const harness: CommandDefinition = {
       return;
     }
     await context.switchHarness(chosen.id, { fresh });
+  },
+};
+
+/** The harness, or an error saying why it cannot run, so no agent finds out mid-task. */
+function runnable(info: HarnessInfo): HarnessInfo {
+  if (info.unavailable) throw new Error(`${info.label} cannot advise: ${info.unavailable}`);
+  return info;
+}
+
+/** A harness's models in this thread's folder, which `/advisor` lists with no thread running there. */
+function harnessModels(context: CommandContext, id: string): Promise<ModelOption[]> {
+  const cwd = context.info?.cwd;
+  return context.runOperation("harness_models", {
+    harness: id,
+    ...(cwd ? { cwd } : {}),
+  }) as Promise<ModelOption[]>;
+}
+
+/** Saves the advisor, saying when sessions must restart to get or lose the tool. */
+async function setAdvisor(context: CommandContext, choice: AdvisorChoice | null): Promise<void> {
+  const { reload } = (await context.runOperation("advisor_set", { ...choice })) as {
+    reload: boolean;
+  };
+  const said = choice ? `Advisor: ${advisorLabel(choice)}.` : "Advisor off.";
+  const note = choice
+    ? " Threads get the advisor tool as their sessions start; /reload gives it to this one."
+    : " /reload takes the advisor tool from this thread.";
+  context.ui.notify("info", reload ? `${said}${note}` : said);
+}
+
+const advisor: CommandDefinition = {
+  name: "advisor",
+  usage: "[harness [model [effort]] | off]",
+  description:
+    "choose the model agents consult for advice, on any harness; they send it their conversation as text",
+  group: "Model",
+  complete(context, args) {
+    const words = args.split(" ");
+    const start = args.length - (words.at(-1) ?? "").length;
+    const [named = "", chosen = ""] = words;
+    // Model and effort may be left out, so enter on a word runs the command as typed.
+    if (words.length === 1)
+      return {
+        start: 0,
+        items: [...harnessCompletions(context).items, completion("off", "agents get no advisor")],
+      };
+    // Another harness's models take starting it; /advisor alone picks among them.
+    const options =
+      named === context.harness ? listed(context, "models", () => listModels(context)) : [];
+    if (words.length === 2)
+      return { start, items: options.map((option) => completion(option.id, option.label)) };
+    if (words.length !== 3) return null;
+    const option = options.find((candidate) => matchesModel(candidate, chosen));
+    return {
+      start,
+      items: (option?.efforts ?? []).map((level) =>
+        completion(
+          level,
+          [EFFORT_DESCRIPTIONS[level], level === option?.defaultEffort ? "default" : ""]
+            .filter(Boolean)
+            .join(" · "),
+        ),
+      ),
+    };
+  },
+  async run(context, args) {
+    const words = args.split(/\s+/).filter(Boolean);
+    if (words.length > 3) throw new Error("Usage: /advisor [harness [model [effort]] | off]");
+    const [name, model = null, effort = null] = words;
+    if (name === "off") {
+      if (words.length > 1) throw new Error("Usage: /advisor off");
+      await setAdvisor(context, null);
+      return;
+    }
+    if (name !== undefined) {
+      const named = runnable(namedHarness(context, name));
+      await setAdvisor(context, { harness: named.id, model, effort });
+      return;
+    }
+    const { advisor: current } = (await context.runOperation("advisor_get", {})) as {
+      advisor: AdvisorChoice | null;
+    };
+    const all = await context.checkHarnesses();
+    const index = await context.ui.pick(
+      "Advisor harness",
+      [
+        { label: "off", detail: "agents get no advisor", tag: current ? "" : "current" },
+        ...all.map((driver) => harnessEntry(driver, current?.harness ?? null, null)),
+      ],
+      { initial: Math.max(0, all.findIndex((driver) => driver.id === current?.harness) + 1) },
+    );
+    if (index === null) return;
+    const chosen = all[index - 1];
+    if (!chosen) {
+      await setAdvisor(context, null);
+      return;
+    }
+    const picked = runnable(chosen);
+    const settle = context.ui.progress(`Asking ${picked.label} for its models…`);
+    let options: ModelOption[] = [];
+    try {
+      context.forget(`advisor-models:${picked.id}`);
+      options = await context.fetch(`advisor-models:${picked.id}`, () =>
+        harnessModels(context, picked.id),
+      );
+      settle("info", `${picked.label} offers ${options.length} models`);
+    } catch (error) {
+      // The harness's default still works, and a model can be named: /advisor <harness> <model>.
+      settle("warning", `Could not list ${picked.label}'s models: ${errorMessage(error)}`);
+    }
+    const same = current?.harness === picked.id;
+    const currentPosition = same
+      ? options.findIndex((option) => matchesModel(option, current.model))
+      : -1;
+    const modelIndex = await context.ui.pick(
+      `Advisor model on ${picked.label}`,
+      [
+        {
+          label: "default",
+          detail: `${picked.label}'s own default`,
+          tag: same && current.model === null ? "current" : "",
+        },
+        ...options.map((option, position) => ({
+          label: option.label,
+          detail: option.description,
+          tag: position === currentPosition ? "current" : "",
+        })),
+      ],
+      { initial: currentPosition + 1, filter: true },
+    );
+    if (modelIndex === null) return;
+    const option = options[modelIndex - 1];
+    let chosenEffort: string | null = null;
+    if (option && option.efforts.length > 0) {
+      const levels = option.efforts;
+      const currentEffort =
+        same && current.model === option.id ? levels.indexOf(current.effort ?? "") : -1;
+      const effortIndex = await context.ui.pick(
+        "Advisor effort",
+        [
+          {
+            label: "default",
+            detail: option.defaultEffort
+              ? `the model's own, ${option.defaultEffort}`
+              : "the model's own",
+          },
+          ...levels.map((level, position) => ({
+            label: level,
+            detail: EFFORT_DESCRIPTIONS[level] ?? "",
+            tag: position === currentEffort ? "current" : "",
+          })),
+        ],
+        { initial: currentEffort + 1 },
+      );
+      if (effortIndex === null) return;
+      chosenEffort = levels[effortIndex - 1] ?? null;
+    }
+    await setAdvisor(context, {
+      harness: picked.id,
+      model: option?.id ?? null,
+      effort: chosenEffort,
+    });
   },
 };
 
@@ -716,6 +873,7 @@ export const BUILTIN_COMMANDS: readonly CommandDefinition[] = [
   reload,
   model,
   effort,
+  advisor,
   mode,
   plan,
   mcp,

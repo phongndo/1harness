@@ -118,7 +118,8 @@ const listed = (operations: OperationInfo[]) => operations.map((operation) => op
 describe("operations", () => {
   it("are offered on every surface their callers use, and only there", async () => {
     // By name, to compare with the operations; tool_search has its own tests.
-    newHost({ toolGateway: false });
+    // With an advisor chosen, so its tool is offered too.
+    newHost({ toolGateway: false, advisor: { harness: "scripted" } });
     const person = await connect("tui");
     const outsider = await connect("outside", true);
 

@@ -1,5 +1,6 @@
 import { join } from "node:path";
-import { RUNTIME_MODES, isRuntimeMode, modeRank } from "../core/events.ts";
+import { RUNTIME_MODES, isRuntimeMode, matchesModel, modeRank } from "../core/events.ts";
+import type { AdvisorChoice } from "../core/settings.ts";
 import { stateDir } from "../core/paths.ts";
 import { newThreadId, shortThreadId } from "../core/thread-id.ts";
 import { safeCut } from "../core/wording.ts";
@@ -41,6 +42,8 @@ export const MAX_RUNNING_THREADS = 8;
 /** How many threads may have a harness running, idle ones included; parked ones have none. */
 export const MAX_OPEN_THREADS = 16;
 const DEFAULT_WAIT_SECONDS = 600;
+/** How long an advisor's harness may take to say which models it has. */
+const ADVISOR_CHECK_MS = 60_000;
 const RESULT_LIMIT = 8000;
 /** About how much one thread_read returns, so reading history cannot flood a context. */
 const READ_LIMIT = 40_000;
@@ -680,6 +683,8 @@ export class Orchestrator {
   ): Promise<Task> {
     const brief = text(input, "task");
     if (!brief) throw new OperationError("invalid_request", "task is empty");
+    if (caller.ephemeral)
+      throw new OperationError("not_allowed", "an advisor advises; it does not delegate");
     if (this.#manager.depth(caller.id) + 1 > MAX_DEPTH)
       throw new OperationError(
         "depth_limit",
@@ -687,10 +692,7 @@ export class Orchestrator {
       );
 
     const harness = text(input, "harness") ?? caller.harness;
-    const driver = findDriver(harness);
-    if (!driver) throw new OperationError("harness_unavailable", `no harness named ${harness}`);
-    const { unavailable: reason } = await this.checkHarness(driver);
-    if (reason) throw new OperationError("harness_unavailable", reason);
+    await this.#ready(harness);
 
     const info = caller.thread.info;
     const asked = text(input, "runtimeMode");
@@ -715,21 +717,7 @@ export class Orchestrator {
     const repo = await this.#worktreeRepository(info.cwd, role, text(input, "isolation"));
     const sameHarness = harness === caller.harness;
 
-    const counts = this.#counts(caller);
-    if (counts.running >= MAX_RUNNING_THREADS)
-      throw new OperationError(
-        "thread_limit",
-        `${counts.running} threads are working; wait for some to finish or cancel them first`,
-      );
-    if (counts.open >= MAX_OPEN_THREADS)
-      throw new OperationError(
-        "thread_limit",
-        `${counts.open} threads are open; close finished tasks with task_cancel first`,
-      );
-    // Held until the task is sent, when its thread counts as working.
-    const root = this.#scope.root(caller).id;
-    this.#reserved.set(root, (this.#reserved.get(root) ?? 0) + 1);
-    try {
+    return this.#reserving(caller, async () => {
       let child: ManagedThread;
       const id = newThreadId();
       const worktree = repo ? await this.#addWorktree(info.cwd, repo, id) : null;
@@ -773,10 +761,149 @@ export class Orchestrator {
         { type: "task", from: caller.id, task: brief },
       );
       return task;
+    });
+  }
+
+  /** Refuses a harness that does not exist or cannot run here now. */
+  async #ready(harness: string): Promise<void> {
+    const driver = findDriver(harness);
+    if (!driver) throw new OperationError("harness_unavailable", `no harness named ${harness}`);
+    const { unavailable: reason } = await this.checkHarness(driver);
+    if (reason) throw new OperationError("harness_unavailable", reason);
+  }
+
+  /**
+   * Starts a thread in the caller's tree with `start`, within the tree's limits.
+   * Room is held until `start` has sent the thread its work, when it counts as working.
+   */
+  async #reserving<T>(caller: ManagedThread, start: () => Promise<T>): Promise<T> {
+    const counts = this.#counts(caller);
+    if (counts.running >= MAX_RUNNING_THREADS)
+      throw new OperationError(
+        "thread_limit",
+        `${counts.running} threads are working; wait for some to finish or cancel them first`,
+      );
+    if (counts.open >= MAX_OPEN_THREADS)
+      throw new OperationError(
+        "thread_limit",
+        `${counts.open} threads are open; close finished tasks with task_cancel first`,
+      );
+    const root = this.#scope.root(caller).id;
+    this.#reserved.set(root, (this.#reserved.get(root) ?? 0) + 1);
+    try {
+      return await start();
     } finally {
       const left = (this.#reserved.get(root) ?? 1) - 1;
       if (left > 0) this.#reserved.set(root, left);
       else this.#reserved.delete(root);
+    }
+  }
+
+  /**
+   * Has the advisor answer `prompt` in a thread of its own under the caller's,
+   * which the user can watch and stop like any agent's while it runs. Nothing
+   * of it is stored, as it holds a copy of the caller's conversation, and it
+   * is dropped once closed. It reads but may not change anything: it runs in
+   * the narrowest mode on a harness that has modes, its approvals are declined
+   * before any extension sees them, and its tool server refuses it any tool
+   * that acts. It runs on the model chosen or not at all, so the conversation
+   * goes to no provider the user did not choose. `summary` is what its
+   * records show as asked.
+   */
+  async advise(
+    caller: ManagedThread,
+    choice: AdvisorChoice,
+    prompt: { text: string; summary: string },
+    callId: string | null,
+    timeoutMs: number = DEFAULT_WAIT_SECONDS * 1000,
+  ): Promise<{ advice: string; model: string | null }> {
+    if (caller.ephemeral)
+      throw new OperationError("not_allowed", "an advisor cannot consult an advisor");
+    // The turn asking, if one is running; advice comes back to it or not at all.
+    const asking = caller.runs.at(-1)?.status === "running" ? caller.runs.at(-1) : undefined;
+    const gone = () =>
+      caller.status === "closed" ||
+      this.#manager.closing(caller.id) ||
+      (asking !== undefined && asking.status !== "running");
+    const refuseIfGone = () => {
+      if (gone())
+        throw new OperationError("advisor_cancelled", "the turn asking for advice has ended");
+    };
+    await this.#ready(choice.harness);
+    refuseIfGone();
+    const info = caller.thread.info;
+    const child = await this.#reserving(caller, async () => {
+      let created: ManagedThread;
+      try {
+        created = await this.#manager.create({
+          harness: choice.harness,
+          settings: {
+            cwd: info.cwd,
+            model: choice.model,
+            effort: choice.effort,
+            runtimeMode: "supervised",
+            // Not plan mode: some harnesses end a plan with an approval, which would hold the advice back.
+            interactionMode: "default",
+            resume: null,
+          },
+          title: "Advisor",
+          parentId: caller.id,
+          parentCallId: callId,
+          origin: "delegated",
+          ephemeral: true,
+          requestHandler: (request) =>
+            request.kind === "approval"
+              ? {
+                  kind: "decline",
+                  reason: "An advisor only reads and advises; it changes nothing.",
+                }
+              : { kind: "cancel" },
+        });
+      } catch (error) {
+        if (error instanceof ModeError) throw new OperationError(error.code, error.message);
+        throw error;
+      }
+      try {
+        await checkAdvisor(created, choice);
+        refuseIfGone();
+      } catch (error) {
+        await this.#manager.close(created.id).catch(() => {});
+        throw error;
+      }
+      created.thread.send(
+        { text: prompt.text },
+        { type: "task", from: caller.id, task: prompt.summary },
+      );
+      return created;
+    });
+    try {
+      const settled = await new Promise<"done" | "timed out" | "gone">((resolve) => {
+        const unsubscribe = this.#manager.subscribe(() => {
+          if (gone()) finish("gone");
+        });
+        const finish = (how: "done" | "timed out" | "gone") => {
+          unsubscribe();
+          resolve(how);
+        };
+        void this.#manager
+          .wait(child.id, timeoutMs)
+          .then(({ timedOut }) => finish(timedOut ? "timed out" : "done"));
+      });
+      refuseIfGone();
+      if (settled === "timed out")
+        throw new OperationError(
+          "advisor_failed",
+          `the advisor gave no advice within ${Math.round(timeoutMs / 1000)} seconds`,
+        );
+      const run = child.runs[0];
+      if (run?.status !== "completed" || !run.result?.trim())
+        throw new OperationError(
+          "advisor_failed",
+          `the advisor (${choice.harness}) ${run ? run.status : "never started"}${run?.error ? `: ${run.error}` : child.error ? `: ${child.error}` : ""}; /advisor chooses another`,
+        );
+      return { advice: run.result, model: child.thread.info.model ?? choice.model };
+    } finally {
+      await this.#manager.close(child.id).catch(() => {});
     }
   }
 
@@ -961,4 +1088,51 @@ export class Orchestrator {
       throw new OperationError("task_not_found", `no task ${id} delegated by this thread`);
     return task;
   }
+}
+
+/**
+ * Refuses an advisor session that cannot be held to what the user chose: one
+ * with no modes, which nothing keeps from acting, or one that started on
+ * another model, as a harness may when the one asked for is not there.
+ */
+async function checkAdvisor(advisor: ManagedThread, choice: AdvisorChoice): Promise<void> {
+  const session = advisor.thread.session;
+  if (advisor.thread.capabilities.runtimeModes.length === 0)
+    throw new OperationError(
+      "runtime_mode_unavailable",
+      `${choice.harness} has no permission modes, so it cannot be kept to reading; /advisor chooses another`,
+    );
+  if (choice.model === null) return;
+  const running = advisor.thread.info.model;
+  let timer: NodeJS.Timeout | undefined;
+  // A harness that stops answering would hold the caller's turn and a place under the thread limit.
+  const options = await Promise.race([
+    session?.listModels?.() ?? Promise.resolve(null),
+    new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(
+            new OperationError(
+              "advisor_failed",
+              `${choice.harness} did not list its models in time, so nothing was sent`,
+            ),
+          ),
+        ADVISOR_CHECK_MS,
+      );
+    }),
+  ]).finally(() => clearTimeout(timer));
+  const option = options?.find((candidate) => matchesModel(candidate, choice.model));
+  if (options && !option)
+    throw new OperationError(
+      "model_unavailable",
+      `${choice.harness} offers no model ${choice.model}, so nothing was sent; /advisor chooses another`,
+    );
+  const differs = option
+    ? running !== null && !matchesModel(option, running)
+    : running !== choice.model;
+  if (differs)
+    throw new OperationError(
+      "model_unavailable",
+      `${choice.harness} would advise on ${running ?? "its default model"}, not ${choice.model}, so nothing was sent; /advisor chooses another`,
+    );
 }

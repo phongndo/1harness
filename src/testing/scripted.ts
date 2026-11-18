@@ -2,6 +2,7 @@ import { AsyncQueue } from "../core/async-queue.ts";
 import type {
   Capabilities,
   HarnessEvent,
+  ModelOption,
   RequestResponse,
   RuntimeMode,
   SessionInfo,
@@ -174,7 +175,7 @@ export class ScriptedSession {
 
   async setInteractionMode(): Promise<void> {}
 
-  async listModels() {
+  async listModels(): Promise<ModelOption[]> {
     return [
       {
         id: "big",
