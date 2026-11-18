@@ -2,6 +2,21 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_RUNTIME_MODE, RUNTIME_MODES, isRuntimeMode, type RuntimeMode } from "./events.ts";
 
+/** The model agents consult through the `advisor` tool, on any harness. */
+export interface AdvisorChoice {
+  harness: string;
+  /** Null for the harness's default model. */
+  model: string | null;
+  effort: string | null;
+}
+
+/** An advisor as people read it, such as `codex · gpt-5 · high`. */
+export function advisorLabel(choice: AdvisorChoice): string {
+  return [choice.harness, choice.model ?? "default model", choice.effort]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 /** What the user sets in `settings.json` in the config folder. */
 export interface Settings {
   /**
@@ -28,6 +43,8 @@ export interface Settings {
    * they cost nothing until used; false offers every tool by name.
    */
   toolGateway: boolean;
+  /** The advisor `/advisor` chose; agents get the `advisor` tool only while one is set. */
+  advisor: AdvisorChoice | null;
 }
 
 /** What agents outside 1harness may start and act on unless settings say otherwise. */
@@ -53,6 +70,7 @@ export function loadSettings(configDir: string): { settings: Settings; warnings:
       agentMode: "supervised" as const,
       disabledTools: [],
       toolGateway: true,
+      advisor: null,
     },
     warnings: [`${file}: ${problem}; threads start in supervised until it is fixed`],
   });
@@ -69,6 +87,7 @@ export function loadSettings(configDir: string): { settings: Settings; warnings:
           agentMode: null,
           disabledTools: [],
           toolGateway: true,
+          advisor: null,
         },
         warnings: [],
       };
@@ -110,6 +129,11 @@ export function loadSettings(configDir: string): { settings: Settings; warnings:
   const gateway = values["toolGateway"];
   if (gateway !== undefined && gateway !== null && typeof gateway !== "boolean")
     warnings.push(`${file}: toolGateway must be true or false; tool_search stays on`);
+  const advisor = advisorChoice(values["advisor"]);
+  if (advisor === undefined)
+    warnings.push(
+      `${file}: advisor must be { "harness", "model", "effort" } with strings or null; agents get no advisor`,
+    );
   return {
     settings: {
       harness,
@@ -118,9 +142,24 @@ export function loadSettings(configDir: string): { settings: Settings; warnings:
       agentMode: isRuntimeMode(agentMode) ? agentMode : null,
       disabledTools,
       toolGateway: gateway !== false,
+      advisor: advisor ?? null,
     },
     warnings,
   };
+}
+
+function optional(entry: unknown): boolean {
+  return entry === null || (typeof entry === "string" && entry !== "");
+}
+
+/** The advisor a setting names, null for none, or undefined when it cannot be read. */
+function advisorChoice(value: unknown): AdvisorChoice | null | undefined {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) return undefined;
+  const { harness, model = null, effort = null } = value as Record<string, unknown>;
+  if (typeof harness !== "string" || harness === "" || !optional(model) || !optional(effort))
+    return undefined;
+  return { harness, model: model as string | null, effort: effort as string | null };
 }
 
 /**

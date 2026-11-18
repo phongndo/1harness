@@ -36,22 +36,25 @@ export class ToolServer {
   #grants = new Map<string, { thread: Thread | null; tools: Tools; policy: GrantPolicy }>();
   #disabled: () => (name: string) => boolean;
   #gateway: () => boolean;
+  #readOnly: (thread: Thread) => boolean;
 
   /**
    * `disabled` says, as things stand, which tools to keep from sessions' lists
    * and calls; `gateway`, whether to offer all but `direct` tools through
-   * `tool_search`.
+   * `tool_search`; `readOnly`, which threads may call only tools that read.
    */
   constructor(
     tools: () => ReadonlyMap<string, { tool: ToolDefinition }>,
     version: string,
     disabled: () => (name: string) => boolean = () => () => false,
     gateway: () => boolean = () => false,
+    readOnly: (thread: Thread) => boolean = () => false,
   ) {
     this.#tools = tools;
     this.#version = version;
     this.#disabled = disabled;
     this.#gateway = gateway;
+    this.#readOnly = readOnly;
   }
 
   /** What a session sees by name, and what it reaches through the gateway, as things stand. */
@@ -159,6 +162,8 @@ export class ToolServer {
         const entry = grant.tools().get(name);
         const thread = grant.thread;
         if (!entry || !thread) throw new Error("The session is still starting");
+        if (!entry.tool.readOnly && this.#readOnly(thread))
+          throw new Error(`${name} acts, and this thread may only read`);
         // Before the policy's wait: OpenCode's call IDs go by which calls are running now.
         const callId = thread.callId(meta, name);
         const reason = await grant.policy(thread)?.(ownToolCheck(name, input));

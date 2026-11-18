@@ -11,6 +11,7 @@ import {
   Thread,
   messageText,
   type MessageOrigin,
+  type RequestHandler,
   type SavedThread,
   type ThreadEvent,
 } from "../core/thread.ts";
@@ -84,6 +85,11 @@ export interface ManagedThread {
   runs: RunRecord[];
   /** Why the session ended, when it ended badly. */
   error: string | null;
+  /**
+   * Kept only while it runs, such as an advisor's: never stored, and dropped
+   * from memory as soon as it closes.
+   */
+  readonly ephemeral?: true;
 }
 
 export type ManagerEvent =
@@ -116,6 +122,10 @@ export interface CreateThreadOptions {
   /** The thread it is forked from, and the handoff of that thread's turns it starts with. */
   fork?: { from: string; handoff: string | null };
   worktree?: Worktree | null;
+  /** Never stored, and dropped once closed. */
+  ephemeral?: boolean;
+  /** Answers requests before the extensions' handlers, which cannot overrule it. */
+  requestHandler?: RequestHandler;
 }
 
 /**
@@ -324,6 +334,7 @@ export class ThreadManager {
       throw error;
     }
     created = thread;
+    if (options.requestHandler) thread.addRequestHandler(options.requestHandler);
     this.#grants.get(id)?.bind(thread);
     const managed: ManagedThread = {
       id,
@@ -342,6 +353,7 @@ export class ThreadManager {
       status: "starting",
       runs: [],
       error: null,
+      ...(options.ephemeral ? { ephemeral: true as const } : {}),
     };
     // Its harness's own thread has seen none of the turns the fork's handoff carries.
     if (options.fork?.handoff) {
@@ -972,6 +984,15 @@ export class ThreadManager {
 
   #emit(event: ManagerEvent): void {
     for (const listener of this.#listeners) listener(event);
+    // After every listener has seen it close, however it closed: by itself, failing to start, or closed by anyone.
+    if (
+      event.type === "thread.updated" &&
+      event.thread.ephemeral &&
+      event.thread.status === "closed"
+    ) {
+      const id = event.thread.id;
+      setImmediate(() => this.forget(id));
+    }
   }
 }
 

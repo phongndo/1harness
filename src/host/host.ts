@@ -7,6 +7,7 @@ import {
 } from "../commands/registry.ts";
 import {
   type HarnessId,
+  type ModelOption,
   type NoticeLevel,
   type SessionMethod,
   type SessionOptions,
@@ -29,6 +30,7 @@ import { isThreadIdPrefix, shortThreadId } from "../core/thread-id.ts";
 import { formatTokens } from "../core/wording.ts";
 import {
   checkHarness,
+  createSession,
   drivers,
   findDriver,
   harnessInfo,
@@ -79,6 +81,7 @@ import { mediaMethods } from "./media-methods.ts";
 import { FileIndexes } from "./file-indexes.ts";
 import { Clients, type Client, type Handlers } from "./clients.ts";
 import { EventFeed } from "./feed.ts";
+import { advisorOperations, harnessModels } from "./advisor.ts";
 import { contextOperations } from "./context.ts";
 import { ExtensionSets, type ExtensionSet } from "./extension-sets.ts";
 import { hostOperations } from "./operations.ts";
@@ -227,6 +230,8 @@ export class Host {
   /** Extensions by folder and the modules a client named, each set with its commands. */
   #sets: ExtensionSets;
   #agentTools: ReadonlyMap<string, { tool: ToolDefinition }> = new Map();
+  /** Lookups of a harness's models in a folder, while they are in progress. */
+  #models = new Map<string, Promise<ModelOption[]>>();
   /** html2term, for images shrunk to their size on screen and pages drawn as pictures. */
   readonly media = new Media();
   /** Pages kept running for clients, through html2term's browser worker. */
@@ -304,13 +309,15 @@ export class Host {
     });
     // Every session gets 1harness's own tools; its folder's extensions add theirs.
     this.tools = new ToolServer(
-      () => this.#agentTools,
+      () => this.#sharedTools(),
       options.version,
       () => {
         const settings = this.#settings();
         return (name) => toolDisabled(settings, name);
       },
       () => this.#settings().toolGateway,
+      // An advisor reads and advises; nothing of 1harness's or an extension's acts for it.
+      (thread) => this.manager.byThread(thread)?.ephemeral === true,
     );
     this.manager = new ThreadManager({
       version: options.version,
@@ -366,15 +373,66 @@ export class Host {
       ...contextOperations({
         manager: this.manager,
         scope: this.#scope,
-        shared: () => this.#agentTools,
+        shared: () => this.#sharedTools(),
         exposure: (own) => this.tools.exposure(own),
         settings: () => this.#settings(),
         configDir: () => options.configDir ?? configDir(),
+      }),
+      ...advisorOperations({
+        manager: this.manager,
+        scope: this.#scope,
+        orchestrator: this.orchestrator,
+        settings: () => this.#settings(),
+        configDir: () => options.configDir ?? configDir(),
+        log: (id) => this.#log(id).entries,
+        models: (harness, cwd) => this.#harnessModels(harness, cwd),
+        cwd: (caller) =>
+          caller.kind === "agent"
+            ? this.#scope.agent(caller).thread.info.cwd
+            : this.#clients.get(caller.clientId).cwd,
       }),
     ];
     this.#agentTools = new Map(agentTools(this.operations).map((tool) => [tool.name, { tool }]));
     this.manager.subscribe((event) => this.#managerEvent(event));
     this.#handlers = this.#methods();
+  }
+
+  /**
+   * The tools every session gets. The advisor tool would only fail with no
+   * advisor chosen, so until one is it is not there at all, costing no context.
+   */
+  #sharedTools(): ReadonlyMap<string, { tool: ToolDefinition }> {
+    if (this.#settings().advisor !== null || !this.#agentTools.has("advisor"))
+      return this.#agentTools;
+    const tools = new Map(this.#agentTools);
+    tools.delete("advisor");
+    return tools;
+  }
+
+  /**
+   * The models a harness offers in a folder. Only a lookup in progress is
+   * shared, so asking again asks the harness again.
+   */
+  #harnessModels(harness: string, cwd: string): Promise<ModelOption[]> {
+    if (!findDriver(harness))
+      return Promise.reject(
+        new OperationError("harness_unavailable", `no harness named ${harness}`),
+      );
+    const key = `${harness}\0${cwd}`;
+    let models = this.#models.get(key);
+    if (!models) {
+      const environment = { version: this.version, env: this.#options.env ?? process.env };
+      const asking = harnessModels(harness, cwd, this.manager.list(), (settings) =>
+        createSession(harness, settings, environment),
+      );
+      models = asking;
+      this.#models.set(key, asking);
+      const done = () => {
+        if (this.#models.get(key) === asking) this.#models.delete(key);
+      };
+      asking.then(done, done);
+    }
+    return models;
   }
 
   /** Brings back stored threads, with their folders' extensions; calls after the first wait for it. */
@@ -821,7 +879,8 @@ export class Host {
       case "thread.created": {
         const thread = event.thread;
         this.#announce(thread);
-        if (event.restored) return;
+        // An advisor's thread holds a copy of its caller's conversation, so it is never stored.
+        if (event.restored || thread.ephemeral) return;
         this.#store?.saveThread(this.#row(thread));
         if (thread.parentId && this.manager.get(thread.parentId))
           this.#append(thread.parentId, (log, seq) => log.agent(seq, thread.id));
@@ -840,7 +899,7 @@ export class Host {
             }
         this.#writer?.mark(event.thread.id);
         this.#writer?.schedule();
-        if (event.thread.status === "closed" && this.#store) {
+        if (event.thread.status === "closed" && this.#store && !event.thread.ephemeral) {
           this.#closedThreads.add(event.thread.id);
           this.#releaseTimer ??= setImmediate(() => {
             this.#releaseTimer = null;

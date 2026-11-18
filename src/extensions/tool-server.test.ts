@@ -4,7 +4,55 @@ import type { Thread } from "../core/thread.ts";
 import type { ToolContext, ToolDefinition } from "./api.ts";
 import { ToolServer } from "./tool-server.ts";
 
+/** A tool that says it ran. */
+const ranTool = (name: string, readOnly: boolean): ToolDefinition => ({
+  name,
+  description: name,
+  inputSchema: { type: "object", properties: {} },
+  ...(readOnly ? { readOnly: true } : {}),
+  execute: () => `${name} ran`,
+});
+
 describe("ToolServer", () => {
+  it("refuses tools that act to a thread that may only read", async () => {
+    const reader = { callId: () => null } as unknown as Thread;
+    const server = new ToolServer(
+      () =>
+        new Map([
+          ["look", { tool: ranTool("look", true) }],
+          ["change", { tool: ranTool("change", false) }],
+        ]),
+      "1.0.0",
+      undefined,
+      undefined,
+      (thread) => thread === reader,
+    );
+    const grant = await server.grant();
+    assert.ok(grant && grant.config.type === "http");
+    grant.bind(reader);
+    const { url, headers } = grant.config;
+    const call = async (name: string) => {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name, arguments: {} },
+        }),
+      });
+      return JSON.stringify(await response.json());
+    };
+    try {
+      assert.match(await call("look"), /look ran/);
+      assert.match(await call("change"), /change acts, and this thread may only read/);
+    } finally {
+      grant.revoke();
+      await server.close();
+    }
+  });
+
   it("serves tools over MCP to sessions that hold a grant", async () => {
     const calls: ToolContext[] = [];
     const echo: ToolDefinition = {
