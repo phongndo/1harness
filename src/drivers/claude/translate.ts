@@ -174,6 +174,7 @@ export function toolItem(id: string, name: string, rawInput: unknown): Item | nu
         description: agentDescription(input),
         summary: "",
         status: "running",
+        ...(input["run_in_background"] === true ? { background: "started" as const } : {}),
       };
     case "WebSearch":
       return { kind: "web_search", id, query: text(input["query"]), status: "running" };
@@ -268,6 +269,13 @@ export class ClaudeTranslator {
    * end, since that is what wakes it, where a stopped foreground task may not.
    */
   #work = new Map<string, { description: string; background: boolean }>();
+  /**
+   * Agents Claude started from agent calls, by task ID. A background one's
+   * result arrives as a notification, after its call returned; a foreground
+   * one's call returns with it. Kept past that, as a task sent a message
+   * reports again.
+   */
+  #agentTasks = new Map<string, { description: string; background: boolean }>();
   /** Task list tool calls awaiting results, and the task list they build. */
   #taskCalls = new Map<string, { name: string; input: Record<string, unknown> }>();
   #tasks = new Map<string, TodoStep>();
@@ -308,6 +316,13 @@ export class ClaudeTranslator {
     return [...this.#work.values()]
       .filter((task) => task.background)
       .map((task) => task.description);
+  }
+
+  /** Whether the agent a tool call started runs in the background, as one Claude moved there does. */
+  #inBackground(toolUseId: string): boolean {
+    for (const [taskId, tool] of this.#taskTools)
+      if (tool === toolUseId) return this.#agentTasks.get(taskId)?.background === true;
+    return false;
   }
 
   /** Clears the transient retry line once a turn ends. */
@@ -496,6 +511,18 @@ export class ClaudeTranslator {
       const item = this.#tools.get(part.tool_use_id);
       if (!item) continue;
       this.#tools.delete(part.tool_use_id);
+      // A background agent's call returns once it starts, saying so in words meant for the model.
+      if (
+        item.kind === "agent" &&
+        part.is_error !== true &&
+        (item.background === "started" || this.#inBackground(part.tool_use_id))
+      ) {
+        events.push({
+          type: "item.completed",
+          item: { ...item, background: "started", status: "completed" },
+        });
+        continue;
+      }
       // The structured result belongs to the message's only tool result.
       const result = content.length === 1 ? message.tool_use_result : undefined;
       events.push({
@@ -709,6 +736,21 @@ export class ClaudeTranslator {
           description: message.description,
           background: message.is_backgrounded === true,
         });
+        const call =
+          message.tool_use_id === undefined ? undefined : this.#tools.get(message.tool_use_id);
+        // A task sent a message starts again, from a call that is not an agent's.
+        const description =
+          call?.kind === "agent"
+            ? call.description
+            : this.#agentTasks.get(message.task_id)?.description;
+        if (description !== undefined)
+          this.#agentTasks.set(message.task_id, {
+            description,
+            // Claude starts a task sent a message in the background, whether or not it says so.
+            background:
+              message.is_backgrounded ??
+              (call?.kind === "agent" ? call.background === "started" : true),
+          });
         if (message.tool_use_id === undefined) return [];
         this.#taskTools.set(message.task_id, message.tool_use_id);
         return [];
@@ -716,6 +758,8 @@ export class ClaudeTranslator {
       case "task_updated": {
         const task = this.#work.get(message.task_id);
         const { status, description, is_backgrounded: background } = message.patch;
+        const agent = this.#agentTasks.get(message.task_id);
+        if (agent && background !== undefined) agent.background = background;
         if (status === "completed" || status === "failed" || status === "killed")
           this.#work.delete(message.task_id);
         else if (task)
@@ -739,13 +783,37 @@ export class ClaudeTranslator {
         this.#work.delete(message.task_id);
         const toolUseId = message.tool_use_id ?? this.#taskTools.get(message.task_id);
         const item = toolUseId === undefined ? undefined : this.#tools.get(toolUseId);
-        if (item?.kind === "agent") return [];
+        const agent = this.#agentTasks.get(message.task_id);
+        // A foreground agent's own call completes it, with what it found, before or after this.
+        if (agent?.background === false) return [];
+        if (item?.kind === "agent" && item.background === undefined) return [];
+        if (message.skip_transcript === true) return [];
+        // The summary is the agent's whole reply, cut as a foreground agent's is.
+        if (agent !== undefined && message.status !== "stopped") {
+          const found: Item = {
+            kind: "agent",
+            // Its own ID, not the call's: the call's item showed it starting, and a task reports again.
+            id: `claude-task-${message.uuid}`,
+            description: agent.description,
+            summary: "",
+            status: "running",
+            background: "finished",
+          };
+          return [
+            {
+              type: "item.completed",
+              item: complete(found, message.summary, message.status === "failed"),
+            },
+          ];
+        }
         const status = message.status === "completed" ? "finished" : message.status;
+        // Some other task's summary may be a whole report too; its start says enough.
+        const [first = "", ...rest] = message.summary.trim().split("\n");
         return [
           noticeEvent(
             "claude",
             message.status === "failed" ? "warning" : "info",
-            `Background task ${status}: ${message.summary}`,
+            `Background task ${status}: ${first.trim()}${rest.some((line) => line.trim()) ? " …" : ""}`,
           ),
         ];
       }

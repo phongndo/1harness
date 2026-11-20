@@ -102,7 +102,18 @@ export type Item =
   | { kind: "web_search"; id: string; query: string; status: ItemStatus }
   | { kind: "todo_list"; id: string; steps: TodoStep[] }
   | { kind: "plan"; id: string; text: string }
-  | { kind: "agent"; id: string; description: string; summary: string; status: ItemStatus }
+  | {
+      kind: "agent";
+      id: string;
+      description: string;
+      summary: string;
+      status: ItemStatus;
+      /**
+       * An agent that works on after its call returns: `started` is the call,
+       * which returns once it starts; `finished` is what it found, a later item.
+       */
+      background?: "started" | "finished";
+    }
   | { kind: "notice"; id: string; level: NoticeLevel; text: string };
 
 export type NoticeLevel = "info" | "warning" | "error";

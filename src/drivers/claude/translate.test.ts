@@ -29,6 +29,58 @@ function stored(content: string) {
   );
 }
 
+/** What a background agent's call returns, for the model. */
+const agentPlaceholder =
+  "Async agent launched successfully. (This tool result is internal metadata.)\nagentId: x";
+const agentReport = `**1. Parser**\n\n- ${"found it ".repeat(60)}\n\n[Harness note, not part of the agent's report]`;
+
+function launchAgent(input: Record<string, unknown>, backgrounded = true) {
+  const translator = new ClaudeTranslator();
+  const system = (fields: Record<string, unknown>) =>
+    translator.translate(message({ type: "system", session_id: "s", uuid: "u", ...fields }));
+  translator.translate(
+    assistant("m1", [
+      {
+        type: "tool_use",
+        id: "call1",
+        name: "Agent",
+        input: { description: "Explore the parser", prompt: "…", ...input },
+      },
+    ]),
+  );
+  system({
+    subtype: "task_started",
+    task_id: "a",
+    tool_use_id: "call1",
+    description: "Explore the parser",
+    is_backgrounded: backgrounded,
+  });
+  return { translator, system };
+}
+
+function agentCallResult(translator: ClaudeTranslator, content: string) {
+  return translator.translate(
+    message({
+      type: "user",
+      parent_tool_use_id: null,
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "call1", content }],
+      },
+    }),
+  );
+}
+
+const agentFinished = (uuid: string, summary: string, status = "completed") => ({
+  subtype: "task_notification",
+  task_id: "a",
+  tool_use_id: "call1",
+  status,
+  output_file: "",
+  summary,
+  uuid,
+});
+
 describe("ClaudeTranslator", () => {
   it("matches each per-block assistant message to the block streamed before it", () => {
     const translator = new ClaudeTranslator();
@@ -260,6 +312,114 @@ describe("ClaudeTranslator", () => {
     system({ subtype: "task_started", task_id: "c", description: "Watch", is_backgrounded: true });
     translator.clearBackgroundWork();
     assert.deepEqual(translator.backgroundWork, []);
+  });
+
+  describe("a background agent", () => {
+    it("starts with its call, then shows what it found as an item of its own", () => {
+      const { translator, system } = launchAgent({ run_in_background: true });
+      // The call returns at once, in words meant for the model, not the user.
+      assert.deepEqual(agentCallResult(translator, agentPlaceholder), [
+        {
+          type: "item.completed",
+          item: {
+            kind: "agent",
+            id: "call1",
+            description: "Explore the parser",
+            summary: "",
+            status: "completed",
+            background: "started",
+          },
+        },
+      ]);
+      const [event, ...rest] = system(agentFinished("n1", agentReport));
+      assert.equal(rest.length, 0);
+      assert.equal(event?.type, "item.completed");
+      const item = event?.type === "item.completed" ? event.item : null;
+      assert.equal(item?.kind, "agent");
+      if (item?.kind !== "agent") return;
+      assert.equal(item.id, "claude-task-n1");
+      assert.equal(item.description, "Explore the parser");
+      assert.equal(item.background, "finished");
+      assert.equal(item.status, "completed");
+      // Cut as a foreground agent's reply is, so a long report is not shown whole.
+      assert.ok(item.summary.startsWith("**1. Parser**"));
+      assert.ok(item.summary.length <= 400);
+      // A task sent a message reports again, as another item.
+      const [again] = system(agentFinished("n2", "Nothing new", "failed"));
+      assert.deepEqual(again?.type === "item.completed" && again.item, {
+        kind: "agent",
+        id: "claude-task-n2",
+        description: "Explore the parser",
+        summary: "Nothing new",
+        status: "failed",
+        background: "finished",
+      });
+    });
+
+    it("starts the same way when Claude runs it in the background unasked", () => {
+      const { translator } = launchAgent({});
+      const [event] = agentCallResult(translator, agentPlaceholder);
+      assert.equal(
+        event?.type === "item.completed" && event.item.kind === "agent" && event.item.background,
+        "started",
+      );
+    });
+
+    it("is not told twice when it ran in the foreground", () => {
+      const { translator, system } = launchAgent({}, false);
+      assert.deepEqual(system(agentFinished("n1", "done")), []);
+      const [event] = agentCallResult(translator, "done");
+      assert.deepEqual(event?.type === "item.completed" && event.item, {
+        kind: "agent",
+        id: "call1",
+        description: "Explore the parser",
+        summary: "done",
+        status: "completed",
+      });
+      // Its call may return before Claude reports the task's end.
+      const other = launchAgent({}, false);
+      assert.equal(agentCallResult(other.translator, "done").length, 1);
+      assert.deepEqual(other.system(agentFinished("n1", "done")), []);
+    });
+
+    it("finds what it found when Claude moves it to the background", () => {
+      const { translator, system } = launchAgent({}, false);
+      system({ subtype: "task_updated", task_id: "a", patch: { is_backgrounded: true } });
+      const [started] = agentCallResult(translator, agentPlaceholder);
+      assert.equal(
+        started?.type === "item.completed" &&
+          started.item.kind === "agent" &&
+          started.item.background,
+        "started",
+      );
+      const [found] = system(agentFinished("n1", "done"));
+      assert.equal(
+        found?.type === "item.completed" && found.item.kind === "agent" && found.item.background,
+        "finished",
+      );
+    });
+  });
+
+  it("says only how another background task began its report", () => {
+    const translator = new ClaudeTranslator();
+    const events = translator.translate(
+      message({
+        type: "system",
+        subtype: "task_notification",
+        session_id: "s",
+        uuid: "u",
+        task_id: "b",
+        status: "completed",
+        output_file: "",
+        summary: "Background command finished\n\nline\nline",
+      }),
+    );
+    assert.equal(events.length, 1);
+    const [event] = events;
+    assert.equal(
+      event?.type === "item.completed" && event.item.kind === "notice" && event.item.text,
+      "Background task finished: Background command finished …",
+    );
   });
 
   it("builds one task list from Claude's task tools", () => {
