@@ -648,6 +648,19 @@ export class ThreadView {
         return;
       }
     }
+    // What a background agent found comes on its own, often after its turn, as a task's result does.
+    if (item.kind === "agent" && item.background === "finished") {
+      if (existing) return;
+      const status = item.status === "failed" ? "failed" : "done";
+      const block = this.transcript.add({
+        kind: "result",
+        from: item.description,
+        status,
+        text: item.summary,
+      });
+      this.blocks.set(item.id, block);
+      return;
+    }
     if (!isToolItem(item) || this.#agentCalls.has(item.id)) return;
     if (existing?.kind === "tools") {
       const index = existing.items.findIndex((other) => other.id === item.id);

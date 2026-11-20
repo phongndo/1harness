@@ -479,6 +479,45 @@ describe("ThreadView", () => {
     ]);
   });
 
+  it("shows what a background agent found on its own, whenever it comes", () => {
+    const started = {
+      kind: "agent",
+      id: "call1",
+      description: "Explore the parser",
+      summary: "",
+      status: "completed",
+      background: "started",
+    } as const;
+    const found = (id: string) =>
+      ({
+        ...started,
+        id,
+        summary: "**Found it** in `parse.ts`\n\n- more",
+        background: "finished",
+      }) as const;
+    for (const during of [false, true]) {
+      const view = new ThreadView("t1");
+      view.startTurn(0);
+      view.item(started, true, true);
+      view.endTurn("completed", null, { at: 1000, up: 1, down: 1 });
+      // It comes between turns, or once Claude has started the turn it wakes for.
+      if (during) view.startTurn(2000);
+      view.item(found("n1"), true, during);
+      if (!during) view.startTurn(2000);
+      view.item(ran("c1", "ls"), true, true);
+      view.endTurn("completed", null, { at: 3000, up: 1, down: 1 });
+      const rows = plain(view.transcript.view(context, 20, 0).rows);
+      // Not folded into a turn's work, where it would read as an agent started.
+      assert.deepEqual(rows.slice(4, 7), [
+        "● Result from Explore the parser · done",
+        "  Found it in parse.ts",
+        "",
+      ]);
+      const details = plain(view.transcript.view({ ...context, details: true }, 20, 0).rows);
+      assert.equal(details[0], "● Started a background agent on Explore the parser");
+    }
+  });
+
   it("shows an agent in place of the call that started it", () => {
     const view = new ThreadView("t1");
     const agent = { label: "codex" };

@@ -1300,8 +1300,10 @@ function toolLine(item: ToolItem, settled: boolean, cwd: string, waiting = false
         `${verb("Searched web", "Searching web", "web search")} ${oneLineText(item.query)}`,
       );
     case "agent": {
+      if (item.background === "started" && item.status === "completed")
+        return style.muted(`Started a background agent on ${oneLineText(item.description)}`);
       // The harness's own agents: what they are doing while running, then what they found.
-      const summary = item.summary ? ` · ${oneLineText(firstLine(item.summary))}` : "";
+      const summary = item.summary ? ` · ${plainLine(item.summary)}` : "";
       return style.muted(
         `${verb("Agent finished", "Agent working on", "agent")} ${oneLineText(item.description)}${summary}`,
       );
