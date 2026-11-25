@@ -2,7 +2,11 @@ import type { HarnessRequest, RuntimeMode } from "../core/events.ts";
 import type { Message } from "../core/thread.ts";
 import { cacheHit, contextUsed, formatCost } from "../core/wording.ts";
 import type { ThreadState } from "../protocol.ts";
+import type { ComposerBox, ComposerPanel } from "./composer.ts";
 import type { Editor } from "./editor.ts";
+import type { Shown } from "./images.ts";
+import type { Collect, Look } from "./look.ts";
+import { typeLine, type Typeset } from "./typeset.ts";
 import { infoPanel, keyHint, type Menu } from "./menu.ts";
 import type { ResumeView } from "./resume.ts";
 import { commandRisk } from "./risk.ts";
@@ -257,6 +261,18 @@ export interface FooterState {
   /** The list open under the composer, such as commands or files. */
   suggestions: Menu | null;
   status: string;
+  /** Draws the composer as a panel, where the terminal shows pictures, with the model it names. */
+  box?:
+    | {
+        panel: ComposerBox;
+        look: Look;
+        model: string | null;
+        effort: string | null;
+        /** Typesets its lists and lines; without it, they are in cells. */
+        set?: Typeset | null;
+      }
+    | null
+    | undefined;
 }
 
 export interface Footer {
@@ -264,13 +280,29 @@ export interface Footer {
   cursor: CursorPosition | null;
   /** The list shown, and the footer row its rows start on. */
   list?: { menu: Menu; row: number };
+  /** Pictures the rows show, and where a click on the composer's controls goes. */
+  pictures?: Shown[];
+  spots?: ComposerPanel["spots"];
 }
+
+/** What the pages of its lines are kept by. */
+const ACTIVITY = {};
+const STATUS = {};
 
 /** The rows below the transcript: activity, queue, and the composer or a panel, in `height` rows at most. */
 export function footerRows(state: FooterState, width: number, height: number): Footer {
   const rows: string[] = [""];
   const { turn, prompt, panel } = state;
-  if (turn && !prompt) rows.push(activityLine(turn, state, width), "");
+  const pictures: Shown[] = [];
+  const collect: Collect = (shown) => pictures.push(shown);
+  const set = state.box?.set ?? null;
+  const line = (owner: object, row: string) =>
+    set ? typeLine(set, owner, row, width, collect) : row;
+  if (turn && !prompt) {
+    // A page's line is not drawn again for a blink.
+    const steady = set ? { ...state, blink: true } : state;
+    rows.push(line(ACTIVITY, activityLine(turn, steady, width)), "");
+  }
   // A queue held after a restart waits for the user's next message.
   rows.push(...queueRows(state.queue, state.held, width));
   if (state.queue.length > 0) rows.push("");
@@ -279,6 +311,7 @@ export function footerRows(state: FooterState, width: number, height: number): F
 
   let cursor: CursorPosition | null = null;
   let list: { menu: Menu; row: number } | undefined;
+  let spots: ComposerPanel["spots"] | undefined;
   if (prompt && !panel) {
     // The rows the footer has left, under the queue and the attention line,
     // less the status line, which keeps the bottom row under a prompt too.
@@ -288,49 +321,81 @@ export function footerRows(state: FooterState, width: number, height: number): F
     rows.push(...rendered.rows, "", state.status);
   } else {
     const limit = Math.max(1, Math.min(10, Math.floor(height / 3)));
-    // The rules mark it off, so it needs no marker of its own.
-    const layout = state.editor.layout("", width);
+    // Too short a pane for the panel's edges and a line of transcript has the plain one.
+    const frame =
+      state.box && height >= state.box.panel.chrome() + limit + 4
+        ? state.box.panel.frame(width)
+        : null;
+    const look = state.box?.look;
+    const room = frame ? frame.inner : width;
+    // Rules or the panel mark it off, so it needs no marker of its own.
+    const layout = state.editor.layout("", room);
     // An empty composer says what it takes.
-    if (state.editor.empty && !panel) {
+    if (state.editor.empty && (!panel || frame)) {
       const hint = state.busy
         ? state.steer
           ? "enter adds to this turn · tab queues for after it"
           : "enter queues for after this turn"
         : state.retry
-          ? retryHint(state.retry.at, width)
+          ? retryHint(state.retry.at, room)
           : ([
               "Ask anything · enter sends · / commands · $ skills · @ files",
               "Ask anything · enter sends · / commands · @ files",
               "Ask · enter sends · / commands · @ files",
               "Ask anything · enter sends · / commands",
               "Ask anything · enter sends",
-            ].find((text) => visibleWidth(text) <= width) ?? "Ask anything");
-      layout.rows[0] = truncate(composerHint(hint), width);
+            ].find((text) => visibleWidth(text) <= room) ?? "Ask anything");
+      layout.rows[0] = truncate(composerHint(hint), room);
     }
     const start = Math.max(0, Math.min(layout.cursor.row - limit + 1, layout.rows.length - limit));
     const composer = layout.rows.slice(start, start + limit);
     // Room for a list: the screen less the rows above it, the composer and
     // status line under it, the list's chrome, and a little transcript.
-    const listRows = Math.max(3, Math.min(14, height - rows.length - composer.length - 11));
+    const chrome = frame ? state.box!.panel.chrome() : 0;
+    const listRows = Math.max(
+      3,
+      Math.min(14, height - rows.length - composer.length - chrome - 11),
+    );
     const listed = panel?.kind === "menu" ? panel.menu : panel ? null : state.suggestions;
     // Lists and panels open above the composer, which keeps its place at the
     // bottom; the thread list takes the screen above it.
     const shown =
       panel?.kind === "info"
-        ? infoPanel(panel.title, panel.rows, width)
+        ? infoPanel(panel.title, panel.rows, width, frame && look ? { look, collect } : undefined)
         : panel?.kind === "resume"
           ? panel.view.render(width, Math.max(8, height - rows.length - composer.length - 3))
           : panel?.kind === "lineage"
             ? // Short enough to watch the thread on screen above it.
               panel.view.render(width, Math.max(10, Math.floor(height * 0.45)))
             : listed
-              ? listed.render(width, listRows)
+              ? listed.render(width, listRows, frame && look ? { look, collect, set } : undefined)
               : [];
     if (listed) list = { menu: listed, row: rows.length };
-    if (shown.length > 0) rows.push(...shown, "");
-    if (panel && state.editor.empty) {
+    // A list in the panels look opens from the composer, which stays under it.
+    const over =
+      frame !== null &&
+      shown.length > 0 &&
+      (panel === null || panel.kind === "menu" || panel.kind === "info");
+    if (shown.length > 0) rows.push(...shown, ...(over ? [] : [""]));
+    if (panel && state.editor.empty && !over) {
       // With nothing to show and keys going to the panel, it would only look typed into.
       rows.push(state.status);
+    } else if (frame && state.box) {
+      const { panel: box, model, effort } = state.box;
+      const drawn = box.render(frame, composer, {
+        model,
+        effort,
+        empty: state.editor.empty,
+        busy: state.busy,
+      });
+      if (!panel)
+        cursor = {
+          row: rows.length + drawn.top + layout.cursor.row - start,
+          column: drawn.left + layout.cursor.column,
+        };
+      collect(drawn.picture);
+      spots = drawn.spots.map((spot) => ({ ...spot, row: spot.row + rows.length }));
+      rows.push(...drawn.rows, line(STATUS, state.status));
     } else {
       // Rules above and below mark off what the composer holds.
       const edge = style.rule("─".repeat(width));
@@ -340,14 +405,12 @@ export function footerRows(state: FooterState, width: number, height: number): F
       rows.push(...composer, edge, state.status);
     }
   }
-  if (rows.length > height) {
-    const cut = rows.length - height;
-    if (cursor) cursor = { ...cursor, row: Math.max(0, cursor.row - cut) };
-    return {
-      rows: rows.slice(cut),
-      cursor,
-      ...(list && list.row >= cut ? { list: { ...list, row: list.row - cut } } : {}),
-    };
-  }
-  return { rows, cursor, ...(list ? { list } : {}) };
+  const cut = Math.max(0, rows.length - height);
+  return {
+    rows: rows.slice(cut),
+    cursor: cursor && { ...cursor, row: Math.max(0, cursor.row - cut) },
+    ...(list && list.row >= cut ? { list: { ...list, row: list.row - cut } } : {}),
+    ...(pictures.length > 0 ? { pictures } : {}),
+    ...(spots ? { spots: spots.map((spot) => ({ ...spot, row: spot.row - cut })) } : {}),
+  };
 }
