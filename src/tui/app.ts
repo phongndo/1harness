@@ -47,10 +47,12 @@ import { FetchCache } from "./cache.ts";
 import { FolderLabel } from "./folder.ts";
 import { Suggestions, inMenuOrder } from "./completion.ts";
 import { Editor, applyEditingKey } from "./editor.ts";
-import { contextRow, footerRows, statusLine, type Footer } from "./footer.ts";
+import { ComposerBox, modelLabel, type ComposerAction } from "./composer.ts";
+import { contextRow, footerRows, statusLine, type Footer, type FooterState } from "./footer.ts";
 import { nearestName, welcomeRows } from "./welcome.ts";
 import { InputDecoder, WHEEL_ROWS, type InputEvent, type Key } from "./input.ts";
 import { LivePages } from "./live.ts";
+import { Look } from "./look.ts";
 import { codeBlocks } from "./markdown.ts";
 import { ThreadLogs } from "./logs.ts";
 import { Menu, entry, type MenuConfig, type MenuEntry } from "./menu.ts";
@@ -68,7 +70,9 @@ import {
   threadStatusInput,
   type ThreadStatusInput,
 } from "./program-status.ts";
-import { setLightTheme } from "./theme.ts";
+import { isLightTheme, setLightTheme, setPanelsLook, surfaces } from "./theme.ts";
+import { Rail, beside, marginOf, type Asked, type RailFrame } from "./rail.ts";
+import { Typesetter } from "./typeset.ts";
 import { IMAGE_INDENT, type Hit, type RenderContext, type Target } from "./transcript.ts";
 import { Mouse, paintSelection } from "./pointer.ts";
 import { CELL_QUERY, GRAPHICS_QUERY, PLACEHOLDER_LIMIT, fit } from "./images.ts";
@@ -277,12 +281,28 @@ export class App {
   /**
    * ONEHARNESS_IMAGES and ONEHARNESS_PROGRAM_STATUS, read once: `1` or `0`
    * says whether the terminal shows pictures or takes status reports, over
-   * what it replies.
+   * what it replies. ONEHARNESS_LOOK=panels draws in the panels look.
    */
   #setting = {
     images: process.env["ONEHARNESS_IMAGES"],
     status: process.env["ONEHARNESS_PROGRAM_STATUS"],
+    look: process.env["ONEHARNESS_LOOK"],
   };
+  /** The panels look, and the composer in it, where that is asked for. */
+  #look: Look | null = null;
+  #typesetter: Typesetter | null = null;
+  #rail = new Rail();
+  /** The rail on screen, what it lists, and the one of them the mouse is over. */
+  #railed: { frame: RailFrame; asked: Asked[]; room: number; total: number } | null = null;
+  #railHover: number | null = null;
+  /** The message a click on the rail went to, kept at the top while what is under it is drawn. */
+  #railGoal: { view: ThreadView; block: object; scroll: number } | null = null;
+  #lastFrame = 0;
+  #composer: ComposerBox | null = null;
+  /** Where the column the last frame drew in starts on the screen. */
+  #left = 0;
+  /** The panel's controls in the last frame, by screen row, so a click can use one. */
+  #controls: NonNullable<Footer["spots"]> = [];
   /** Images, pages, and figures, drawn for the transcript where the terminal shows pictures. */
   #pictures: Pictures;
   /** What the last frame's transcript rows do when clicked, by screen row. */
@@ -425,10 +445,23 @@ export class App {
       client: this.#client,
       live: this.#livePages,
       liveHost: () => this.#liveHost,
-      columnWidth: () => this.#screen.columns,
+      columnWidth: () => this.#column().width,
       screenRows: () => this.#screen.rows,
       redraw: () => this.#redrawViews(),
     });
+    if (this.#setting.look === "panels") {
+      this.#look = new Look({
+        cell: () => this.#pictures.cell,
+        graphics: () => this.#pictures.graphics,
+        redraw: () => this.#redrawViews(),
+      });
+      this.#composer = new ComposerBox(this.#look);
+      this.#typesetter = new Typesetter({
+        arrived: () => {
+          if (!this.#viewer) this.#renderNow();
+        },
+      });
+    }
     this.#logs = new ThreadLogs({
       client: this.#client,
       views: this.#views,
@@ -455,7 +488,7 @@ export class App {
       schedule: () => this.#schedule(),
     });
     this.#pointer = new Mouse({
-      width: () => this.#screen.columns,
+      width: () => this.#column().width,
       scrollBy: (rows) => this.#scrollBy(rows),
       scrolled: () => this.#view.scroll,
       rows: (from, to) =>
@@ -1391,7 +1424,10 @@ export class App {
   /** What the transcript renders with: the screen's width, and what is on. */
   #renderContext(): RenderContext {
     return {
-      width: this.#screen.columns,
+      width: this.#column().width,
+      look: this.#look?.fits(this.#screen.columns) ? this.#look : null,
+      typeset: this.#look?.fits(this.#screen.columns) ? this.#typesetter : null,
+      busy: this.#live?.busy === true,
       cwd: this.#cwd(),
       blink: this.#blinkOn,
       now: Date.now(),
@@ -1534,6 +1570,7 @@ export class App {
   async #exit(): Promise<void> {
     if (this.#exiting) return;
     this.#exiting = true;
+    this.#typesetter?.close();
     const current = this.#current;
     this.#requests.clear();
     // What was still working, before a host in this process stops it on the way out.
@@ -2159,12 +2196,57 @@ export class App {
 
   /** The mouse: the viewer's while it is open, else what it selects in the transcript, or clicks. */
   #mouse(event: Extract<InputEvent, { type: "mouse" }>): void {
-    if (this.#viewer) this.#viewer.mouse(event);
-    else this.#pointer.event(event);
+    if (this.#viewer) {
+      this.#viewer.mouse(event);
+      return;
+    }
+    if (event.action === "move" || event.action === "press") {
+      const over = this.#railAt(event.row, event.column);
+      if (event.action === "press" && event.button === 0 && over !== null) {
+        this.#railTo(over);
+        return;
+      }
+      if (over !== this.#railHover && event.action === "move") {
+        this.#railHover = over;
+        this.#schedule();
+      }
+      if (event.action === "move") return;
+    }
+    // Everything but the viewer is laid out in the column.
+    this.#pointer.event({ ...event, column: event.column - this.#left });
+  }
+
+  /** The message the rail lists at a cell of the screen, or null off the rail. */
+  #railAt(row: number, column: number): number | null {
+    const frame = this.#railed?.frame;
+    if (!frame || column < frame.column || column >= frame.column + frame.columns) return null;
+    return frame.at(row, column - frame.column);
+  }
+
+  /** Scrolls to a message the rail lists, a row under the top. */
+  #railTo(index: number): void {
+    const railed = this.#railed;
+    const item = railed?.asked[index];
+    if (!railed || !item) return;
+    const scroll = Math.max(0, railed.total - railed.room - Math.max(0, item.row - 1));
+    this.#view.scroll = scroll;
+    this.#railGoal = item.block ? { view: this.#view, block: item.block, scroll } : null;
+    this.#schedule();
   }
 
   /** A click: on a list's entry it chooses it, on code it copies it, on a picture it shows it whole. */
   #click(row: number, column: number): void {
+    const control = this.#controls.find(
+      (spot) =>
+        row >= spot.row &&
+        row < spot.row + spot.rows &&
+        column >= spot.column &&
+        column < spot.column + spot.columns,
+    );
+    if (control) {
+      this.#control(control.action);
+      return;
+    }
     const list = this.#listAt;
     if (list && row >= list.row) {
       if (list.menu.entryAt(row - list.row))
@@ -2177,7 +2259,7 @@ export class App {
     // A live page takes a click on itself; its caption opens it whole.
     const live = target.kind === "picture" ? this.#livePages.showing(target.picture) : undefined;
     if (live && target.kind === "picture") {
-      const columns = this.#screen.columns - IMAGE_INDENT * 2;
+      const columns = this.#column().width - IMAGE_INDENT * 2;
       const size = fit(target.picture, columns, {
         ...this.#pictures.media(),
         maxRows: PLACEHOLDER_LIMIT,
@@ -2227,7 +2309,7 @@ export class App {
       figures: this.#pictures.figures,
       screen: () => ({ columns: this.#screen.columns, rows: this.#screen.rows }),
       media: () => this.#pictures.media(),
-      pageSize: () => this.#pictures.pageSize(this.#screen.columns - IMAGE_INDENT * 2),
+      pageSize: () => this.#pictures.pageSize(this.#column().width - IMAGE_INDENT * 2),
       copy: (text, said) => this.#copy(text, said),
       schedule: () => this.#schedule(),
       closed: () => {
@@ -2248,6 +2330,7 @@ export class App {
     this.#targets = [];
     this.#pointer.drawn([], 0);
     this.#listAt = null;
+    this.#controls = [];
     this.#screen.render(frame.rows, null, [frame.shown]);
   }
 
@@ -2771,18 +2854,22 @@ export class App {
 
   #schedule(): void {
     if (this.#frame || this.#exiting) return;
-    this.#frame = setTimeout(() => this.#renderNow(), FRAME_MS);
+    // A frame after a quiet spell goes at once, so a key shows as soon as it is pressed.
+    const since = performance.now() - this.#lastFrame;
+    this.#frame = setTimeout(() => this.#renderNow(), Math.max(0, FRAME_MS - since));
   }
 
   #renderNow(): void {
     if (this.#frame) clearTimeout(this.#frame);
     this.#frame = null;
     if (this.#exiting) return;
+    this.#lastFrame = performance.now();
     if (this.#viewer) {
       this.#renderViewer(this.#viewer);
       return;
     }
-    const width = this.#screen.columns;
+    const { left, width } = this.#column();
+    this.#left = left;
     const height = this.#screen.rows;
     const context = this.#renderContext();
     const shown = this.#view;
@@ -2794,16 +2881,37 @@ export class App {
     const reflowed = layout !== this.#layout;
     this.#layout = layout;
     if (shown.scroll > 0 && !reflowed) {
-      // Hold the view still while output arrives below it.
-      const scroll = Math.min(
-        Math.max(0, view.total - room),
-        shown.scroll + Math.max(0, view.total - shown.total),
+      // Hold the view still while output arrives below it, by what it ended at: rows
+      // above it may come to take more or less once they are drawn.
+      const held = shown.held && shown.transcript.below(context, shown.held.anchor);
+      const grown =
+        shown.held && held !== null ? held - shown.held.scroll : view.total - shown.total;
+      const scroll = Math.max(
+        0,
+        Math.min(
+          Math.max(0, view.total - room),
+          shown.scroll + (context.typeset ? grown : Math.max(0, grown)),
+        ),
       );
       if (scroll !== shown.scroll) {
         shown.scroll = scroll;
         view = shown.transcript.view(context, room, scroll);
         footer = this.#footer(width, height);
       }
+    }
+    // Rows are only guessed at until they are drawn, so the message a click went to is found
+    // again, until something else scrolls.
+    const goal = this.#railGoal;
+    if (goal && (goal.view !== shown || (shown.held && goal.scroll !== shown.held.scroll)))
+      this.#railGoal = null;
+    else if (goal) {
+      const row = shown.transcript.asked(context).find((item) => item.block === goal.block)?.row;
+      const scroll = Math.max(0, view.total - room - Math.max(0, (row ?? 0) - 1));
+      if (row !== undefined && scroll !== shown.scroll) {
+        shown.scroll = scroll;
+        view = shown.transcript.view(context, room, scroll);
+      }
+      goal.scroll = shown.scroll;
     }
     shown.total = view.total;
     if (reflowed && shown.scroll > Math.max(0, view.total - room)) {
@@ -2820,6 +2928,7 @@ export class App {
         footer = this.#footer(width, height);
       }
     }
+    shown.held = shown.scroll > 0 && view.last ? { anchor: view.last, scroll: shown.scroll } : null;
     // Nothing said yet: say what this thread will do, and how to begin. A notice, such as
     // a mistyped command, goes under that rather than taking its place.
     const current = this.#current;
@@ -2839,7 +2948,22 @@ export class App {
     // What the mouse finds where: each row's target, and what it selected, shown so.
     // The context row covers the top row, so that clicks and selection keep their places.
     // No room at all leaves no row to cover, and one more would make the frame too tall.
-    const pinned = view.top > 0 && view.rows.length > 0;
+    // The rail says where in the conversation this is.
+    const asked = context.typeset ? shown.transcript.asked(context) : [];
+    const frame =
+      this.#look && context.typeset
+        ? this.#rail.frame(
+            this.#look,
+            context.typeset,
+            asked,
+            { left, room, top: view.top, total: view.total, columns: width },
+            this.#railHover,
+            !isLightTheme(),
+          )
+        : null;
+    this.#railed = frame ? { frame, asked, room, total: view.total } : null;
+    this.#screen.hover(frame !== null);
+    const pinned = !context.typeset && view.top > 0 && view.rows.length > 0;
     this.#targets = [
       ...opening.map(() => null),
       ...(pinned ? [null, ...view.targets.slice(1)] : view.targets),
@@ -2866,9 +2990,19 @@ export class App {
       ? { menu: footer.list.menu, row: above.length + footer.list.row }
       : null;
     const cursor = footer.cursor
-      ? { row: above.length + footer.cursor.row, column: footer.cursor.column }
+      ? { row: above.length + footer.cursor.row, column: left + footer.cursor.column }
       : null;
-    this.#screen.render([...above, ...footer.rows], cursor, view.pictures);
+    this.#controls = (footer.spots ?? []).map((spot) => ({
+      ...spot,
+      row: above.length + spot.row,
+    }));
+    const drawn = [...above, ...footer.rows].map((row, at) => beside(row, at, left, frame));
+    this.#screen.render(
+      drawn,
+      cursor,
+      [...view.pictures, ...(footer.pictures ?? []), ...(frame?.pictures ?? [])],
+      drawn.map((_, at) => marginOf(at, left, frame)),
+    );
     this.#animate();
   }
 
@@ -2910,10 +3044,60 @@ export class App {
         retry: this.#live ? this.#view.retry : null,
         suggestions: this.#suggestions.menu,
         status: this.#statusLine(width),
+        box: this.#box(),
       },
       width,
       height,
     );
+  }
+
+  /** The column everything but a picture on the whole screen is drawn in: all of it, but in the panels look. */
+  #column(): { left: number; width: number } {
+    const { columns } = this.#screen;
+    const look = this.#look;
+    const fits = look?.fits(columns) === true;
+    setPanelsLook(fits);
+    this.#screen.ground(fits ? surfaces() : null);
+    return look ? look.column(columns) : { left: 0, width: columns };
+  }
+
+  /** The composer's panel and the model it names, as its button picks one. */
+  #box(): FooterState["box"] {
+    if (!this.#composer || !this.#look) return null;
+    const current = this.#current;
+    const model = current ? (current.info.model ?? this.#defaultModel()) : null;
+    return {
+      panel: this.#composer,
+      look: this.#look,
+      model: model ? modelLabel(model) : this.#harness ? this.#harnessLabel(this.#harness) : null,
+      effort: current?.info.effort ?? null,
+      set:
+        this.#typesetter && this.#typesetter.usable !== false
+          ? { typesetter: this.#typesetter, cell: this.#look.cell, dark: !isLightTheme() }
+          : null,
+    };
+  }
+
+  /** A click on one of the composer's controls, which does what its key or command does. */
+  #control(action: ComposerAction): void {
+    const press = (name: string) =>
+      this.#key({ name, text: "", ctrl: false, meta: false, shift: false });
+    switch (action) {
+      case "send":
+        press("return");
+        break;
+      case "stop":
+        press("escape");
+        break;
+      case "model":
+        void this.#command("/model");
+        break;
+      case "attach":
+        this.#editor.insert("@");
+        this.#suggestions.sync();
+        this.#schedule();
+        break;
+    }
   }
 
   #statusLine(width: number): string {

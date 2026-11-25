@@ -12,6 +12,7 @@ import {
   groupSummary,
   isToolItem,
   type Block,
+  type Anchor,
 } from "./transcript.ts";
 
 /** A turn's tokens each way, as its activity line and summary say them. */
@@ -149,6 +150,8 @@ export class ThreadView {
   outcome: string | null = null;
   /** Rows the view sits above the bottom of the transcript; 0 follows new output. */
   scroll = 0;
+  /** What the last frame ended at while scrolled up, and how far up that was, to stay there. */
+  held: { anchor: Anchor; scroll: number } | null = null;
   total = 0;
   /** The agents this thread started, by thread ID, and the blocks that show them. */
   #agents = new Map<string, Extract<Block, { kind: "agents" }>>();

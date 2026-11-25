@@ -117,6 +117,11 @@ Environment:
   ONEHARNESS_CLAUDE_PATH    claude executable (default: claude on PATH)
   ONEHARNESS_CODEX_PATH     codex executable (default: codex on PATH)
   ONEHARNESS_OPENCODE_PATH  opencode executable (default: opencode on PATH)
+  ONEHARNESS_LOOK=panels    draw the conversation in a column, on rounded panels, where
+                            the terminal shows pictures (experimental); as HTML with an
+                            html2term that takes fonts
+  ONEHARNESS_FONT           a font file for text in pictures
+  ONEHARNESS_CODE_FONT      a font file for code in pictures
 `;
 
 function choice<T extends string>(
