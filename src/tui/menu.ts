@@ -1,6 +1,18 @@
 import type { Key } from "./input.ts";
+import { ICON_COLUMNS, type Collect, type Look } from "./look.ts";
+import { LIST, optionsHtml } from "./markup.ts";
+import { density } from "./look.ts";
+import type { Typeset } from "./typeset.ts";
 import { style } from "./theme.ts";
 import { pad, spread, truncate, visibleWidth, wrap } from "./text.ts";
+
+/** Draws a list on a surface over the composer, in the panels look. */
+export interface MenuLook {
+  look: Look;
+  collect: Collect;
+  /** Draws it as a page; without it, in cells. */
+  set?: Typeset | null;
+}
 
 export interface MenuEntry {
   label: string;
@@ -142,6 +154,8 @@ export class Menu {
   #shown = 8;
   /** Where the last render put its entries: the row of the first, and which entry that is. */
   #drawn = { row: 0, start: 0, count: 0 };
+  /** The rows its entries take, where it is drawn as a page. */
+  #spots: { offset: number; start: number; end: number }[] | null = null;
   /** Where a bare list's rows start: the column of the word being completed. */
   indent = 0;
 
@@ -206,7 +220,9 @@ export class Menu {
    * click on it does; says whether there was one to select.
    */
   entryAt(row: number): boolean {
-    const offset = row - this.#drawn.row;
+    // A page's entries are no whole number of rows: a row is that of the entry its middle is in.
+    const spot = this.#spots?.find((one) => row >= one.start && row < one.end);
+    const offset = this.#spots ? (spot?.offset ?? -1) : row - this.#drawn.row;
     if (offset < 0 || offset >= this.#drawn.count) return false;
     const index = this.#drawn.start + offset;
     if (this.#visible()[index]?.entry.inert !== false) return false;
@@ -301,7 +317,13 @@ export class Menu {
   }
 
   /** Rows for the panel, showing at most `maxRows` entries around the selection. */
-  render(width: number, maxRows: number): string[] {
+  render(width: number, maxRows: number, panels?: MenuLook): string[] {
+    this.#spots = null;
+    if (panels)
+      return (
+        (panels.set && this.#renderPage(width, maxRows, panels, panels.set)) ||
+        this.#renderPanel(width, maxRows, panels)
+      );
     if (this.config.bare) return this.#renderBare(width, maxRows);
     const visible = this.#visible();
     // Informational rows are not counted, unless they are all there is.
@@ -399,14 +421,7 @@ export class Menu {
       const second = lines.length > 2 ? truncate(`${lines[1]} ${lines[2]}`, width) : lines[1];
       rows.push("", lines[0] ?? "", second ?? "");
     }
-    const keys = ["↑↓ move"];
-    if (this.config.filter || this.config.narrows) keys.push("type to filter");
-    if (this.#tabs.length > 0) keys.push("tab category");
-    if (visible.some(({ entry: item }) => !item.inert)) {
-      keys.push(`enter ${this.config.action}`);
-      if (this.config.save) keys.push(`ctrl+s ${this.config.save}`);
-    }
-    keys.push(`esc ${this.config.leave}`);
+    const keys = this.#keys(visible);
     // A list that says nothing of what lies past its last row reads as all there is.
     // Group headings are rows but nothing to count, as the title's count knows.
     const before = visible.slice(0, this.#index + 1).filter(({ entry: item }) => !item.inert);
@@ -416,6 +431,133 @@ export class Menu {
       visible.length > shown ? (below > 0 ? `↓ ${below} more · ${place}` : place) : "";
     rows.push(rule(width, position), hints(keys, width));
     return rows;
+  }
+
+  #keys(visible: readonly { entry: MenuEntry }[]): string[] {
+    const keys = ["↑↓ move"];
+    if (this.config.filter || this.config.narrows) keys.push("type to filter");
+    if (this.#tabs.length > 0) keys.push("tab category");
+    if (visible.some(({ entry: item }) => !item.inert)) {
+      keys.push(`enter ${this.config.action}`);
+      if (this.config.save) keys.push(`ctrl+s ${this.config.save}`);
+    }
+    keys.push(`esc ${this.config.leave}`);
+    return keys;
+  }
+
+  /**
+   * The list on a surface that opens over the composer. One that completes
+   * what is typed is its entries alone; one that stands by itself has what it
+   * filters by over them, and its keys under them.
+   */
+  #renderPanel(width: number, maxRows: number, { look, collect }: MenuLook): string[] {
+    const visible = this.#visible();
+    const inner = look.popoverInner(width);
+    const surface = look.menuSurface();
+    const { colors } = look;
+    const columns = inner + 2;
+    const alone = !this.config.narrows && !this.config.bare;
+    const lead = " ".repeat(Math.max(0, Math.floor((width - columns) / 2)));
+    const rows = [lead + look.cap("top", surface, columns, collect)];
+    const line = (text: string) => rows.push(lead + look.body(text, surface, columns, collect));
+    const across = (color: string) =>
+      rows.push(lead + look.divide(surface, columns, color, collect));
+    if (alone) {
+      let title = this.#query || style.muted(this.config.title);
+      if (this.#tabs.length > 0)
+        title += tabRow(this.#tabs, this.#tab, inner - ICON_COLUMNS - 4 - visibleWidth(title));
+      const mark = this.config.filter
+        ? `${look.icon("search", collect, false, surface.fill)} `
+        : "";
+      line(truncate(` ${mark}${title}`, inner));
+      across(this.config.filter ? colors.focus : surface.border!);
+    }
+    const shown = Math.max(1, maxRows);
+    this.#shown = shown;
+    const start = Math.max(
+      0,
+      Math.min(this.#index - Math.floor(shown / 2), visible.length - shown),
+    );
+    this.#drawn = { row: rows.length, start, count: Math.min(shown, visible.length - start) };
+    for (const [offset, { entry: item }] of visible.slice(start, start + shown).entries()) {
+      const current = start + offset === this.#index && !item.inert;
+      const chosen = item.tag === "current" ? ` ${style.muted("✓")}` : "";
+      const tag = item.tag && !chosen ? style.muted(item.tag) : "";
+      const label = item.inert ? style.muted(item.label) : style.strong(item.label);
+      const detail = item.detail ? `  ${style.muted(item.detail)}` : "";
+      // Between the chosen row's rounded ends, whether or not it is chosen.
+      const text = spread(`${label}${chosen}${detail}`, tag, inner - 2);
+      line(current ? look.chosen(text, inner, surface.fill, collect) : ` ${text}`);
+    }
+    if (visible.length === 0) line(` ${style.muted("No matches")}`);
+    if (alone) {
+      const place = visible.length > shown ? `${this.#index + 1} / ${visible.length}` : "";
+      across(surface.border!);
+      line(
+        ` ${spread(hints(this.#keys(visible), inner - 2 - (place ? place.length + 2 : 0)), style.muted(place), inner - 2)}`,
+      );
+    }
+    return rows;
+  }
+
+  /** The list as a page; null where pages cannot be drawn. */
+  #renderPage(
+    width: number,
+    maxRows: number,
+    { look, collect }: MenuLook,
+    { typesetter, cell, dark }: Typeset,
+  ): string[] | null {
+    const visible = this.#visible();
+    const columns = look.popoverInner(width) + 2;
+    const lead = " ".repeat(Math.max(0, Math.floor((width - columns) / 2)));
+    const scale = density(cell);
+    const rowHeight = cell.height / scale;
+    const across = (columns * cell.width) / scale;
+    const alone = !this.config.narrows && !this.config.bare;
+    const chrome: number = LIST.end + (alone ? LIST.head + LIST.foot : 0);
+    const shown = Math.max(1, Math.floor(((maxRows + 4) * rowHeight - chrome) / LIST.row));
+    const start = Math.max(
+      0,
+      Math.min(this.#index - Math.floor(shown / 2), visible.length - shown),
+    );
+    const listed = visible.slice(start, start + shown);
+    const used = chrome + Math.max(1, listed.length) * LIST.row;
+    const height = Math.ceil(used / rowHeight) * rowHeight;
+    const place = visible.length > shown ? `${this.#index + 1} / ${visible.length}` : "";
+    const title = this.#query || this.config.title;
+    const body = optionsHtml(
+      listed.map(({ entry: item }, offset) => ({
+        label: item.label,
+        detail: item.detail,
+        tag: item.tag === "current" ? "" : item.tag,
+        chosen: start + offset === this.#index && !item.inert,
+        current: item.tag === "current",
+        inert: item.inert,
+      })),
+      alone
+        ? {
+            text: title,
+            hint: this.#query === "",
+            search: this.config.filter,
+            tabs: this.#tabs.length > 0 ? tabRow(this.#tabs, this.#tab, columns - 20) : "",
+          }
+        : null,
+      alone ? { keys: hints(this.#keys(visible), columns), place } : null,
+      across,
+      height,
+    );
+    const drawn = typesetter.sheet(this, body, columns, cell, dark);
+    if (drawn === null) return null;
+    this.#shown = shown;
+    this.#drawn = { row: 0, start, count: listed.length };
+    this.#spots = [];
+    if (drawn === "pending") return [];
+    const { sheet } = drawn;
+    for (const picture of sheet.pictures) collect(picture);
+    this.#spots = sheet.middles.flatMap(({ id, start: from, end }) =>
+      id.startsWith("m:") ? [{ offset: Number(id.slice(2)), start: from, end }] : [],
+    );
+    return sheet.rows.map((row) => lead + row);
   }
 
   #renderBare(width: number, maxRows: number): string[] {
@@ -506,7 +648,20 @@ export function infoPanel(
   title: string,
   rows: readonly [string, string][],
   width: number,
+  panels?: MenuLook,
 ): string[] {
+  if (panels) {
+    const inner = panels.look.popoverInner(width) - 2;
+    // The plain panel's rows, less its rules, on the surface.
+    const lines = infoPanel(title, rows, inner).filter(
+      (_, index, all) => index > 0 && index !== all.length - 2,
+    );
+    return panels.look.popover(
+      lines.map((line) => ` ${line}`),
+      width,
+      panels.collect,
+    );
+  }
   const labelWidth = Math.max(...rows.map(([label]) => visibleWidth(label))) + 6;
   const lines = [rule(width), truncate(style.bold(style.strong(title)), width), ""];
   for (const [label, value] of rows) {
