@@ -47,6 +47,24 @@ export function readable(svg: string, font: Uint8Array | null): boolean {
   }
 }
 
+/** Text for an SVG. */
+export function escapeXml(text: string): string {
+  return text.replace(/[&<>"]/g, (char) => `&#${char.charCodeAt(0)};`);
+}
+
+/** How wide a line of text is drawn, in its own pixels; resvg must have loaded. */
+export function svgTextWidth(text: string, size: number): number {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="2000" height="100"><text xml:space="preserve" x="0" y="50" font-size="${size}" font-family="sans-serif">${escapeXml(text)}</text></svg>`;
+  try {
+    const drawn = new Resvg(svg, fontOptions(figureFont()));
+    const box = drawn.innerBBox();
+    drawn.free();
+    return box ? box.x + box.width : 0;
+  } catch {
+    return 0;
+  }
+}
+
 /** The size an SVG says it is, in its own pixels. */
 export function svgSize(svg: string): { width: number; height: number } {
   const root = /<svg\b[^>]*>/.exec(svg)?.[0] ?? "";

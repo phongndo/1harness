@@ -4,6 +4,8 @@
 // the terminal draws the picture in, so it scrolls and redraws like text. Rex
 // keeps pictures shown this way, where it drops ones placed over the cells.
 
+import { visibleWidth } from "./text.ts";
+
 /** A cell's size in pixels, as terminals that report it usually have it. */
 export const DEFAULT_CELL = { width: 8, height: 16 };
 
@@ -63,6 +65,11 @@ export function picture(bytes: Uint8Array): Picture | null {
     pixelWidth: size.width,
     pixelHeight: size.height,
   };
+}
+
+/** A picture from a PNG that is base64-encoded already, of a size known. */
+export function encodedPicture(data: string, pixelWidth: number, pixelHeight: number): Picture {
+  return { id: nextId++, data, pixelWidth, pixelHeight };
 }
 
 /**
@@ -188,13 +195,77 @@ export function placeVirtually(shown: Shown): string {
  * row and column, in the foreground color that names the picture's ID.
  */
 export function placeholderRow(image: Picture, row: number, columns: number): string {
-  const id = image.id;
-  const color = `\x1b[38;2;${(id >> 16) & 255};${(id >> 8) & 255};${id & 255}m`;
+  return placeholderCells(image, row, 0, columns);
+}
+
+/**
+ * The cells of a picture's row from column `from` up to `to`, as where text
+ * takes the others. Each says where it is: the protocol lets a run leave that
+ * to its first, but not every renderer of it goes on from there.
+ */
+export function placeholderCells(image: Picture, row: number, from: number, to: number): string {
+  if (to <= from) return "";
   let cells = "";
-  const rowMark = DIACRITICS[Math.min(row, PLACEHOLDER_LIMIT - 1)] ?? "";
-  for (let column = 0; column < columns; column++)
-    cells += PLACEHOLDER + rowMark + (DIACRITICS[Math.min(column, PLACEHOLDER_LIMIT - 1)] ?? "");
-  return `${color}${cells}\x1b[39m`;
+  for (let column = from; column < to; column++) cells += placeholderMark(row, column);
+  return `${placeholderColor(image.id)}${cells}\x1b[39m`;
+}
+
+/** The foreground color that names a picture by its ID. */
+export function placeholderColor(id: number): string {
+  return `\x1b[38;2;${(id >> 16) & 255};${(id >> 8) & 255};${id & 255}m`;
+}
+
+/** A placeholder cell that says which of a picture's cells it shows. */
+export function placeholderMark(row: number, column: number): string {
+  return PLACEHOLDER + diacritic(row) + diacritic(column);
+}
+
+function diacritic(at: number): string {
+  return DIACRITICS[Math.min(at, PLACEHOLDER_LIMIT - 1)] ?? "";
+}
+
+/**
+ * A row without its first `count` cells, in the styles it had there: where it
+ * starts within a run of placeholders, its first says where it is.
+ */
+export function dropCells(row: string, count: number): string {
+  let styles = "";
+  let column = 0;
+  let mark: { row: number; column: number; at: number } | null = null;
+  for (let at = 0; at < row.length;) {
+    // oxlint-disable-next-line no-control-regex
+    const escape = /^\x1b(?:\[[\d;:]*[a-zA-Z]|\]8;;[^\x1b]*\x1b\\)/.exec(row.slice(at, at + 2048));
+    if (escape) {
+      styles += escape[0];
+      at += escape[0].length;
+      continue;
+    }
+    const char = String.fromCodePoint(row.codePointAt(at) ?? 0);
+    if (char === PLACEHOLDER) {
+      const own = /^(\p{M})(\p{M})/u.exec(row.slice(at + char.length, at + char.length + 6));
+      if (own)
+        mark = {
+          row: DIACRITICS.indexOf(own[1] ?? ""),
+          column: DIACRITICS.indexOf(own[2] ?? ""),
+          at: column,
+        };
+      if (column >= count) {
+        const rest = row.slice(at + char.length + (own?.[0].length ?? 0));
+        const start = mark
+          ? placeholderMark(mark.row, mark.column + column - mark.at)
+          : char + (own?.[0] ?? "");
+        return styles + start + rest;
+      }
+      at += char.length + (own?.[0].length ?? 0);
+      column++;
+      continue;
+    }
+    const width = visibleWidth(char);
+    if (column >= count && width > 0) return styles + " ".repeat(column - count) + row.slice(at);
+    column += width;
+    at += char.length;
+  }
+  return "";
 }
 
 /** A picture's rows at the size `fit` gave it, each after `indent`. */
