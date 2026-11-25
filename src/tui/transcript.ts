@@ -14,8 +14,28 @@ import {
 import { FIGURE_NAMES, type Figure } from "./figures.ts";
 import { htmlText } from "./html.ts";
 import { fit, pictureRows, type MediaContext, type Picture, type Shown } from "./images.ts";
-import { renderMarkdown, type MarkdownOptions } from "./markdown.ts";
-import { diffLine, style } from "./theme.ts";
+import { inline, renderMarkdown, type MarkdownOptions } from "./markdown.ts";
+import {
+  ICONS,
+  ICON_COLUMNS,
+  bubbleInner,
+  bubbleRows,
+  density,
+  type IconName,
+  type Look,
+} from "./look.ts";
+import {
+  bubbleHtml,
+  flow,
+  hasFigures,
+  markup,
+  workHtml,
+  workedHtml,
+  type Part,
+  type WorkRow,
+} from "./markup.ts";
+import { diffLine, isLightTheme, style } from "./theme.ts";
+import type { Typesetter } from "./typeset.ts";
 import {
   diffBody,
   firstLine,
@@ -125,6 +145,14 @@ interface Spot {
 
 export interface RenderContext {
   width: number;
+  /** Draws on surfaces, in the panels look; null draws on the terminal as it is. */
+  look?: Look | null;
+  /** Draws blocks as pages, in the panels look; null draws them in cells. */
+  typeset?: Typesetter | null;
+  /** The thread's turn is running, so its last reply may yet grow. */
+  busy?: boolean;
+  /** Lays rows of work out for a page: an icon is a mark of its own, and nothing is cut to fit. */
+  marks?: boolean;
   cwd: string;
   /** Phase of the shared blink, for markers of work in progress. */
   blink: boolean;
@@ -160,9 +188,10 @@ export interface RenderContext {
 /** Columns kept on each side of an image, as prose has. */
 export const IMAGE_INDENT = 2;
 
-function mediaKey(media: MediaContext | undefined): string {
+function mediaKey(media: MediaContext | undefined, look?: Look | null): string {
+  const panels = look ? `:${look.colors.page}` : "";
   return media && media.graphics
-    ? `${media.cell.width}x${media.cell.height}:${media.maxRows}`
+    ? `${media.cell.width}x${media.cell.height}:${media.maxRows}${panels}`
     : "text";
 }
 
@@ -179,21 +208,44 @@ interface Settled {
   spots: Spot[];
 }
 
+/** A row of a block, counted from its first, which a view ends before. */
+export interface Anchor {
+  block: Block;
+  row: number;
+}
+
+/** Rows a block may take without being out of reach of a view just above it. */
+const DRAWN_AT_ONCE = 60;
+
+/** A block laid out: its rows, what they show and do, and the blank rows after it. */
+interface Laid {
+  rows: string[];
+  pictures: Placed[];
+  spots: Spot[];
+  gap: number;
+}
+
+/** A picture, and the block's rows that show it where not all of them may. */
+type Placed = Shown & { start?: number; end?: number };
+
 interface Entry {
   block: Block;
   version: number;
   settled?: Settled | null;
+  /** When it last changed. */
+  grew?: number;
   cache: {
     width: number;
     version: number;
     blink: boolean;
     details: boolean;
     media: string;
-    rows: string[];
-    /** The pictures its rows show. */
-    pictures: Shown[];
-    /** What its rows do when clicked. */
-    spots: Spot[];
+    live: boolean;
+    /** The count of pages drawn when it waited for one, or null when it waits for none. */
+    waits: number | null;
+    /** What it shows has been drawn or asked for; otherwise it is only as tall as it may be. */
+    asked: boolean;
+    laid: Laid;
   } | null;
 }
 
@@ -252,6 +304,7 @@ export class Transcript {
       const entry = this.#entries[index];
       if (entry?.block === block) {
         entry.version++;
+        entry.grew = Date.now();
         return;
       }
     }
@@ -288,12 +341,14 @@ export class Transcript {
   lastTurnRow(context: RenderContext): number {
     let total = 0;
     let row = 0;
+    let space = 0;
     for (const entry of this.#entries) {
-      const { rows } = this.#rows(entry, context);
+      const { rows, gap } = this.#rows(entry, context);
       if (rows.length === 0) continue;
-      if (total > 0) total += 1;
+      total += space;
       if (entry.block.kind === "user") row = total;
       total += rows.length;
+      space = gap;
     }
     return row;
   }
@@ -302,15 +357,55 @@ export class Transcript {
   askedAbove(context: RenderContext, row: number): string | null {
     let total = 0;
     let asked: string | null = null;
+    let space = 0;
     for (const entry of this.#entries) {
-      const { rows } = this.#rows(entry, context);
+      const { rows, gap } = this.#rows(entry, context);
       if (rows.length === 0) continue;
-      if (total > 0) total += 1;
+      total += space;
       if (total > row) break;
       if (entry.block.kind === "user") asked = entry.block.text;
       total += rows.length;
+      space = gap;
     }
     return asked;
+  }
+
+  /**
+   * Each message the user sent, with the row it starts at and the reply it
+   * got last, for a rail that lists them.
+   */
+  asked(context: RenderContext): { row: number; text: string; reply: string; block: Block }[] {
+    const found: { row: number; text: string; reply: string; block: Block }[] = [];
+    let total = 0;
+    let space = 0;
+    for (const entry of this.#entries) {
+      const { block } = entry;
+      const { rows, gap } = this.#rows(entry, context);
+      if (rows.length === 0) continue;
+      total += space;
+      const last = found.at(-1);
+      if (block.kind === "user") found.push({ row: total, text: block.text, reply: "", block });
+      else if (block.kind === "assistant" && last) last.reply = block.text;
+      total += rows.length;
+      space = gap;
+    }
+    return found;
+  }
+
+  /** How many rows come after a place the view ended at, whatever came or grew since. */
+  below(context: RenderContext, anchor: Anchor): number | null {
+    let below = 0;
+    let first = true;
+    for (const entry of this.#entries.toReversed()) {
+      const { rows, gap } = this.#rows(entry, context, false);
+      if (rows.length === 0) continue;
+      if (!first) below += gap;
+      first = false;
+      if (entry.block === anchor.block)
+        return Math.max(0, below + rows.length - Math.min(anchor.row, rows.length));
+      below += rows.length;
+    }
+    return null;
   }
 
   /**
@@ -328,35 +423,46 @@ export class Transcript {
     pictures: Shown[];
     targets: (Hit | null)[];
     top: number;
+    last: Anchor | null;
   } {
-    const blocks: { rows: string[]; pictures: Shown[]; spots: Spot[] }[] = [];
+    const blocks: Laid[] = [];
+    const entries: Entry[] = [];
     let total = 0;
-    for (const entry of this.#entries) {
-      const rendered = this.#rows(entry, context);
-      if (rendered.rows.length === 0) continue;
-      total += rendered.rows.length + (blocks.length > 0 ? 1 : 0);
-      blocks.push(rendered);
+    // From the last: what is near the view is drawn, the newest first, and the rest only sized.
+    for (const entry of this.#entries.toReversed()) {
+      const near = total < scroll + height * 2;
+      const laid = this.#rows(entry, context, near && total + DRAWN_AT_ONCE >= scroll - height);
+      if (laid.rows.length === 0) continue;
+      total += laid.rows.length + (blocks.length > 0 ? laid.gap : 0);
+      blocks.push(laid);
+      entries.push(entry);
     }
+    blocks.reverse();
+    entries.reverse();
     const end = Math.max(0, total - Math.max(0, scroll));
     const start = Math.max(0, end - height);
     const rows: string[] = [];
     const targets: (Hit | null)[] = [];
-    const pictures: Shown[] = [];
+    const pictures = new Map<number, Shown>();
     let position = 0;
-    for (const [index, { rows: block, pictures: used, spots }] of blocks.entries()) {
-      const separated = index > 0;
-      const size = block.length + (separated ? 1 : 0);
+    let space = 0;
+    let last: Anchor | null = null;
+    for (const [index, { rows: block, pictures: used, spots, gap }] of blocks.entries()) {
+      const size = block.length + space;
+      const entry = entries[index];
+      if (entry && position < end) last = { block: entry.block, row: end - position - space };
       if (position + size > start && position < end) {
-        if (separated && position >= start) {
-          rows.push("");
-          targets.push(null);
-        }
-        const from = Math.max(0, start - position - (separated ? 1 : 0));
-        const to = Math.min(block.length, end - position - (separated ? 1 : 0));
-        // The pictures of a block in view go to the terminal ahead of the text showing them.
+        for (let blank = 0; blank < space; blank++)
+          if (position + blank >= start && position + blank < end) {
+            rows.push("");
+            targets.push(null);
+          }
+        const from = Math.max(0, start - position - space);
+        const to = Math.min(block.length, end - position - space);
+        // The pictures of what is in view go to the terminal ahead of the text showing them.
         for (const shown of used)
-          if (!pictures.some((other) => other.picture.id === shown.picture.id))
-            pictures.push(shown);
+          if ((shown.start ?? 0) < to && (shown.end ?? block.length) > from)
+            pictures.set(shown.picture.id, shown);
         for (let row = from; row < to; row++) {
           rows.push(block[row] ?? "");
           const spot = spots.find((one) => row >= one.start && row < one.end);
@@ -364,19 +470,22 @@ export class Transcript {
         }
       }
       position += size;
+      space = gap;
       if (position >= end) break;
     }
-    return { rows, total, pictures, targets, top: start };
+    return { rows, total, pictures: [...pictures.values()], targets, top: start, last };
   }
 
-  #rows(
-    entry: Entry,
-    context: RenderContext,
-  ): { rows: string[]; pictures: Shown[]; spots: Spot[] } {
+  #rows(entry: Entry, context: RenderContext, draw = false): Laid {
     // A live block renders again on each blink, which also moves its timers on.
     const blink = isAnimated(entry.block) && context.blink;
     const details = context.details === true;
-    const media = mediaKey(context.media);
+    const media = mediaKey(context.media, context.look);
+    // A reply still coming shows as far as its last whole block.
+    const live =
+      context.busy === true &&
+      entry === this.#entries.at(-1) &&
+      context.now - (entry.grew ?? 0) < PAUSE_MS;
     const cache = entry.cache;
     if (
       cache &&
@@ -384,36 +493,275 @@ export class Transcript {
       cache.version === entry.version &&
       cache.blink === blink &&
       cache.details === details &&
-      cache.media === media
+      cache.media === media &&
+      cache.live === live &&
+      (cache.waits === null || cache.waits === context.typeset?.stamp || (!draw && !cache.asked)) &&
+      (cache.asked || !draw)
     ) {
-      return cache;
+      return cache.laid;
     }
-    const pictures: Shown[] = [];
-    const spots: Spot[] = [];
-    const marking: RenderContext = {
-      ...context,
-      collect: (shown) => pictures.push(shown),
-      mark: (target, start, end) => spots.push({ start, end, target }),
-    };
-    const rows =
-      entry.block.kind === "assistant"
-        ? replyRows(entry, entry.block.text, marking, `${context.width}\0${details}\0${media}`, {
-            pictures,
-            spots,
-          })
-        : renderBlock(entry.block, marking);
-    entry.cache = {
-      width: context.width,
-      version: entry.version,
-      blink,
-      details,
-      media,
-      rows,
-      pictures,
-      spots,
-    };
-    return entry.cache;
+    const key = { width: context.width, version: entry.version, blink, details, media, live };
+    const set = context.typeset ? this.#typeset(entry, context, live, draw) : null;
+    if (set) {
+      entry.cache = { ...key, asked: draw || set.waits === null, ...set };
+      return set.laid;
+    }
+    const laid = cellRows(entry, context, `${context.width}\0${details}\0${media}`);
+    entry.cache = { ...key, asked: true, waits: null, laid };
+    return laid;
   }
+
+  /** A block drawn as a page, or blank at about its size until it is; null for one drawn in cells. */
+  #typeset(
+    entry: Entry,
+    context: RenderContext,
+    live: boolean,
+    draw: boolean,
+  ): { laid: Laid; waits: number | null } | null {
+    const { typeset, look } = context;
+    if (!typeset || !look || !context.media?.graphics || typeset.usable === false) return null;
+    const none = { rows: [], pictures: [], spots: [], gap: 0 };
+    const { cell } = look;
+    const scale = density(cell);
+    const dark = !isLightTheme();
+    if (CELLS.has(entry.block.kind)) return null;
+    if (!draw && !typeset.known(entry, context.width, cell, dark)) {
+      if ("folded" in entry.block && entry.block.folded && !context.details)
+        return { laid: none, waits: null };
+      const rows = Array.from({ length: guess(entry.block, context.width) }, () => "");
+      return { laid: { ...none, rows, gap: 1 }, waits: typeset.stamp };
+    }
+    const made = pageOf(entry.block, context, (context.width * cell.width) / scale, live);
+    if (!made) return null;
+    if (made.body.length === 0) return { laid: none, waits: null };
+    const drawn = typeset.sheet(entry, made.body, context.width, cell, dark);
+    if (drawn === null) return null;
+    if (drawn === "pending") {
+      const rows = Array.from({ length: live ? 0 : guess(entry.block, context.width) }, () => "");
+      return { laid: { ...none, rows, gap: 1 }, waits: typeset.stamp };
+    }
+    const { sheet, stale } = drawn;
+    const spots = sheet.spots.flatMap(({ id, start, end }): Spot[] => {
+      const code = id.startsWith("c:") ? made.code[Number(id.slice(2))] : undefined;
+      return code ? [{ start, end, target: { kind: "code", ...code } }] : [];
+    });
+    if (made.target) spots.push({ start: 0, end: sheet.rows.length, target: made.target });
+    const space = (PAGE_GAP * scale) / cell.height;
+    return {
+      laid: {
+        rows: sheet.rows,
+        pictures: sheet.pictures,
+        spots,
+        // What its last row leaves blank is part of the space under it.
+        gap: Math.max(0, Math.round(sheet.height + space) - sheet.rows.length),
+      },
+      waits: stale ? typeset.stamp : null,
+    };
+  }
+}
+
+/** Kinds always drawn in cells. */
+const CELLS = new Set<Block["kind"]>(["report", "agents", "image", "html"]);
+
+/** About how many rows a block takes, until it is drawn. */
+function guess(block: Block, width: number): number {
+  const text = "text" in block ? block.text : "";
+  if (text === "") return block.kind === "tools" ? block.items.length + 2 : 2;
+  let rows = 0;
+  for (const line of text.split("\n")) rows += Math.max(0.7, Math.ceil(line.length / width) * 1.4);
+  return Math.max(2, Math.round(rows));
+}
+
+/** The space under a block drawn as a page, in CSS pixels. */
+const PAGE_GAP = 16;
+
+/** A block's rows drawn in cells. */
+function cellRows(entry: Entry, context: RenderContext, layout: string): Laid {
+  const pictures: Shown[] = [];
+  const spots: Spot[] = [];
+  const marking: RenderContext = {
+    ...context,
+    collect: (shown) => pictures.push(shown),
+    mark: (target, start, end) => spots.push({ start, end, target }),
+  };
+  const rows =
+    entry.block.kind === "assistant"
+      ? replyRows(entry, entry.block.text, marking, layout, { pictures, spots })
+      : renderBlock(entry.block, marking);
+  return { rows, pictures, spots, gap: 1 };
+}
+
+/** A block as a page's body, the code a click on it copies, and what a click anywhere else does. */
+interface Page {
+  body: string[];
+  code: { code: string; lang: string }[];
+  target?: Target;
+}
+
+/**
+ * A reply's text as far as it is whole, as T3 Code shows one that is coming:
+ * its finished paragraphs, code blocks, and list items, without a heading that
+ * nothing follows yet. What comes after may still change.
+ */
+export function wholeBlocks(text: string): string {
+  let fence = "";
+  let at = 0;
+  let end = 0;
+  let titled = false;
+  const lines = text.split("\n");
+  for (const [index, line] of lines.entries()) {
+    const complete = index < lines.length - 1;
+    const next = at + line.length + 1;
+    const item = /^\s*(?:[-*+]|\d{1,9}[.)])\s+\S/.test(line);
+    // Another item says the one before it is whole, even while it is still coming.
+    if (fence === "" && at > 0 && !titled && item) end = at;
+    if (complete) {
+      const mark = /^\s*(`{3,}(?!.*`)|~{3,})/.exec(line)?.[1];
+      if (mark && fence === "") {
+        fence = mark;
+        titled = false;
+      } else if (mark && mark[0] === fence[0] && mark.length >= fence.length) {
+        fence = "";
+        end = next;
+      } else if (fence === "" && line.trim() === "") {
+        if (!titled && at > 0) end = next;
+      } else if (fence === "") {
+        const heading = /^#{1,6}(?:\s|$)/.test(line);
+        if (heading && at > 0 && !titled) end = at;
+        titled = heading || /^ {0,3}\*\*[^*]+\*\*:?$/.test(line);
+      }
+    }
+    at = next;
+  }
+  return text.slice(0, end);
+}
+
+/** How long a reply may pause before all of it shows, whole or not. */
+const PAUSE_MS = 800;
+
+/** The page a block is drawn as, `width` CSS pixels wide; null for one drawn in cells. */
+function pageOf(block: Block, context: RenderContext, width: number, live: boolean): Page | null {
+  if ("folded" in block && block.folded && !context.details) return { body: [], code: [] };
+  const none = { code: [] };
+  switch (block.kind) {
+    case "assistant": {
+      const text = live ? wholeBlocks(block.text) : block.text;
+      if (text.trim() === "") return { body: [], code: [] };
+      if (hasFigures(block.text)) return null;
+      const { parts, code } = markup(text);
+      return { body: flow(parts), code };
+    }
+    case "plan": {
+      if (hasFigures(block.text)) return null;
+      const { parts, code } = markup(block.text);
+      const head: Part = { html: "<p><strong>Proposed plan</strong></p>", above: 0, below: 8 };
+      return { body: flow([head, ...parts]), code };
+    }
+    case "user": {
+      if (block.images?.length) return null;
+      const lines = plainText(block.text).replace(/\s+$/, "").split("\n");
+      const more = lines.length - USER_LINES;
+      const { parts, code } = markup(lines.slice(0, USER_LINES).join("\n"), true);
+      if (more > 0)
+        parts.push({ html: `<div class="m">… ${more} more lines</div>`, above: 4, below: 0 });
+      return { body: [bubbleHtml(parts, block.label ?? "")], code };
+    }
+    case "worked": {
+      if (context.details) return { body: [], code: [] };
+      const failures = block.failures ?? [];
+      const rows = workedRows(block, { ...context, marks: true, width: UNCUT }).slice(1, -1);
+      const head = `${block.text}${failures.length > 0 ? " · ctrl+x shows output" : ""}`;
+      return {
+        body: [
+          workedHtml(
+            head,
+            rows.map((row) => workRow(row)),
+            width,
+          ),
+        ],
+        ...none,
+        target: { kind: "details" },
+      };
+    }
+    case "tools":
+      if (context.details) return null;
+      return {
+        body: workBody(block, context, width, false),
+        ...none,
+        target: { kind: "details" },
+      };
+    case "thinking":
+      return { body: workBody(block, context, width, context.details === true), ...none };
+    case "notice":
+    case "decision":
+    case "summary":
+    case "result":
+    case "todos":
+      return { body: workBody(block, context, width, block.kind !== "todos"), ...none };
+    default:
+      return null;
+  }
+}
+
+/** Wider than any row, for rows a page cuts or wraps itself. */
+const UNCUT = 2000;
+
+/** A block's rows as a page's work rows. */
+function workBody(block: Block, context: RenderContext, width: number, wraps: boolean): string[] {
+  const rows = renderBlock(block, {
+    ...context,
+    marks: true,
+    width: UNCUT,
+    collect: () => {},
+    mark: () => {},
+  });
+  return workHtml(
+    rows.map((row) => workRow(row, wraps)),
+    width,
+  );
+}
+
+/** Marks for icons in rows laid out for a page, by their place; dimmed ones after them, then none. */
+const MARK = 0xf0000;
+const DIMMED = 0x100;
+const NO_ICON = 0x200;
+const ICON_NAMES = Object.keys(ICONS) as IconName[];
+
+/** A row as a page shows it: its icon from its mark, and no drawn lines to what it hangs from. */
+function workRow(row: string, wraps = false): WorkRow {
+  const mark = row.codePointAt(0) ?? 0;
+  if (mark >= MARK && mark <= MARK + NO_ICON) {
+    const text = row.slice(String.fromCodePoint(mark).length).trimStart();
+    const at = mark - MARK;
+    if (at === NO_ICON) return { inset: true, text, wraps };
+    return { icon: ICON_NAMES[at % DIMMED], dimmed: at >= DIMMED, text, wraps };
+  }
+  // oxlint-disable-next-line no-control-regex
+  const lead = /^((?:\x1b\[[\d;]*m|\s)*)([●├└│])((?:\x1b\[[\d;]*m|\s)*)/.exec(row);
+  const styles = `${lead?.[1] ?? ""}${lead?.[3] ?? ""}`.replace(/\s/g, "");
+  const text = lead ? styles + row.slice(lead[0].length) : row.trimStart();
+  return { inset: "├└│".includes(lead?.[2] ?? "-"), text, wraps };
+}
+
+/** The columns prose is set in from; in the panels look, the column is its margin. */
+function proseIndent(context: RenderContext): string {
+  return context.look ? "" : "  ";
+}
+
+/** What a row of work starts with, and what hangs under it: an icon in the panels look, else `mark`. */
+function startOf(
+  context: RenderContext,
+  name: IconName,
+  mark: string,
+  dimmed = false,
+): { mark: string; hang: string } {
+  if (context.marks) {
+    const at = MARK + ICON_NAMES.indexOf(name) + (dimmed ? DIMMED : 0);
+    return { mark: String.fromCodePoint(at), hang: String.fromCodePoint(MARK + NO_ICON) };
+  }
+  if (!context.look) return { mark: `${mark} `, hang: "  " };
+  const hang = " ".repeat(ICON_COLUMNS + 1);
+  return { mark: `${context.look.icon(name, context.collect, dimmed)} `, hang };
 }
 
 /**
@@ -438,7 +786,7 @@ function replyRows(
   into.spots.push(...base.spots);
   const tail = text.slice(base.text.length);
   const marks: { line: number; rows: number; pictures: number; spots: number }[] = [];
-  const rows = renderMarkdown(tail, context.width, "  ", {
+  const rows = renderMarkdown(tail, context.width, proseIndent(context), {
     ...markdownOptions(context, base.rows.length),
     settled: (line, at) =>
       marks.push({ line, rows: at, pictures: into.pictures.length, spots: into.spots.length }),
@@ -500,11 +848,11 @@ export function renderBlock(block: Block, context: RenderContext): string[] {
     case "assistant":
       return block.text.trim() === ""
         ? []
-        : renderMarkdown(block.text, width, "  ", markdownOptions(context, 0));
+        : renderMarkdown(block.text, width, proseIndent(context), markdownOptions(context, 0));
     case "plan":
       return [
         truncate(`${style.strong("●")} ${style.bold("Proposed plan")}`, width),
-        ...renderMarkdown(block.text, width, "  ", markdownOptions(context, 1)),
+        ...renderMarkdown(block.text, width, proseIndent(context), markdownOptions(context, 1)),
       ];
     case "tools":
       return marked(toolRows(block, context), { kind: "details" }, context);
@@ -517,7 +865,7 @@ export function renderBlock(block: Block, context: RenderContext): string[] {
     case "agents":
       return agentRows(block, context);
     case "summary":
-      return [truncate(summaryRow(block, width), width)];
+      return [truncate(summaryRow(block, width).slice(context.look ? 2 : 0), width)];
     case "decision":
       return decisionRows(block, width);
     case "image":
@@ -605,15 +953,19 @@ const WORKED_FILES = 6;
 function workedRows(block: Extract<Block, { kind: "worked" }>, context: RenderContext): string[] {
   const failures = block.failures ?? [];
   const detail = failures.length > 0 ? " · ctrl+x shows output" : "";
-  const rows = [
-    truncate(`${style.strong("●")} ${style.muted(`${block.text}${detail}`)}`, context.width),
-  ];
+  // In the panels look what the turn did heads its answer, over a line.
+  const rows = context.look
+    ? [truncate(style.muted(`${block.text}${detail} ›`), context.width)]
+    : [truncate(`${style.strong("●")} ${style.muted(`${block.text}${detail}`)}`, context.width)];
   const files = block.files.slice(0, WORKED_FILES);
   const more = block.files.length - files.length;
   failures.forEach((failure, index) => {
     const last = index === failures.length - 1 && files.length === 0 && more === 0;
     rows.push(
-      truncate(`${style.muted(last ? "└ " : "├ ")}${style.removed(`✗ ${failure}`)}`, context.width),
+      truncate(
+        `${context.look ? startOf(context, "command", "", true).mark : style.muted(last ? "└ " : "├ ")}${style.removed(context.look ? failure : `✗ ${failure}`)}`,
+        context.width,
+      ),
     );
   });
   files.forEach((file, index) => {
@@ -626,12 +978,18 @@ function workedRows(block: Extract<Block, { kind: "worked" }>, context: RenderCo
       .join(" ");
     rows.push(
       truncate(
-        `${style.muted(last ? "└ " : "├ ")}${style.text(shownPath(file.path, context.cwd))} ${counts}`,
+        `${context.look ? startOf(context, "edit", "").mark : style.muted(last ? "└ " : "├ ")}${style.text(shownPath(file.path, context.cwd))} ${counts}`,
         context.width,
       ),
     );
   });
-  if (more > 0) rows.push(style.muted(`└ ${plural(more, "more file")}`));
+  if (more > 0)
+    rows.push(
+      style.muted(
+        `${context.look ? startOf(context, "edit", "").hang : "└ "}${plural(more, "more file")}`,
+      ),
+    );
+  if (context.look) rows.push(context.look.rule(context.width, context.collect));
   return rows;
 }
 
@@ -650,11 +1008,12 @@ function thinkingRows(text: string, context: RenderContext): string[] {
   if (lines.length === 0) return [];
   const shown = context.details ? lines : lines.slice(0, THINKING_LINES);
   const more = lines.length - shown.length;
+  const first = startOf(context, "thinking", style.faint("◦"));
   const rows = shown.flatMap((line, index) =>
     wrap(
-      `${index === 0 ? style.faint("◦ ") : "  "}${style.muted(style.italic(line))}`,
+      `${index === 0 ? first.mark : first.hang}${style.muted(context.look ? line : style.italic(line))}`,
       context.width,
-      "  ",
+      first.hang,
     ),
   );
   // Collapsed, one line, cut to the width, with how much more there is.
@@ -697,6 +1056,7 @@ function markdownOptions(context: RenderContext, offset: number): MarkdownOption
   const images = new Map<string, { shown: Shown; path: string }>();
   const media = context.media;
   return {
+    ...(context.look ? { panels: { look: context.look, collect: context.collect } } : {}),
     ...(draw
       ? {
           figure: (figure: Figure, columns: number) => {
@@ -813,6 +1173,7 @@ function decisionRows(block: Extract<Block, { kind: "decision" }>, width: number
 
 function userRows(block: Extract<Block, { kind: "user" }>, context: RenderContext): string[] {
   const { width } = context;
+  if (context.look) return bubble(block, context, context.look);
   // In its own color, so what you sent stands apart from what agents wrote.
   const marker = `${style.prompt("┃")} `;
   const lines = plainText(block.text).replace(/\s+$/, "").split("\n");
@@ -839,6 +1200,41 @@ function userRows(block: Extract<Block, { kind: "user" }>, context: RenderContex
     rows.push(truncate(`${marker}${style.muted(`▣ ${oneLineText(name)}`)}`, width));
   }
   return rows;
+}
+
+/** What was sent, on a surface at the column's right, with the images sent over it. */
+function bubble(
+  block: Extract<Block, { kind: "user" }>,
+  context: RenderContext,
+  look: Look,
+): string[] {
+  const { width } = context;
+  const inner = bubbleInner(width);
+  const lines = plainText(block.text).replace(/\s+$/, "").split("\n");
+  const shown = lines.slice(0, USER_LINES);
+  const said = block.label ? [truncate(style.muted(block.label), inner)] : [];
+  said.push(...shown.flatMap((line) => wrap(inline(line), inner, "")));
+  if (lines.length > shown.length)
+    said.push(style.muted(`… ${lines.length - shown.length} more lines`));
+  const rows: string[] = [];
+  for (const path of block.images ?? []) {
+    const name = oneLineText(fileName(path));
+    const image = context.media?.graphics ? context.image?.(path) : undefined;
+    if (image && context.media) {
+      const media = { ...context.media, maxRows: Math.min(context.media.maxRows, THUMBNAIL_ROWS) };
+      const size = fit(image, inner, media);
+      context.collect?.({ picture: image, ...size });
+      context.mark?.(
+        { kind: "picture", picture: image, title: fileName(path), path },
+        rows.length,
+        rows.length + size.rows,
+      );
+      rows.push(...pictureRows(image, size, " ".repeat(Math.max(0, width - size.columns))));
+    } else said.push(style.muted(truncate(`▣ ${name}`, inner)));
+  }
+  return said.some((line) => line !== "")
+    ? [...rows, ...bubbleRows(said, width, look, context.collect)]
+    : rows;
 }
 
 /** The most rows an image sent with a message takes, as a thumbnail. */
@@ -1018,11 +1414,28 @@ export function groupSummary(items: readonly ToolItem[]): string {
     phrases.length <= 2
       ? phrases.join(" and ")
       : `${phrases.slice(0, -1).join(", ")}, and ${phrases.at(-1)}`;
-  const failed = items.filter((item) => item.status === "failed").length;
+  const failures = items.filter((item) => item.status === "failed").length;
   const capital = sentence.charAt(0).toUpperCase() + sentence.slice(1);
-  const marks = [failed > 0 ? `${failed} failed` : "", refused > 0 ? `${refused} refused` : ""];
+  const marks = [failures > 0 ? `${failures} failed` : "", refused > 0 ? `${refused} refused` : ""];
   return [capital, ...marks.filter(Boolean)].join(" · ");
 }
+
+/** Whether a call did not do what it was for. */
+function failed(item: ToolItem): boolean {
+  return item.status === "failed" || (item.kind === "command" && Boolean(item.exitCode));
+}
+
+/** The icon that marks each kind of call. */
+const ICON: Record<Category, IconName> = {
+  edit: "edit",
+  command: "command",
+  read: "read",
+  search: "search",
+  web: "web",
+  fetch: "web",
+  agent: "agent",
+  other: "tool",
+};
 
 /** A group of one is a single row; more get a sentence over a tree. */
 function toolRows(block: Extract<Block, { kind: "tools" }>, context: RenderContext): string[] {
@@ -1030,7 +1443,9 @@ function toolRows(block: Extract<Block, { kind: "tools" }>, context: RenderConte
   // A group whose only calls started agents shows nothing; the agents' rows show them.
   if (items.length === 0) return [];
   const running = isRunningGroup(block);
-  const marker = running && !context.blink ? " " : style.strong("●");
+  const dot = running && !context.blink ? " " : style.strong("●");
+  const marker = (item: ToolItem, mark: string) =>
+    startOf(context, ICON[category(item)], mark, failed(item));
   const waiting = (item: ToolItem) => block.awaiting?.includes(item.id) ?? false;
   const settled = (item: ToolItem) => block.settled || (block.cut?.includes(item.id) ?? false);
   const line = (item: ToolItem) => toolLine(item, settled(item), context.cwd, waiting(item));
@@ -1045,25 +1460,26 @@ function toolRows(block: Extract<Block, { kind: "tools" }>, context: RenderConte
     return [truncate(`${hang}${paint(last)}`, context.width)];
   };
   if (only && items.length === 1) {
-    if (context.details) return detailedItem(only, `${marker} `, "  ", context, line(only));
-    return [truncate(`${marker} ${line(only)}`, context.width), ...tail(only, "  ")];
+    const { mark, hang } = marker(only, dot);
+    if (context.details) return detailedItem(only, mark, hang, context, line(only));
+    return [truncate(`${mark}${line(only)}`, context.width), ...tail(only, hang)];
   }
   // What is still running has its own row, so it is not told as already done.
   const finished = running ? items.filter((item) => item.status !== "running") : items;
   const heading = finished.length > 0 ? groupSummary(finished) : `Running ${items.length} calls`;
-  const rows = [truncate(`${marker} ${style.muted(heading)}`, context.width)];
+  const rows = [
+    truncate(
+      `${startOf(context, ICON[category(items[0]!)], dot).mark}${style.muted(heading)}`,
+      context.width,
+    ),
+  ];
   items.forEach((item, index) => {
     const last = index === items.length - 1;
-    const branch = style.muted(last ? "└ " : "├ ");
-    if (context.details)
-      rows.push(
-        ...detailedItem(item, branch, style.muted(last ? "  " : "│ "), context, line(item)),
-      );
-    else
-      rows.push(
-        truncate(branch + line(item), context.width),
-        ...tail(item, style.muted(last ? "  " : "│ ")),
-      );
+    const own = context.look ? marker(item, "") : null;
+    const branch = own?.mark ?? style.muted(last ? "└ " : "├ ");
+    const hang = own?.hang ?? style.muted(last ? "  " : "│ ");
+    if (context.details) rows.push(...detailedItem(item, branch, hang, context, line(item)));
+    else rows.push(truncate(branch + line(item), context.width), ...tail(item, hang));
   });
   return rows;
 }
