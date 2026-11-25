@@ -17,11 +17,12 @@ export type InputEvent =
   | { type: "wheel"; delta: number }
   /**
    * A mouse button pressed, moved while held, or let go, at a cell counted
-   * from 0 at the top left; `button` is 0 for the left one, 1 middle, 2 right.
+   * from 0 at the top left; `button` is 0 for the left one, 1 middle, 2 right,
+   * 3 for none, as when it only moves.
    */
   | {
       type: "mouse";
-      action: "press" | "drag" | "release";
+      action: "press" | "drag" | "release" | "move";
       button: number;
       row: number;
       column: number;
@@ -259,7 +260,14 @@ export class InputDecoder {
       }
       events.push({
         type: "mouse",
-        action: final === "m" ? "release" : (button & 32) !== 0 ? "drag" : "press",
+        action:
+          final === "m"
+            ? "release"
+            : (button & 32) === 0
+              ? "press"
+              : (button & 3) === 3
+                ? "move"
+                : "drag",
         button: button & 3,
         row: row - 1,
         column: column - 1,
