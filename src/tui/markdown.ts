@@ -1,10 +1,12 @@
 import { stripVTControlCharacters } from "node:util";
 import { fenceFigure, type Figure } from "./figures.ts";
 import { texLines, texToUnicode } from "./math.ts";
-import { style } from "./theme.ts";
+import type { Collect, Look } from "./look.ts";
+import { onFill } from "./look.ts";
+import { chip, style, surfaces, tint } from "./theme.ts";
 import { plainText, visibleWidth, wrap } from "./text.ts";
 
-const KEYWORDS = new Set(
+export const KEYWORDS = new Set(
   (
     "as async await break case catch class const continue def default defer delete do elif else " +
     "enum export extends false finally fn for from func function go if impl import in interface " +
@@ -12,7 +14,7 @@ const KEYWORDS = new Set(
     "super switch this throw true try type typeof use var void where while with yield"
   ).split(" "),
 );
-const HASH_COMMENTS = new Set([
+export const HASH_COMMENTS = new Set([
   "sh",
   "bash",
   "zsh",
@@ -36,7 +38,7 @@ const TOKEN =
   /(\/\/.*$|#.*$|--.*$)|("(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|`(?:[^`\\]|\\.)*`?)|(\b\d[\d_.]*(?:e[+-]?\d+)?\b|\b0x[\da-f]+\b)|([A-Za-z_$][\w$]*)/gi;
 
 /** Light syntax coloring in fx's grays: keywords brighter, literals softer, comments muted. */
-function highlight(line: string, lang: string): string {
+function highlight(line: string, lang: string, panels = false): string {
   const language = lang.toLowerCase();
   if (language === "diff" || language === "patch") {
     if (line.startsWith("+") && !line.startsWith("+++")) return style.added(line);
@@ -56,7 +58,13 @@ function highlight(line: string, lang: string): string {
           : comment.startsWith("#")
             ? hashComments
             : dashComments;
-        return isComment ? style.muted(comment) : highlightRest(comment, language);
+        return isComment ? style.muted(comment) : highlightRest(comment, language, panels);
+      }
+      if (panels) {
+        const { keyword, literal: string, number: digits, name } = surfaces().syntax;
+        if (literal) return tint(string, literal);
+        if (number) return tint(digits, number);
+        return tint(KEYWORDS.has(word) ? keyword : name, word);
       }
       if (literal || number) return style.soft(match);
       if (word && KEYWORDS.has(word)) return style.text(word);
@@ -66,8 +74,8 @@ function highlight(line: string, lang: string): string {
 }
 
 /** Highlights text that looked like a comment opener but is not one in this language. */
-function highlightRest(text: string, language: string): string {
-  return text.charAt(0) + highlight(text.slice(1), language);
+function highlightRest(text: string, language: string, panels: boolean): string {
+  return text.charAt(0) + highlight(text.slice(1), language, panels);
 }
 
 /** Sets text aside behind a placeholder, as `held` keeps it, for `put` to bring back. */
@@ -96,7 +104,7 @@ function punctuation(char: string | undefined): boolean {
  * before text and a closer after it, a marker by punctuation counts only
  * beside space or punctuation, and `_` never opens or closes inside a word.
  */
-function emphasis(text: string, marker: string, paint: (body: string) => string): string {
+export function emphasis(text: string, marker: string, paint: (body: string) => string): string {
   // Most text has none of a marker; reading it a character at a time would find none.
   if (!text.includes(marker)) return text;
   const size = marker.length;
@@ -164,7 +172,7 @@ export function inline(text: string): string {
   const held = text
     .replace(/[]/g, "�")
     .replace(/(?<![\\`])(`+)(?!`)([\s\S]*?[^`])\1(?!`)/g, (_, _ticks: string, body: string) =>
-      hold(style.strong(body)),
+      hold(chip(body)),
     )
     // Math reads as Unicode text: `\(…\)`, `$$…$$` within a line, and `$…$` as
     // Pandoc reads it, so `$5 and $10` stay prices: its dollars hug the TeX,
@@ -194,10 +202,10 @@ function rule(width: number, label = ""): string {
   return style.faint(head + "─".repeat(Math.max(0, width - visibleWidth(head))));
 }
 
-type Align = "left" | "center" | "right";
+export type Align = "left" | "center" | "right";
 
 /** A table row's cells: split at pipes outside code spans, with `\|` as a literal pipe. */
-function tableCells(line: string): string[] {
+export function tableCells(line: string): string[] {
   const body = line
     .trim()
     .replace(/^\|/, "")
@@ -241,7 +249,7 @@ function tableCells(line: string): string[] {
 }
 
 /** The alignments a table's divider row sets, or null when the row is not a divider. */
-function divider(line: string): Align[] | null {
+export function divider(line: string): Align[] | null {
   const cells = tableCells(line);
   if (!cells.every((cell) => /^:?-+:?$/.test(cell))) return null;
   return cells.map((cell) =>
@@ -307,17 +315,30 @@ function tableRecords(rows: string[][], width: number, indent: string): string[]
  * A Markdown table as aligned columns under a bold header, with cells
  * wrapped inside their column when the table is wider than the screen.
  */
-function renderTable(lines: string[], aligns: Align[], width: number, indent: string): string[] {
+function renderTable(
+  lines: string[],
+  aligns: Align[],
+  width: number,
+  indent: string,
+  panels = false,
+): string[] {
   const rows = lines.map((line) => tableCells(line).map((cell) => inline(cell)));
   const columns = Math.max(aligns.length, ...rows.map((cells) => cells.length));
   const natural = Array.from({ length: columns }, (_, column) =>
     Math.max(1, ...rows.map((cells) => visibleWidth(cells[column] ?? ""))),
   );
-  const gap = style.faint(" │ ");
+  const gap = panels ? "   " : style.faint(" │ ");
   const room = width - visibleWidth(indent) - (columns - 1) * 3;
   // Too narrow for columns of a few characters, each row goes as lines of header and value.
   if (room < columns * 3 && rows.length > 1) return tableRecords(rows, width, indent);
   const widths = fitColumns(natural, room);
+  // On lines across the column, the columns share what they leave of it.
+  if (panels) {
+    const spare = Math.max(0, room - widths.reduce((sum, one) => sum + one, 0));
+    for (let column = 0; column < columns; column++)
+      widths[column] =
+        (widths[column] ?? 0) + Math.floor(spare / columns) + (column < spare % columns ? 1 : 0);
+  }
   // So too when a column would split its words, up to ten characters long, mid-word.
   const longest = Array.from({ length: columns }, (_, column) =>
     Math.max(
@@ -348,7 +369,10 @@ function renderTable(lines: string[], aligns: Align[], width: number, indent: st
             .join(gap)
             .trimEnd(),
       );
-    if (row === 0)
+    if (panels) {
+      const reach = widths.reduce((sum, one) => sum + one, (columns - 1) * 3);
+      out.push(indent + style.rule("─".repeat(reach)));
+    } else if (row === 0)
       out.push(indent + style.faint(widths.map((size) => "─".repeat(size)).join("─┼─")));
   });
   return out;
@@ -378,6 +402,8 @@ export interface MarkdownOptions {
    * before, so the text after it renders alone the same.
    */
   settled?: (line: number, rows: number) => void;
+  /** Draws code on surfaces and tables on lines, in the panels look. */
+  panels?: { look: Look; collect: Collect | undefined } | undefined;
 }
 
 /** The code blocks Markdown shows, in order, as a click on one copies it. */
@@ -414,7 +440,7 @@ function closing(line: string, close: string): [string, string] | null {
  * takes, and whether its closer has come, which it has not while it
  * streams; null when the line opens none.
  */
-function displayMath(
+export function displayMath(
   lines: string[],
   index: number,
 ): { tex: string; end: number; closed: boolean } | null {
@@ -446,7 +472,7 @@ function displayMath(
 }
 
 /** An image on a line of its own: `![alt](src)`, with an optional title. */
-const IMAGE_LINE = /^\s*!\[([^\]]*)\]\(<?([^)\s>]+)>?(?:\s+"[^"]*")?\)\s*$/;
+export const IMAGE_LINE = /^\s*!\[([^\]]*)\]\(<?([^)\s>]+)>?(?:\s+"[^"]*")?\)\s*$/;
 
 /**
  * Renders Markdown the way fx prints assistant replies: indented prose, faint
@@ -462,9 +488,14 @@ export function renderMarkdown(
 ): string[] {
   const rows: string[] = [];
   const inner = Math.max(10, width - visibleWidth(indent));
+  const { panels } = options;
   let fence: { marker: string; lang: string; start: number; lines: string[] } | null = null;
   let blank = true;
   const closeFence = () => {
+    if (fence && panels)
+      rows.push(
+        indent + panels.look.cap("bottom", panels.look.codeSurface(), inner, panels.collect),
+      );
     if (fence)
       options.region?.({
         kind: "code",
@@ -503,7 +534,7 @@ export function renderMarkdown(
       index += 2;
       while (index < lines.length && /^\s*\|/.test(lines[index] ?? "")) body.push(lines[index++]!);
       index--;
-      rows.push(...renderTable(body, aligns, width, indent));
+      rows.push(...renderTable(body, aligns, width, indent, panels !== undefined));
       blank = false;
       continue;
     }
@@ -511,12 +542,25 @@ export function renderMarkdown(
       // A fence closes on a line of only its marker's character, at least as many.
       const close = /^\s*(`{3,}|~{3,})\s*$/.exec(raw)?.[1];
       if (close && close[0] === fence.marker[0] && close.length >= fence.marker.length) {
-        push(indent + rule(inner), indent);
+        if (!panels) push(indent + rule(inner), indent);
         closeFence();
         continue;
       }
       fence.lines.push(raw);
-      push(indent + highlight(raw.replace(/\t/g, "  "), fence.lang), indent, true);
+      const code = raw.replace(/\t/g, "  ");
+      if (panels) {
+        const { look, collect } = panels;
+        const surface = look.codeSurface();
+        // Inside the surface's sides, and as far in as its language is.
+        for (const row of wrap(highlight(code, fence.lang, true), inner - 4, "", true))
+          rows.push(
+            indent +
+              (surface.border
+                ? look.body(` ${row}`, surface, inner, collect)
+                : onFill(`  ${row}`, inner, surface.fill)),
+          );
+        blank = false;
+      } else push(indent + highlight(code, fence.lang), indent, true);
       continue;
     }
     // A backtick fence's info string has no backticks, so inline ```code``` opens none.
@@ -568,7 +612,13 @@ export function renderMarkdown(
         start: rows.length,
         lines: [],
       };
-      push(indent + rule(inner, fence.lang), indent);
+      if (panels) {
+        if (!blank && rows.at(-1) !== "") rows.push("");
+        fence.start = rows.length;
+        rows.push(
+          ...panels.look.codeHead(fence.lang, inner, panels.collect).map((row) => indent + row),
+        );
+      } else push(indent + rule(inner, fence.lang), indent);
       continue;
     }
     if (raw.trim() === "") {
@@ -609,7 +659,11 @@ export function renderMarkdown(
     }
     const quote = /^\s*>\s?(.*)$/.exec(raw);
     if (quote) {
-      push(`${indent + style.faint("│")} ${style.soft(inline(quote[1] ?? ""))}`, `${indent}  `);
+      const bar = panels ? tint(surfaces().quote, "▎") : style.faint("│");
+      push(
+        `${indent + bar} ${style.soft(inline(quote[1] ?? ""))}`,
+        panels ? `${indent + bar} ` : `${indent}  `,
+      );
       continue;
     }
     push(indent + inline(raw.trim()), indent);
