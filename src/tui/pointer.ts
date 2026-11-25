@@ -6,7 +6,8 @@ import { PLACEHOLDER, PLACEHOLDER_LIMIT, fit, pictureRows, type MediaContext } f
 import type { PageEvent } from "../protocol.ts";
 import type { Picture, Shown } from "./images.ts";
 import { CLICK_MS, type InputEvent, type Key } from "./input.ts";
-import { style } from "./theme.ts";
+import { rgb, style, surfaces } from "./theme.ts";
+import { linesOn, paintCells, textRow } from "./typeset.ts";
 import { charWidth, columnsText, selectColumns, spread, truncate, visibleWidth } from "./text.ts";
 
 /** A place in the transcript: a row counted from its first, and a column on screen. */
@@ -29,9 +30,17 @@ export function ordered(selection: Selection): [Point, Point] {
   return forward ? [anchor, head] : [head, anchor];
 }
 
-/** Whether a row shows a picture, whose cells are no text to select. */
+/** A picture's cell, with the marks that say which part of it shows. */
+const PICTURE_CELL = new RegExp(`${PLACEHOLDER}\\p{M}*`, "gu");
+
+/** Whether a row is a picture's, whose cells are no text to select; one with an icon is text. */
 function showsPicture(row: string): boolean {
-  return row.includes(PLACEHOLDER);
+  return row.includes(PLACEHOLDER) && withoutPictures(row).trim() === "";
+}
+
+/** A row's text, a picture's cells in it as spaces: each with the marks that place it. */
+function withoutPictures(row: string): string {
+  return columnsText(row, 0).replace(PICTURE_CELL, " ");
 }
 
 /**
@@ -47,9 +56,25 @@ export function paintSelection(
   const [start, end] = ordered(selection);
   return rows.map((row, index) => {
     const at = top + index;
-    if (at < start.row || at > end.row || showsPicture(row)) return row;
+    // A page's lines are taller than rows: each is filled on all it is on, where its own row is selected.
+    const lines = linesOn(row);
+    if (lines) {
+      const fill = rgb(surfaces().selection);
+      const spans = lines.flatMap((line) => {
+        const own = at + line.own;
+        if (own < start.row || own > end.row) return [];
+        const from = own === start.row ? Math.max(line.from, start.column) : line.from;
+        const to = own === end.row ? Math.min(line.to, end.column + 1) : line.to;
+        return from < to ? [{ from, to }] : [];
+      });
+      if (spans.length === 0) return row;
+      const left = Math.min(...spans.map((span) => span.from));
+      return paintCells(row, left, Math.max(...spans.map((span) => span.to)), fill);
+    }
+    if (at < start.row || at > end.row) return row;
     const from = at === start.row ? start.column : 0;
     const to = at === end.row ? end.column + 1 : width;
+    if (showsPicture(row)) return row;
     return selectColumns(row, from, Math.min(width, to));
   });
 }
@@ -61,19 +86,34 @@ export function paintSelection(
  */
 export function selectedText(lines: readonly string[], selection: Selection): string {
   const [start, end] = ordered(selection);
-  const parts: { text: string; whole: boolean }[] = [];
+  const parts: { text: string; whole: boolean; wraps?: boolean }[] = [];
   for (const [index, line] of lines.entries()) {
-    if (showsPicture(line)) continue;
     const from = index === 0 ? start.column : 0;
     const to = index === lines.length - 1 ? end.column + 1 : Infinity;
-    parts.push({ text: columnsText(line, from, to).replace(/\s+$/, ""), whole: from === 0 });
+    const set = textRow(line);
+    if (set) {
+      const text = set.cells.slice(from, to).join("");
+      // A page's text has no indent but its own, which code keeps.
+      if (text.trim() !== "")
+        parts.push({
+          text: text.replace(/\s+$/, ""),
+          whole: false,
+          wraps: set.wraps && to === Infinity,
+        });
+      continue;
+    }
+    if (showsPicture(line)) continue;
+    parts.push({
+      text: columnsText(line, from, to).replace(PICTURE_CELL, " ").replace(/\s+$/, ""),
+      whole: from === 0,
+    });
   }
   // A message the user wrote is marked on each row; what they wrote is under it.
-  const rows = lines.filter((line) => !showsPicture(line)).map((line) => columnsText(line, 0));
+  const rows = lines.filter((line) => !showsPicture(line)).map(withoutPictures);
   if (rows.length > 0 && rows.every((row) => row.trim() === "" || /^\s*┃ ?/.test(row)))
     for (const part of parts) part.text = part.text.replace(/^(\s*)┃ ?/, "$1");
   // A first row taken from partway in still has its indent, which the others share.
-  const first = columnsText(lines[0] ?? "", 0);
+  const first = withoutPictures(lines[0] ?? "");
   const indents = parts
     .filter(({ text }) => text.trim() !== "")
     .map(({ text, whole }) =>
@@ -81,24 +121,31 @@ export function selectedText(lines: readonly string[], selection: Selection): st
     );
   const common = indents.length > 0 ? Math.min(...indents) : 0;
   return parts
-    .map(({ text, whole }) =>
-      whole ? text.slice(Math.min(common, text.length - text.trimStart().length)) : text,
-    )
-    .join("\n")
+    .map(({ text, whole, wraps }, index) => {
+      const after = index === parts.length - 1 ? "" : wraps ? " " : "\n";
+      const body = whole
+        ? text.slice(Math.min(common, text.length - text.trimStart().length))
+        : text;
+      return body + after;
+    })
+    .join("")
     .replace(/^\n+|\n+$/g, "");
 }
 
 /** The columns of the word under `column` in a row, as a double click takes: a run of anything but spaces. */
 export function wordAt(row: string, column: number): { from: number; to: number } | null {
-  const cells: string[] = [];
-  for (const char of columnsText(row, 0)) {
+  const set = textRow(row)?.cells;
+  const cells: (string | null)[] = set ? [...set] : [];
+  for (const char of set ? "" : columnsText(row, 0)) {
     const width = charWidth(char.codePointAt(0) ?? 0);
     // A mark goes with the character before it; a wide character takes two cells.
     if (width === 0 && cells.length > 0) cells[cells.length - 1] += char;
     else cells.push(char);
     if (width === 2) cells.push(char);
   }
-  const blank = (at: number) => /^\s?$/.test(cells[at] ?? "");
+  // A page's cell under a wide character has no text of its own, and is no gap.
+  const blank = (at: number) =>
+    set ? (cells[at] ?? " ").trim() === "" && cells[at] !== "" : /^\s?$/.test(cells[at] ?? "");
   if (blank(column)) return null;
   let from = column;
   let to = column;
